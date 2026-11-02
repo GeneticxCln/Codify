@@ -132,6 +132,13 @@ ISOLATION_MODES = ("required", "auto", "off")
 # everything else under it, while leaving the absolute paths a build tool may print unchanged.
 JAIL_HOME = str(Path.home().resolve())
 
+# A tmpfs is RAM, and bwrap's default for each mount is half of it. A jailed test does not need 16 GiB of
+# scratch: a runaway writer should meet a full filesystem before the kernel meets an OOM killer. `--size`
+# applies to the next `--tmpfs` only, so each mount carries its own bound.
+JAIL_RUN_TMPFS_BYTES = 64 * 1024**2
+JAIL_TMP_TMPFS_BYTES = 1024 * 1024**2
+JAIL_HOME_TMPFS_BYTES = 2 * 1024**3
+
 MAX_KEPT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4
 _READ_CHUNK = 65536
 
@@ -177,12 +184,13 @@ def _jail_base(bwrap: str, network: bool) -> list[str]:
         # read-only bind still lets a process connect to one. A fresh tmpfs leaves the
         # path present and empty; a command that needs a system socket has to be given
         # it explicitly, which nothing here does.
-        "--tmpfs", "/run",
+        "--size", str(JAIL_RUN_TMPFS_BYTES), "--tmpfs", "/run",
         # `/tmp` was the other half of the same hole: X11's socket, a Chrome
         # SingletonSocket, tmux and ssh-agent all live there, and a read-only bind still
         # permits `connect`. A fresh tmpfs also gives a test suite a writable scratch
         # directory instead of pushing `tempfile` into the workspace, the only writable
         # bind.
+        "--size", str(JAIL_TMP_TMPFS_BYTES),
         "--tmpfs", "/tmp",  # noqa: S108 — a mount destination, not a temp file the engine makes:
         # the host's /tmp is replaced by an empty tmpfs so its pathname sockets cannot be reached.
         "--dev", "/dev", "--proc", "/proc",
@@ -534,7 +542,10 @@ class SandboxService:
                 "this command ran unjailed"
             )
         args = _jail_base(bwrap, network)
-        args += ["--tmpfs", JAIL_HOME, "--setenv", "HOME", JAIL_HOME]
+        args += [
+            "--size", str(JAIL_HOME_TMPFS_BYTES),
+            "--tmpfs", JAIL_HOME, "--setenv", "HOME", JAIL_HOME,
+        ]
         state = home.codify_home().resolve()
         real_home = Path.home().resolve()
         # `~/.codify` is already covered by the home tmpfs; a redirected CODIFY_HOME elsewhere is not.

@@ -170,30 +170,21 @@ class TestAFileThatMovedWhileTheFixerAnswered(FileMovedCase):
 
         self.assertEqual(edited, (self.root / "a.py").read_text(encoding="utf-8"))
 
-    async def test_case_distinct_files_do_not_share_a_version_key(self) -> None:
-        """`A.py` and `a.py` are two files where the filesystem says so.
+    async def test_case_distinct_paths_do_not_share_a_version_key(self) -> None:
+        """`A.py` and `a.py` are two keys wherever the filesystem allows two files.
 
         The keys used to be case-folded, so a version recorded for `A.py` guarded a
         write to `a.py` and the write was refused as "moved" when nothing had moved.
+        This asks the key table directly, with neither path existing — exactly how a
+        create proposal is recorded — so it means the same thing on a case-insensitive
+        filesystem as on a case-sensitive one, and it never skips.
         """
         self.build()
         fs = FileSystemService(str(self.root))
-        upper = self.root / "A.py"
-        lower = self.root / "a.py"
-        upper.write_text("upper = 1\n", encoding="utf-8")
-        lower.write_text("lower = 1\n", encoding="utf-8")
-        if upper.read_text(encoding="utf-8") == lower.read_text(encoding="utf-8"):
-            self.skipTest("this filesystem is case-insensitive, so A.py and a.py are one file")
-        versions: dict[str, str | None] = {"A.py": version_of(upper.read_bytes())}
 
-        fs.apply(
-            [{"path": "a.py", "action": "update", "content": "lower = 2\n"}],
-            dry_run=False,
-            expected_versions=versions,
-        )
+        keys = fs._version_keys({"A.py": "upper", "a.py": "lower"})
 
-        self.assertEqual("lower = 2\n", lower.read_text(encoding="utf-8"))
-        self.assertEqual("upper = 1\n", upper.read_text(encoding="utf-8"))
+        self.assertEqual(2, len(keys), "the two spellings collapsed into one version key")
 
 
 if __name__ == "__main__":

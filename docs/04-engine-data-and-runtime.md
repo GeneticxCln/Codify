@@ -1896,11 +1896,12 @@ may edit the working tree; it cannot install a post-commit hook or name a `core.
 commit would later run outside the jail with the person's real home. A fresh workspace has no metadata to bind, so a
 jailed `git init` could still plant `filter.<name>.clean` or `gpg.program`: the engine's own git forces
 `--no-gpg-sign` (with `-c commit.gpgsign=false -c gpg.program=`) on every command, and refuses to commit a repository
-whose config names a clean, smudge or process filter, naming the key rather than running the program. `/run` and `/tmp`
-are fresh tmpfs: the host's session bus, gnupg, keyring, PipeWire, Wayland, X11, tmux and ssh-agent sockets all live at
-those paths, a read-only `/` still leaves them connectable, and `--unshare-net` does not hide them, so they are absent
-rather than merely unwritable. A pid namespace and an IPC namespace of the jail's own mean a test cannot signal, trace
-or kill the engine, the shell or the desktop. A fresh tmpfs is also mounted over the person's
+whose config names a clean, smudge or process filter and refuses it before the command runs (see "Read-only git").
+`/run` and `/tmp` are fresh, size-bounded tmpfs (`--size`: 64 MiB and 1 GiB): the host's session bus, gnupg, keyring,
+PipeWire, Wayland, X11, tmux and ssh-agent sockets all live at those paths, a read-only `/` still leaves them
+connectable, and `--unshare-net` does not hide them, so they are absent rather than merely unwritable, and a runaway
+writer meets a full filesystem instead of consuming RAM until the kernel's OOM killer acts. A pid namespace and an IPC namespace of the jail's own mean a test cannot signal, trace
+or kill the engine, the shell or the desktop. A fresh tmpfs (2 GiB) is also mounted over the person's
 real home at that same path, so `~/.ssh`, `~/.codify` and everything beside them are absent rather than unreadable,
 while an absolute path a build tool prints still reads the same. The executable's own directory, a virtualenv root and the `PATH` entries under the home are rebound read-only,
 because a fresh home would otherwise hide the venv the command was started from; nothing else of the home is visible. A
@@ -1996,7 +1997,8 @@ rewrites the index), `GIT_TERMINAL_PROMPT=0` and `GIT_CEILING_DIRECTORIES` set t
 so a workspace that is not itself a repository cannot read the history of one above it. Every command
 `GitService` starts goes through that same prefix, including `status`, `add` and `commit`, so
 `--no-verify` is not the only thing standing between a repository hook and the engine: `core.hooksPath`
-points at the null device and no hook runs, post-commit included. No provider key or boot token is in
+points at the null device and no hook runs, post-commit included. The one exception is `GitService.push`, the person's
+own action: it runs without that prefix, so a repository's `pre-push` hook runs exactly as it would in their terminal. No provider key or boot token is in
 that environment: `GitService.read_only` used to inherit the engine's whole one. The conductor's door is
 also **bounded**: 60 seconds (`GitService.read_only_timeout_s`), after which the command's whole
 process group is stopped and the model gets a sentence saying so.
@@ -2005,10 +2007,14 @@ process group is stopped and the model gets a sentence saying so.
 `.gitattributes`) is trusted, exactly as it is when a developer runs git in that repository. A
 `core.fsmonitor`, `diff.external` or textconv driver there is neutralised above because those are the
 ones plain `status`/`diff`/`log -p` start; a `filter.<name>.clean`, `.smudge` or `.process` command
-has no equivalent switch, so `GitService.commit_with_reason` reads the repository config and refuses a
-commit that names one, naming the key. A person's *global* config is theirs and still applies — that
+has no equivalent switch, so `GitService._run_bytes` — the one door every git command uses — reads the
+repository config before a command that would run one (`status`, `diff`, `add`, `commit`) and refuses
+it, naming the key. `status` matters as much as `commit`: it compares the worktree through the same
+filter, and the UI polls it with no user action, so guarding only the commit left the header refresh
+as another way to start the program. A person's *global* config is theirs and still applies — that
 is where a legitimate LFS filter belongs — but a workspace whose `.git/config` came from someone else
-is not made safe for a command the person runs themselves; this refusal covers the engine's own commit.
+is not made safe for a command the person runs themselves; this refusal covers the engine's own
+`status`, `diff`, `add` and `commit`, not the person's push (which runs no filter and keeps its hook).
 
 Proven by `tests/test_sandbox_read_only_git.py`, which runs real git against a real repository and
 asserts on the repository afterwards; its property tests are the ones that would have caught the class
@@ -2489,6 +2495,7 @@ surface to surface is `engine/surfaces.py`:
 | `GET /surfaces/state` | window | `{attached, inflight, timeout_s, surfaces: {name: [ops]}}` |
 | `GET /surfaces/next?wait=<s>` | window | the oldest question not yet handed out, `{id, surface, op, workspace_id, args}`, or `{"id": null}` after `wait` seconds (0–60) |
 | `POST /surfaces/answer` | window | `{id, ok, result? \| error?}` **`extra: forbid`** (the browser bridge's answer ignores extras; this one does not); `{"accepted": false}` for an id nobody issued, a second answer, or one after the timeout |
+| `POST /surfaces/window` | window | `{machines: [workspace_id]}` **`extra: forbid`** — which workspaces have a machine open; a menu input that grants nothing, not a poll |
 
 - **An operation is a fixed string from a table**, `{surface: {op: Op}}`, and an `Op` pairs the shape of what the engine may
   send with the shape of what may come back. A model cannot name an op. Adding a surface is one table entry and its

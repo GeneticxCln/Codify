@@ -29,6 +29,13 @@ from engine.sandbox import (
 )
 from engine.spawn_guard import guarded_argv, guarded_env
 
+# Commands that can start a repository's clean/smudge filter themselves. `git status` and
+# `git diff` compare the worktree through `filter.<name>.clean`, so the UI's status poll
+# was another door onto the same program a commit was already refused for; `git add` and
+# `git commit` reach it on their way into the index. Every one of them is checked at the
+# class's one git door before it runs (`_run_bytes`).
+_FILTER_RUNNING_SUBCOMMANDS = frozenset({"status", "diff", "add", "commit"})
+
 
 def sanitize_remote_url(url: str) -> str:
     """The URL a person can see, with credentials embedded in it removed.
@@ -112,7 +119,7 @@ class GitService:
         git_dir = Path(root_path).resolve() / ".git"
         return git_dir.exists()
 
-    def status(self, root_path: str) -> dict[str, Any]:
+    def status(self, root_path: str, *, check_filters: bool = True) -> dict[str, Any]:
         """The repository's branch and working-tree state, for the panel header.
 
         Reads `git status --porcelain=v2 --branch` through the same hardening as a model's read-only git
@@ -125,6 +132,10 @@ class GitService:
         the tree is dirty, and how far it has drifted from its upstream. `ahead`/`behind` stay 0 when there is
         no upstream — git reports no `branch.ab` line at all, and inventing one would be a claim about a
         comparison that never happened.
+
+        `check_filters=False` is the person's push reading the branch it is about to push: a push does not
+        compare the worktree through a filter, so a repository whose local config names one must not lose
+        its Push button to a guard the push never needed.
         """
         clean: dict[str, Any] = {
             "branch": None, "detached": False, "dirty": False,
@@ -139,6 +150,7 @@ class GitService:
                 env=git_readonly.runner_env(os.environ, root_path),
                 timeout=self.read_only_timeout_s,
                 capped=True,
+                check_filters=check_filters,
             )
         except subprocess.TimeoutExpired:
             return {
@@ -261,7 +273,7 @@ class GitService:
         root = str(Path(root_path).resolve())
         if not self.is_git_repo(root):
             return {"ok": False, "reason": "This workspace is not a git repository."}
-        state = self.status(root)
+        state = self.status(root, check_filters=False)
         branch = state.get("branch")
         if not branch:
             return {"ok": False, "reason": state.get("reason") or "There is no branch to push."}
@@ -283,6 +295,11 @@ class GitService:
                 env=self._push_env(),
                 timeout=self.push_timeout_s,
                 capped=True,
+                # A push is the person's action, not the engine's. It is the one git command
+                # whose hooks are the point: this repo's own pre-push hook is `make ci`, and
+                # a terminal push runs it. The hardening that disables hooks is for the
+                # engine's own commands, so it is skipped here (and only here).
+                hardened=False,
             )
         except subprocess.TimeoutExpired:
             return {
@@ -309,21 +326,25 @@ class GitService:
             "sha": self.head_sha(root), "reason": None,
         }
 
-    def _untrusted_config_reason(self, cwd: str) -> str | None:
-        """Why this repository's config cannot be trusted for a commit, or None.
+    def _untrusted_config_reason(self, cwd: str, command: str) -> str | None:
+        """Why this repository's config cannot be trusted to run `command`, or None.
 
         `.git` is bound read-only inside the jail only when it existed at launch: a jailed
         command can still `git init` a fresh workspace and write a `filter.<name>.clean`
         (or `.smudge`/`.process`) into the new config. `git add` then starts that program
         outside the jail, with the engine's environment. `runner_args` disables hooks and
         `core.fsmonitor`, and `--no-gpg-sign` neutralises a planted signing program, but
-        filters have no equivalent switch, so a repository that names one is refused a
-        Codify commit instead. The person can commit it themselves, or remove the setting.
+        filters have no equivalent switch, so a command that would run one is refused
+        instead. The check is in `_run_bytes`, the one door every git command goes through,
+        because `status` and `diff` compare the worktree through the same filter: refusing
+        only the commit left the UI's status poll as another way to start it. The person
+        can run the command themselves, or remove the setting.
         """
         try:
             res = self._run_text(
                 ["config", "--local", "--includes", "--list"],
                 cwd=cwd, env=self._workspace_env(), timeout=self.read_only_timeout_s,
+                check_filters=False,
             )
         except subprocess.TimeoutExpired:
             return "the repository's config did not finish reading in time, so Codify cannot check what its filters run"
@@ -339,8 +360,8 @@ class GitService:
             setting = key.rsplit(".", 1)[-1].lower()
             if key.lower().startswith("filter.") and setting in {"clean", "smudge", "process"}:
                 return (
-                    f"this repository's config names a git filter Codify will not run ({key}). "
-                    "The commit was not made: commit it yourself, or remove that setting and try again."
+                    f"this repository's config names a git filter Codify will not run ({key}), "
+                    f"so it did not run `git {command}`. Run it yourself, or remove that setting and try again."
                 )
         return None
 
@@ -354,6 +375,8 @@ class GitService:
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
         capped: bool = False,
+        hardened: bool = True,
+        check_filters: bool = True,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run one git command under the guard, capturing raw output.
 
@@ -375,8 +398,21 @@ class GitService:
         clean filter or a large index, so it gets one; a model-chosen read does too,
         and on expiry the command's *whole group* is stopped — the guard alone dying
         would leave git running, holding the pipes — and `TimeoutExpired` is raised.
+
+        A command that can start a repository filter is refused before it runs when the
+        repository's own config names one. This is here, not in `commit`, because the UI's
+        `status` poll runs `git status`, which compares the worktree through the same
+        `filter.<name>.clean`; guarding only the commit left that door open. `hardened=False`
+        is for the person's own push: its `pre-push` hook is theirs to run, exactly as it is
+        in their terminal, and a push runs no filter.
         """
-        args = git_readonly.runner_args(args)
+        if check_filters and args and args[0] in _FILTER_RUNNING_SUBCOMMANDS and self.is_git_repo(cwd):
+            reason = self._untrusted_config_reason(cwd, args[0])
+            if reason is not None:
+                return subprocess.CompletedProcess(
+                    [self._git_bin, *args], 1, b"", reason.encode("utf-8"),
+                )
+        args = git_readonly.runner_args(args) if hardened else ["--no-pager", *args]
         proc = subprocess.Popen(  # noqa: S603 — git's own binary and an argv list already validated by the caller; guarded, no shell
             guarded_argv([self._git_bin, *args]),
             cwd=cwd,
@@ -431,6 +467,8 @@ class GitService:
         env: Mapping[str, str] | None = None,
         timeout: float | None = None,
         capped: bool = False,
+        hardened: bool = True,
+        check_filters: bool = True,
     ) -> subprocess.CompletedProcess[str]:
         """Same, as text — deliberately decoding UTF-8 with replacement.
 
@@ -439,7 +477,10 @@ class GitService:
         `UnicodeDecodeError` out of a read. Git writes paths as UTF-8 bytes (that is
         also why `_tracked_files` reads them itself).
         """
-        res = self._run_bytes(args, cwd=cwd, env=env, timeout=timeout, capped=capped)
+        res = self._run_bytes(
+            args, cwd=cwd, env=env, timeout=timeout, capped=capped,
+            hardened=hardened, check_filters=check_filters,
+        )
         return subprocess.CompletedProcess(
             res.args,
             res.returncode,
@@ -623,7 +664,7 @@ class GitService:
         # jail. Unlike a hook or `core.fsmonitor`, it has no switch that disables it, so a repo
         # that names one is refused rather than run. This check is before `add`, which is the
         # command that would start it.
-        reason = self._untrusted_config_reason(cwd)
+        reason = self._untrusted_config_reason(cwd, "commit")
         if reason is not None:
             return None, reason
 

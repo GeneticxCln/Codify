@@ -73,6 +73,11 @@ still running when the budget ends is cancelled and awaited, and the model keeps
 success is cached by `(base_url, name, digest)`, so a re-pulled model is asked again and an unchanged one
 never is; a failure is **not** cached, so a slow first look does not hide the number for good.
 
+The same answer carries `capabilities`: `completion` is Ollama's word for a model that can generate, so
+`nomic-embed-text` (`["embedding"]`) is listed with `supports_chat: false` rather than left unknown. That is a
+fact the provider gave, not a guess from the name, and it is what makes the picker's "not chat" ordering and
+role repair work for a local model. An answer with no capability list stays `null`.
+
 **A model's maximum is not what a request gets.** Ollama gives a request the `num_ctx` it is asked for, not the
 model's trained window. `GET /models` therefore also carries a `conductor` block, computed on every request
 and never cached: `{provider, model, source, num_ctx}`: the model the conversation runs on when nothing is

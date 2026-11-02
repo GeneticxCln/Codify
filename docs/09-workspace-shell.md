@@ -322,7 +322,8 @@ Settled decisions:
   answer, not an error banner. A branch also gets **Push & PR**:
   `POST /workspaces/{id}/push` runs `git push` to `origin` as the person; the
   answer reports `origin` with any embedded credentials stripped, because the
-  header renders it. **Open PR page** is GitHub's compare form for the pushed branch, opened in the
+  header renders it. Like a terminal push, it runs the repository's `pre-push`
+  hook; the engine's hook-disabling hardening is for its own commands only. **Open PR page** is GitHub's compare form for the pushed branch, opened in the
   app's own browser pane — never the system opener (`markdownLinks.ts`). A
   refused push prints git's sentence under the branch; a repository with no
   branch gets no button. The CI line (`GET /workspaces/{id}/ci`) is absent until

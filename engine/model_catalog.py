@@ -47,7 +47,7 @@ MAX_MODELS_PER_PROVIDER = 500
 OLLAMA_SHOW_BUDGET_S = 3.0
 OLLAMA_SHOW_CONCURRENCY = 8
 OLLAMA_SHOW_MAX_MODELS = 64
-_OLLAMA_WINDOW_CACHE_MAX = 2048
+_OLLAMA_SHOW_CACHE_MAX = 2048
 # The most a context length is believed to be. A provider that reports more is reporting something else.
 MAX_CONTEXT_TOKENS = 100_000_000
 DEFAULT_TTL_S = 60.0
@@ -177,7 +177,9 @@ def _entry(
 
 # (base_url, model, digest) -> the context length `/api/show` reported. Only answers are kept: a model whose
 # show failed is asked again next time, inside the same budget. Bounded, and emptied when it fills.
-_OLLAMA_WINDOWS: dict[tuple[str, str, str], int] = {}
+# (endpoint, model, digest) -> (context length, whether it can chat), both from `/api/show`.
+# Only answers are kept: a failed or timed-out request is asked again on the next refresh.
+_OLLAMA_SHOW: dict[tuple[str, str, str], tuple[int | None, bool | None]] = {}
 
 
 def _ollama_context_from(show: Any) -> int | None:
@@ -193,17 +195,37 @@ def _ollama_context_from(show: Any) -> int | None:
     return None
 
 
-async def _ollama_windows(
+def _ollama_chat_from(show: Any) -> bool | None:
+    """Whether an `/api/show` answer says the model can hold a conversation.
+
+    Ollama lists capabilities as words: `completion` is generation, and an answer that names
+    only `embedding` is a model that cannot answer a chat turn. An answer with no list is
+    unknown, not a guess — the same rule the rest of this module follows.
+    """
+    capabilities = show.get("capabilities") if isinstance(show, dict) else None
+    if not isinstance(capabilities, list):
+        return None
+    names = {name for name in capabilities if isinstance(name, str)}
+    if not names:
+        return None
+    return "completion" in names
+
+
+async def _ollama_show(
     base_url: str, client: httpx.AsyncClient, rows: list[dict[str, Any]]
-) -> dict[str, int]:
-    """Model name -> context length, for as many of `rows` as Ollama answers in time. Never raises.
+) -> dict[str, tuple[int | None, bool | None]]:
+    """Model name -> (context length, chat-capable), for as many of `rows` as Ollama answers in time.
+
+    `/api/tags` carries neither fact, and `/api/show` carries both: `model_info` has the
+    context length and `capabilities` says whether the model can generate at all. Asking it
+    here is what keeps an embedding model from being offered as a chat model.
 
     The newest `OLLAMA_SHOW_MAX_MODELS` are asked about (a library of hundreds is not asked hundreds of
     times on every refresh), `OLLAMA_SHOW_CONCURRENCY` at a time, and whatever has not answered when
-    `OLLAMA_SHOW_BUDGET_S` runs out is cancelled and simply has no number. Answers are remembered by
+    `OLLAMA_SHOW_BUDGET_S` runs out is cancelled and simply has no answer. Answers are remembered by
     `(endpoint, name, digest)`, so a refresh asks only about what is new or changed.
     """
-    found: dict[str, int] = {}
+    found: dict[str, tuple[int | None, bool | None]] = {}
     wanted: list[tuple[str, tuple[str, str, str]]] = []
     ranked = sorted(rows, key=lambda m: -(_iso_day(m.get("modified_at")) or 0.0))
     for row in ranked[:OLLAMA_SHOW_MAX_MODELS]:
@@ -211,8 +233,8 @@ async def _ollama_windows(
         if not isinstance(name, str) or not name:
             continue
         key = (base_url, name, str(row.get("digest") or row.get("modified_at") or ""))
-        if key in _OLLAMA_WINDOWS:
-            found[name] = _OLLAMA_WINDOWS[key]
+        if key in _OLLAMA_SHOW:
+            found[name] = _OLLAMA_SHOW[key]
         else:
             wanted.append((name, key))
     if not wanted:
@@ -220,12 +242,13 @@ async def _ollama_windows(
 
     gate = asyncio.Semaphore(OLLAMA_SHOW_CONCURRENCY)
 
-    async def ask(name: str) -> int | None:
+    async def ask(name: str) -> tuple[int | None, bool | None] | None:
         async with gate:
             try:
                 reply = await client.post(f"{base_url}/api/show", json={"model": name, "name": name})
                 reply.raise_for_status()
-                return _ollama_context_from(reply.json())
+                show = reply.json()
+                return (_ollama_context_from(show), _ollama_chat_from(show))
             except Exception:
                 return None
 
@@ -244,13 +267,13 @@ async def _ollama_windows(
         task = tasks[key]
         if task.cancelled() or not task.done() or task.exception() is not None:
             continue
-        window = task.result()
-        if window is None:
+        answer = task.result()
+        if answer is None:
             continue
-        found[name] = window
-        if len(_OLLAMA_WINDOWS) >= _OLLAMA_WINDOW_CACHE_MAX:
-            _OLLAMA_WINDOWS.clear()
-        _OLLAMA_WINDOWS[key] = window
+        found[name] = answer
+        if len(_OLLAMA_SHOW) >= _OLLAMA_SHOW_CACHE_MAX:
+            _OLLAMA_SHOW.clear()
+        _OLLAMA_SHOW[key] = answer
     return found
 
 
@@ -259,24 +282,27 @@ async def discover_ollama(target: ProviderTarget, client: httpx.AsyncClient) -> 
     r = await client.get(f"{base_url}/api/tags")
     r.raise_for_status()
     rows = [m for m in (r.json().get("models") or [])[:MAX_MODELS_PER_PROVIDER] if isinstance(m, dict)]
-    windows = await _ollama_windows(base_url, client, rows)
+    shown = await _ollama_show(base_url, client, rows)
     out = []
     for m in rows:
         name = m.get("name")
         if not name:
             continue
         size = (m.get("details") or {}).get("parameter_size")
+        context_tokens, supports_chat = shown.get(name, (None, None))
         out.append(
             _entry(
                 model_id=name,
                 description=f"Local Ollama model ({size})" if size else "Local Ollama model",
                 created=_iso_day(m.get("modified_at")),
-                # /api/tags reports no capability information. Leaving this
-                # unknown is the honest answer — claiming True here would mark
-                # an embedding model as chat-capable, which is exactly the kind
-                # of invented metadata this module exists to avoid.
-                supports_chat=None,
-                context_tokens=windows.get(name),
+                # /api/tags reports no capability information; /api/show does, and it is
+                # already fetched for the context length. `completion` is the provider's
+                # own word for a model that can answer a chat turn, so an embedding model
+                # is flagged rather than offered as the default. An answer with no list
+                # stays unknown, never True: that is the difference between a fact the
+                # provider gave and metadata this module invented.
+                supports_chat=supports_chat,
+                context_tokens=context_tokens,
             )
         )
     return out

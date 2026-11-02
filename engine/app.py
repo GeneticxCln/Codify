@@ -687,8 +687,9 @@ app.add_middleware(
 # command-line client need not, and are admitted by the token alone. A frame is never large: clients
 # send one auth message and otherwise frames are ignored, so 64 KiB is already generous.
 WS_MAX_MESSAGE_BYTES = 64 * 1024
-# How many sockets may be waiting on an auth frame at once. Each wait is bounded at five seconds, but
-# an unbounded number of them is still a descriptor and coroutine flood; this is the ceiling.
+# How many first-frame authentications may be checking their token at once. A socket takes no slot
+# until its frame has arrived, so a flood of silent sockets never holds one and cannot push the UI out;
+# this bounds the token comparisons a flood of frames can make the engine do simultaneously.
 WS_MAX_PENDING = 16
 WS_AUTH_TIMEOUT_S = 5.0
 WS_ORIGIN_REFUSED = 4403

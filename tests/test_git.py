@@ -205,6 +205,46 @@ class TestGitService(GitTestBase):
         self.assertIn("filter.evil.clean", reason)
         self.assertFalse(marker.exists(), "the planted clean filter ran outside the jail")
 
+    def test_a_repo_local_filter_is_refused_on_the_status_poll(self) -> None:
+        """The UI polls `git status` with no user action, and status compares the worktree
+        through `filter.<name>.clean`. The guard used to sit in the commit only, so a
+        filter planted by a jailed `git init` ran on the next header refresh.
+        """
+        marker = self.root / "status-filter-ran.txt"
+        clean = self.root / "clean.sh"
+        clean.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat\n", encoding="utf-8")
+        clean.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "filter.evil.clean", f"sh {clean}"],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        self.write(".gitattributes", "*.txt filter=evil\n")
+        self.write("note.txt", "content\n")
+
+        state = self.git.status(str(self.root))
+
+        self.assertIsNone(state["branch"], "status reported a branch it did not read")
+        self.assertIn("filter.evil.clean", state["reason"] or "")
+        self.assertFalse(marker.exists(), "the planted clean filter ran outside the jail")
+
+    def test_a_repo_local_filter_is_refused_on_a_model_diff(self) -> None:
+        """The conductor's `git_history` door is the same door, so it is the same refusal."""
+        marker = self.root / "diff-filter-ran.txt"
+        clean = self.root / "clean.sh"
+        clean.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat\n", encoding="utf-8")
+        clean.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "filter.evil.clean", f"sh {clean}"],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        self.write(".gitattributes", "*.txt filter=evil\n")
+        self.write("note.txt", "content\n")
+
+        answer = self.git.read_only(str(self.root), ["diff"])
+
+        self.assertIn("filter.evil.clean", answer)
+        self.assertFalse(marker.exists(), "the planted clean filter ran outside the jail")
+
     def test_a_planted_signing_program_is_not_run(self) -> None:
         marker = self.root / "gpg-ran.txt"
         fake = self.root / "fake-gpg"

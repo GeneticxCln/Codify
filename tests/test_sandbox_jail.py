@@ -29,6 +29,9 @@ from engine.app import _clean_engine_string
 from engine.db import connect
 from engine.models import GoalCreate, WorkspaceCreate
 from engine.sandbox import (
+    JAIL_HOME,
+    JAIL_HOME_TMPFS_BYTES,
+    JAIL_TMP_TMPFS_BYTES,
     CommandNotAllowed,
     SandboxService,
     bwrap_can_jail,
@@ -61,6 +64,7 @@ def _probe_script(
 
     return f"""
 import os
+import shutil
 import socket
 import tempfile
 from pathlib import Path
@@ -96,6 +100,8 @@ def net():
 check("NET", net)
 print("HOME=" + os.environ.get("HOME", ""))
 print("TMP=" + tempfile.gettempdir())
+print("TMP_TOTAL=" + str(shutil.disk_usage(tempfile.gettempdir()).total))
+print("HOME_TOTAL=" + str(shutil.disk_usage(os.environ["HOME"]).total))
 """
 
 
@@ -185,6 +191,15 @@ class SandboxJailTests(unittest.TestCase):
         self.assertIn("TMP_SOCKET=no", output, "the jail connected to a host unix socket in /tmp")
         self.assertIn("TMP_WRITE=yes", output, "the jail's /tmp was not writable")
         self.assertIn("TMP=/tmp", output, "the jail moved tempfile's directory out of /tmp")
+        totals = dict(line.split("=", 1) for line in output.splitlines() if "=" in line)
+        self.assertLessEqual(
+            int(totals["TMP_TOTAL"]), JAIL_TMP_TMPFS_BYTES,
+            "/tmp is RAM with no bound; a runaway test can exhaust memory",
+        )
+        self.assertLessEqual(
+            int(totals["HOME_TOTAL"]), JAIL_HOME_TMPFS_BYTES,
+            "the fresh home is RAM with no bound",
+        )
         self.assertEqual("bwrap", result["isolation"])
         self.assertIsNone(result["isolation_warning"])
         self.assertFalse(self.outside.exists())
@@ -241,6 +256,14 @@ class SandboxJailTests(unittest.TestCase):
         pairs = list(zip(jail, jail[1:], strict=False))
         self.assertIn(("--tmpfs", "/run"), pairs)
         self.assertIn(("--tmpfs", "/tmp"), pairs)
+        for dest in ("/run", "/tmp"):
+            at = jail.index(dest)
+            self.assertEqual("--tmpfs", jail[at - 1], f"{dest} is not a tmpfs destination")
+            self.assertEqual("--size", jail[at - 3], f"{dest}'s tmpfs has no size")
+        self.assertEqual(str(JAIL_TMP_TMPFS_BYTES), jail[jail.index("/tmp") - 2])
+        home_at = jail.index(JAIL_HOME)
+        self.assertEqual("--size", jail[home_at - 3], "the fresh home has no size")
+        self.assertEqual(str(JAIL_HOME_TMPFS_BYTES), jail[home_at - 2])
         self.assertIn("--unshare-pid", jail, "the jail shared the host's PIDs")
         self.assertIn("--unshare-ipc", jail, "the jail shared the host's IPC namespace")
 

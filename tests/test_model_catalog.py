@@ -20,7 +20,7 @@ import httpx
 
 from engine.db import connect
 from engine.model_catalog import (
-    _OLLAMA_WINDOWS,
+    _OLLAMA_SHOW,
     ModelCatalogService,
     ProviderTarget,
     _sorted_models,
@@ -34,7 +34,7 @@ from engine.services import AgentRegistryService
 
 def reset_ollama_windows() -> None:
     """Forget what Ollama said about its models: the cache is module memory that every test in the process shares."""
-    _OLLAMA_WINDOWS.clear()
+    _OLLAMA_SHOW.clear()
 
 
 class _StubKeychain:
@@ -775,6 +775,27 @@ class TestOllamaContextLength(unittest.IsolatedAsyncioTestCase):
             {"llama": 131072, "qwen": 32768, "none": None, "bad": None, "plain": 4096},
         )
 
+    async def test_the_show_answer_says_whether_a_model_can_chat(self) -> None:
+        """`/api/tags` has no capability list; `/api/show` does, and it is already being fetched.
+
+        Without it `nomic-embed-text` (`capabilities: ["embedding"]`) sorts first and is
+        offered as the default chat model, while the picker's "not chat" ordering and
+        role repair both depend on a fact the engine never read.
+        """
+        shows = {
+            "nomic-embed-text:latest": {"capabilities": ["embedding"]},
+            "qwen3:8b": {"capabilities": ["completion", "tools", "thinking"]},
+            "unreported": {"model_info": {}},
+        }
+        client = self._client([{"name": n, "digest": n} for n in shows], lambda n: shows[n])
+        result = await self._discover(client)
+
+        self.assertTrue(result.ok, result.error)
+        self.assertEqual(
+            {m["id"]: m["supports_chat"] for m in result.models},
+            {"nomic-embed-text:latest": False, "qwen3:8b": True, "unreported": None},
+        )
+
     async def test_a_show_that_fails_costs_the_number_and_never_the_list(self) -> None:
         for answer in (404, 500, {"model_info": "nonsense"}, {}):
             reset_ollama_windows()
@@ -802,13 +823,13 @@ class TestOllamaContextLength(unittest.IsolatedAsyncioTestCase):
         # is still running until the loop next visits it, and closing the client (which yields) hides that.
         from unittest import mock
 
-        from engine.model_catalog import _ollama_windows
+        from engine.model_catalog import _ollama_show
 
         rows = [{"name": f"m{i}", "digest": str(i)} for i in range(4)]
         client = self._client(rows, {"model_info": {"a.context_length": 8192}}, delay=5.0)
         with mock.patch("engine.model_catalog.OLLAMA_SHOW_BUDGET_S", 0.1):
             async with client:
-                found = await _ollama_windows("http://127.0.0.1:11434", client, rows)
+                found = await _ollama_show("http://127.0.0.1:11434", client, rows)
                 self.assertEqual(self.flying, 0, "a request past the budget was cancelled but not awaited")
         self.assertEqual(found, {})
 

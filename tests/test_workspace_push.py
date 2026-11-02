@@ -139,6 +139,43 @@ class TestPushService(unittest.TestCase):
             git(remote, "rev-parse", "refs/heads/main").stdout.strip(),
         )
 
+    def test_a_push_runs_the_repositorys_pre_push_hook(self) -> None:
+        """Push is the person's action, so its hook is the point, not a hazard.
+
+        The hook-disabling hardening that protects the engine's own git commands used to
+        sit in the one door every command shares, so the button silently skipped a
+        pre-push hook that would block the same push in a terminal.
+        """
+        remote = self.root / "remote.git"
+        git(self.root, "init", "-q", "--bare", str(remote))
+        local = _repo(self.root / "local", remote=remote)
+        marker = local / "hook-ran.txt"
+        hook = local / ".git" / "hooks" / "pre-push"
+        hook.write_text(
+            "#!/bin/sh\n"
+            f"touch '{marker}'\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        hook.chmod(0o755)
+
+        answer = self.service.push(str(local))
+
+        self.assertIs(False, answer["ok"], "a pre-push hook that refuses did not block the push")
+        self.assertTrue(marker.exists(), "the Push button skipped the repository's pre-push hook")
+
+    def test_a_repository_filter_does_not_block_the_persons_push(self) -> None:
+        """A push runs no filter, so the commit guard must not take the button away."""
+        remote = self.root / "remote.git"
+        git(self.root, "init", "-q", "--bare", str(remote))
+        local = _repo(self.root / "local", remote=remote)
+        git(local, "config", "filter.evil.clean", "sh -c 'exit 1'")
+        (local / ".gitattributes").write_text("*.txt filter=evil\n", encoding="utf-8")
+
+        answer = self.service.push(str(local))
+
+        self.assertIs(True, answer["ok"], answer["reason"])
+
     def test_the_answer_does_not_echo_a_credential_in_the_remote(self) -> None:
         done = subprocess.CompletedProcess([], 0, "", "")
         with patch.object(GitService, "is_git_repo", return_value=True), \

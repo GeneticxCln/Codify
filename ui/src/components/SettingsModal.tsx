@@ -404,7 +404,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       : tab === "sessions"
                         ? "How a long thread is remembered: automatic rolling summaries, and how many recent turns stay verbatim."
                       : tab === "mcp"
-                        ? "Remote HTTPS servers you admit and probe. No model can call their tools yet."
+                        ? "Remote HTTPS servers you admit and probe. The conductor can call their Read tools; Act tools need a goal that is running."
                       : tab === "audio"
                         ? "The microphone, dictation into the prompt, and answers read aloud — through the speech providers you choose."
                         : "Each role's model, endpoint, temperature, and prompt. Roles run in the order of the pipeline."}
