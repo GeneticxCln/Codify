@@ -111,7 +111,7 @@ make hooks
 | Hook | Runs | Why |
 |---|---|---|
 | `pre-commit` | `make lint typecheck` | seconds, so the obvious failure lands while the change is still in your hands — it checks the working tree, so pre-push remains the real proof |
-| `pre-push` | `make ci`, then `make check-history` | the whole gate on the tip, then the commits under it. Ordered that way because a red tip is the cheaper thing to be told about and the per-commit sweep is minutes |
+| `pre-push` | `make ci`, then `make check-history` | the whole gate on the tip, then the commits under it. Ordered that way because a red tip is the cheaper thing to be told about and the per-commit sweep is minutes. It drops git's `GIT_DIR` and its siblings first, because git hands a hook the repository it started from and, from a linked worktree, that is the worktree's own git directory |
 
 Both are versioned in `.githooks/` (`core.hooksPath` is the whole install, `git config
 --unset core.hooksPath` the whole uninstall), so they work on a fresh clone instead of
@@ -241,7 +241,9 @@ component where the component lives.
 **Never touch the developer's real state.** Tests run hermetically via
 `tests/hermetic.py`; an isolated engine moves *both* the database and the
 credentials with `CODIFY_HOME` and disables the OS keychain (see
-`engine/home.py`). If your change needs state, put it under `CODIFY_HOME`.
+`engine/home.py`). If your change needs state, put it under `CODIFY_HOME`. The same
+holds for git: the suite forgets `GIT_DIR` and the other variables that name a repository
+(`hermetic.drop_inherited_repository`), so a test's `git` can only mean the repository it made.
 
 **`CLAUDE.md` is a distillation, not a second source of truth.** It is the
 agent-facing version of this file and `docs/00`–`21`, and it is deliberately

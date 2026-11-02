@@ -56,6 +56,8 @@ The token is created once per state directory and persisted at `<state dir>/boot
 
 The UI holds the token **in memory** when it runs under the desktop shell: it asks the shell for the engine's port and token on every health probe (`codify_get_engine_info`), so nothing needs it at rest, and a copy in the webview's `localStorage` would be a second, less protected home for a credential whose file is `0600`. An older build's stored copy is deleted on load. Only the standalone browser preview, which has no shell to ask, still keeps a pasted token in `localStorage` (`ui/src/api.ts`, `StaleAuthBanner`).
 
+**The webview's `connect-src` (`src-tauri/tauri.conf.json`).** It names `127.0.0.1` with any port, plus the dev server's one fixed port (`localhost:5173`, for hot reload) and nothing else local. The engine's port cannot be named: it is chosen at launch and changes when the engine restarts, so a script that ran in the webview could reach any loopback port, and the boot token is what protects the engine on the one that matters. That is an accepted limit, not an oversight, and a second layer holds it: `script-src 'self'` and a markdown renderer with no `innerHTML` mean nothing an outsider writes becomes a script there. `localhost:*` was removed because the UI never uses that name for the engine (`tests/test_tauri_csp.py`).
+
 ### 1.4 Retained from v1
 
 - Command allowlist in `SandboxService` — additionally scoped by who asks and when: the verifier's proposed commands and the conductor's `run_command` / `verify` moves reach it in `test` mode, never the fixer's, planner's or critic's raw output, and the conductor's only once the goal is approved (see the accepted risk below). The librarian's requests reach it in `read_only` mode.

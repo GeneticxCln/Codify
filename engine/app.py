@@ -696,8 +696,16 @@ WS_MAX_MESSAGE_BYTES = 64 * 1024
 # this bounds the token comparisons a flood of frames can make the engine do simultaneously.
 WS_MAX_PENDING = 16
 WS_AUTH_TIMEOUT_S = 5.0
+# How many sockets may be waiting for a first frame at once, silent ones included. A silent socket takes no
+# *pending* slot (above), so this is a different bound: the descriptors a flood can hold for the auth wait.
+# At the bound the OLDEST waiting socket is closed to make room for the new one, never the new one refused:
+# refusing would hand a local flood the same lockout the pending cap was built to avoid, whereas the UI's
+# own socket sends its frame within moments of connecting and so leaves the waiting set long before it is
+# the oldest in it.
+WS_MAX_WAITING = 256
 WS_ORIGIN_REFUSED = 4403
 WS_TOO_MANY_PENDING = 4429
+WS_WAIT_SHED = 4408
 
 
 @app.exception_handler(ApiError)
@@ -3541,7 +3549,8 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
     and is decremented on every road out, including a disconnect during the check.
 
     Returns True with the socket accepted and authenticated. On False the socket has already been
-    accepted and closed with the reason (4401 bad token, 4403 foreign Origin, 4429 over the cap).
+    accepted and closed with the reason (4401 bad token, 4403 foreign Origin, 4429 over the cap, 4408 shed
+    as the longest-waiting of more than `WS_MAX_WAITING` sockets that had not yet sent a frame).
     """
     state = websocket.app.state
     expected_token = getattr(state, "token", None) or BOOT_TOKEN
@@ -3558,11 +3567,25 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
         await websocket.accept()
         return True
     await websocket.accept()
+    waiting: dict[int, WebSocket] | None = getattr(state, "ws_waiting", None)
+    if waiting is None:
+        waiting = {}
+        state.ws_waiting = waiting
+    key = id(websocket)
+    waiting[key] = websocket
+    shed: list[WebSocket] = []
+    while len(waiting) > WS_MAX_WAITING:
+        # `dict` keeps insertion order, so the first key is the socket that has waited longest.
+        shed.append(waiting.pop(next(iter(waiting))))
+    for oldest in shed:
+        await _close_quietly(oldest, WS_WAIT_SHED)
     try:
         msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_S)
     except Exception:
         await _close_quietly(websocket, 4401)
         return False
+    finally:
+        waiting.pop(key, None)
     # A silent socket used to take a slot before its first frame, so sixteen of them
     # held every slot for the whole auth wait and the UI — which has to authenticate
     # in a first frame, because a browser cannot set an Upgrade header — got 4429.

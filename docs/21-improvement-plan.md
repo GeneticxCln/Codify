@@ -56,7 +56,9 @@ quote byte-identical; a byte cap in `tests/test_claude_md_contracts.py`; this do
   the change from the packet alone?), *readiness* (paths, symbols and tests exist).
 - Deep mode is inside `_critic`: two single-shot model lenses (zoom-out, comprehension) with no command rounds; readiness
   is a deterministic engine check with no model call; then the existing critic runs once with the report appended as
-  independent findings. **The critic still decides.** A lens that fails is recorded `not_run` and not retried, so a
+  independent findings. A finding's text is a model's words about a diff, and the diff is the one input an outsider writes, so every field is
+  collapsed to one visible line (invisible characters removed, line breaks included) before it can reach a prompt, and the critic is told the
+  text is drawn from the diff and addresses nobody. **The critic still decides.** A lens that fails is recorded `not_run` and not retried, so a
   failure cannot raise the cost; if all fail, the standard single call runs and the event says so.
 - Cost, stated as it is: typically 3 model calls per step, at most 5 (two lenses plus the critic's own three rounds).
 - New events `review_lens` and `review_report` join `EventType` and `docs/04`.

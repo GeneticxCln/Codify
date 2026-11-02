@@ -79,6 +79,8 @@ class HookTestBase(unittest.TestCase):
         self._script(
             path / "make",
             f'printf "%s\\n" "$*" >> "{self.make_log}"\n'
+            # What git handed the hook, as `make` (and so the gate's tests) would see it.
+            f'printf "%s\\n" "GIT_DIR=${{GIT_DIR-unset}}" >> "{self.root / "make.env"}"\n'
             # STUB_MAKE_FAIL names one target to refuse, so a test can say "the
             # tip is green and the history is not" without two stub binaries.
             'if [ -n "${STUB_MAKE_FAIL:-}" ] && [ "$*" = "${STUB_MAKE_FAIL}" ]; then exit 1; fi\n'
@@ -93,7 +95,13 @@ class HookTestBase(unittest.TestCase):
         path.chmod(0o700)
 
     def run_hook(
-        self, name: str, stdin: str = "", *, make_status: int = 0, make_fail: str = ""
+        self,
+        name: str,
+        stdin: str = "",
+        *,
+        make_status: int = 0,
+        make_fail: str = "",
+        extra_env: dict[str, str] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Run one of the hooks the way git does: stdin carries the refs, the exit
         status decides. `make_status` is what the stub `make` exits with;
@@ -103,6 +111,7 @@ class HookTestBase(unittest.TestCase):
             "HOME": str(self.root),
             "STUB_MAKE_STATUS": str(make_status),
             "STUB_MAKE_FAIL": make_fail,
+            **(extra_env or {}),
         }
         return subprocess.run(
             [str(self.root / ".githooks" / name)],
@@ -147,6 +156,22 @@ class TestPrePushHook(HookTestBase):
         )
         self.assertEqual(0, result.returncode, result.stderr)
         self.assertEqual(["ci", "check-history"], self.asked_make())
+
+    def test_the_gate_does_not_inherit_the_repository_git_started_the_hook_from(self) -> None:
+        """From a linked worktree git runs the hook with `GIT_DIR=<main>/.git/worktrees/<name>`.
+
+        The gate's tests run `git` in throwaway repos, and an inherited GIT_DIR sends each of those to
+        the pusher's repository: 36 failures and 44 errors, only for a push made from a worktree.
+        """
+        result = self.run_hook(
+            "pre-push",
+            self.push_line("refs/heads/topic", REAL_SHA, "refs/heads/topic", NULL_SHA),
+            extra_env={"GIT_DIR": "/somewhere/.git/worktrees/topic", "GIT_INDEX_FILE": "/somewhere/index"},
+        )
+        self.assertEqual(0, result.returncode, result.stderr)
+        self.assertEqual(["ci", "check-history"], self.asked_make())
+        seen = (self.root / "make.env").read_text().split()
+        self.assertEqual(["GIT_DIR=unset"] * 2, seen, "make was started with git's GIT_DIR still set")
 
     def test_a_push_of_head_onto_a_branch_is_gated(self) -> None:
         """The regression this suite exists for.

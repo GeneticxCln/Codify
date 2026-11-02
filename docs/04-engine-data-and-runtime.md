@@ -2165,7 +2165,7 @@ all: the cap (`WS_MAX_PENDING`, 16) counts only sockets whose frame has arrived 
 holds it for one token comparison. A silent socket is closed `4401` when the wait expires and cannot keep the UI out —
 the UI authenticates with `{"type":"auth"}` as its first frame, because a browser cannot set an `Upgrade` header. A
 socket that presents the boot token on the Upgrade authenticates immediately; one whose frame arrives while 16 checks
-are in flight is closed `4429` (`tests/test_ws_hardening.py`). uvicorn's `ws_max_size` is 64 KiB, so a frame larger than any auth message is closed
+are in flight is closed `4429` (`tests/test_ws_hardening.py`). The descriptors a silent flood can hold are bounded another way: at most `WS_MAX_WAITING` (256) sockets may be waiting for a first frame, and past that the *longest-waiting* one is closed `4408` to make room — never the new socket refused, which would hand a local flood the lockout the pending cap avoids. The UI's own socket sends its frame within moments, so it leaves the waiting set long before it is the oldest. uvicorn's `ws_max_size` is 64 KiB, so a frame larger than any auth message is closed
 `1009` before a handler sees it (`tests/test_ws_hardening.py`). A legitimate stream is unchanged, and the
 isolation guarantees are still the ones `tests/stream_isolation.py` states.
 
