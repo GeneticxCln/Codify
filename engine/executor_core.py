@@ -32,6 +32,7 @@ from engine.webview_bridge import WebviewBridge
 
 if TYPE_CHECKING:
     from engine.mcp import McpService
+    from engine.notes import NotesService
     from engine.services import SettingsService
     from engine.trace import TraceService
 
@@ -192,6 +193,9 @@ class _ExecutorCore:
         # test that builds the executor by hand gets none, which is the same state as an
         # engine where the person has admitted nothing: the menu offers no MCP tool.
         self.mcp: McpService | None = None
+        # The notes a person keeps for every project (`engine/notes.py`). None, like `mcp`, is the state of an
+        # engine with none: the menu offers no `read_notes`.
+        self.notes: NotesService | None = None
         # One driver per goal: start, retry, and apply each spawn a driver
         # loop, and two loops on one goal re-run the same steps concurrently.
         self._drivers: set[str] = set()

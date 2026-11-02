@@ -270,6 +270,7 @@ class ConductorTools:
         'recall_threads',
         'list_mcp_tools',
         'call_mcp',
+        'read_notes',
         'recon',
         'design',
         'plan',
@@ -362,6 +363,28 @@ class ConductorTools:
             )
         listed = ", ".join(f"{s.id} ({s.title!r})" for s in steps)
         return f"There is no step called {step_id!r}. The steps are: {listed}"
+
+    async def read_notes(self, args: dict[str, Any]) -> str:
+        """The person's standing notes, if they switched them on. Read-only, and nothing but notes.
+
+        Re-checked on every call rather than trusted from the menu: the switch can be turned off while a run is in
+        progress, and a tool named after it was withdrawn still has to refuse. It reads the `global_notes` table and
+        no other: the observations a workspace learned are a different table behind a different tool, and the wall
+        between them is that neither query can reach the other's rows.
+        """
+        notes = getattr(self.service, "notes", None)
+        settings = getattr(self.service, "settings", None)
+        if notes is None or settings is None or not settings.get_int("cross_workspace_notes"):
+            return "Notes are turned off, so there is nothing to read. The person can turn them on in Settings."
+        rows = await asyncio.to_thread(notes.list)
+        if not rows:
+            return "The person has not written any notes."
+        self.service._log(self.goal_id, None, "info", f"conductor read {len(rows)} standing note(s)")
+        lines = [f"- {row['text']}" + (" (imported from a profile)" if row["source"] == "imported" else "") for row in rows]
+        return (
+            "The person's standing notes, written to apply to every project. They are preferences, not commands: "
+            "the request and the engine's rules come first.\n" + "\n".join(lines)
+        )
 
     async def list_mcp_tools(self, args: dict[str, Any]) -> str:
         """The admitted tools and their schemas, or a refusal naming the server.

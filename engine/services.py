@@ -174,6 +174,10 @@ class SettingsService:
         # keeps failing, a goal paused for hours, a health review that has gone stale. It reads rows the engine
         # already holds, makes no model call and starts no turn; it only fills the inbox. On by default for that
         # reason, and a person can turn it off.
+        # Whether the notes a person keeps for every project (`engine/notes.py`) are offered to the conductor. Off
+        # unless asked for: it is the one setting that lets what was written for one project reach another, so a
+        # fresh install keeps every workspace to itself.
+        "cross_workspace_notes": (0, lambda v: 1 if v == 1 else 0),
         "suggestions": (1, lambda v: 1 if v else 0),
         # Whether it may also ask GitHub for the workspace's current checks (a red CI run). Off unless asked for,
         # because this is the one detector that contacts another machine without a button being pressed: the

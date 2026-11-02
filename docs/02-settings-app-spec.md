@@ -169,6 +169,14 @@ detector that contacts another machine without a button being pressed, so the ca
 workspace's own `origin` and HEAD commit to `api.github.com`, no credential, at most every thirty minutes, for a workspace
 that did something that day. `POST /goals` and `POST /conversations/{id}/turns` refuse a body that carries any of them.
 
+### 3.0c Notes and the profile file
+
+Two person-only features with an API and a command line, and **no Settings screen yet** (the CLI is their surface:
+`codify-cli notes` and `codify-cli profile`, `docs/09` §10.23). **`cross_workspace_notes`** (default off) is the switch
+that lets the standing notes (`docs/10` §8) reach a run; it is not written by a profile and `PUT /settings/engine` is its
+only door. The profile (`docs/09` §10.24) is exported and imported through `GET /profile/export` and
+`POST /profile/import`. A screen for either would be a thin card over these routes, in the style of §3.0a; it is not built.
+
 ### 3.0b The fail-closed gate switch
 
 `LayaRequiredToggle.tsx` sits in the gate card and writes `laya_required`. Off by default, because

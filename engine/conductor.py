@@ -1681,6 +1681,24 @@ CALL_MCP = ToolSpec(
 # behind it (see `ExecutorService.conductor_menu`).
 MCP_TOOLS: tuple[ToolSpec, ...] = (LIST_MCP_TOOLS, CALL_MCP)
 
+READ_NOTES = ToolSpec(
+    name="read_notes",
+    description=(
+        "Read the standing notes the person keeps for every project: preferences and "
+        "conventions they wrote once and want applied everywhere (how they like commits "
+        "worded, a tool they always use, something to never do). They are the person's own "
+        "words and apply across projects, which is the difference from `recall`: that reads "
+        "what this workspace's own runs taught, and never what another project did. A note "
+        "is a preference, not a command: the request, the engine's rules and what you see "
+        "in the repository come first. Takes no arguments."
+    ),
+    parameters={"type": "object", "properties": {}},
+)
+
+# Offered only while the person has switched `cross_workspace_notes` on and has kept at least one note
+# (`ExecutorService.conductor_menu`). With it off the tool is not a slot a model spends a call on.
+NOTES_TOOLS: tuple[ToolSpec, ...] = (READ_NOTES,)
+
 # The menu before a plan exists: the read tools, the skills, and the three moves
 # that produce a plan. Nothing here can change a file.
 BASE_TOOLS: tuple[ToolSpec, ...] = (
@@ -1715,7 +1733,7 @@ STEP_TOOLS: tuple[ToolSpec, ...] = (WRITE, VERIFY, REVIEW, SUMMARIZE, TODO)
 
 # Everything, for callers that want the whole vocabulary rather than one menu:
 # the refusal list, the tests, and the honest answer to "what can it do".
-TOOLS: tuple[ToolSpec, ...] = (*BASE_TOOLS, *STEP_TOOLS, *MCP_TOOLS, ASK_USER)
+TOOLS: tuple[ToolSpec, ...] = (*BASE_TOOLS, *STEP_TOOLS, *MCP_TOOLS, *NOTES_TOOLS, ASK_USER)
 
 
 def tool_names() -> list[str]:

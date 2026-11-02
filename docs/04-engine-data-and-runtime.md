@@ -538,6 +538,15 @@ CREATE TABLE suggestions (
 
 CREATE INDEX idx_suggestions_open ON suggestions(workspace_id, status, updated_at DESC);
 
+-- Notes a person keeps for every project (engine/notes.py, docs/10 §8). Not tied to a workspace, and not the
+-- observations table: those never leave their workspace. Read only by the `read_notes` tool, only while
+-- `cross_workspace_notes` is on. `source` is 'person' or 'imported' (a profile brought it).
+CREATE TABLE global_notes (
+  id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'person',
+  created_at REAL NOT NULL
+);
 
 -- Per-workspace skill switches (docs/02 §3.2): disabled names only, so a
 -- fresh workspace and a re-enabled skill are both "no row". The cascade takes
@@ -617,6 +626,11 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/suggestions/{id}/snooze` | `{hours}` 1–168, default 24, extra=forbid | `Suggestion`. 409 `illegal_status` if it is not open |
 | `POST` | `/suggestions/{id}/dismiss` | — | `Suggestion`. 409 `illegal_status` if it is not open |
 | `POST` | `/suggestions/{id}/accept` | `{goal_id}` extra=forbid | `Suggestion` — records the turn a person already made from the offer; **creates nothing**. 409 `goal_not_in_workspace` / `goal_predates_suggestion`. A turn comes only from `POST /conversations/{id}/turns` (`00` §6.8) |
+| `GET` | `/settings/notes` | — | `{notes: [{id, text, source, created_at}], enabled, max_notes}` — the standing notes (`10` §8). `enabled` is the `cross_workspace_notes` switch |
+| `POST` | `/settings/notes` | `{text}` extra=forbid | the note. 422 `invalid_note` (empty, or over 500 characters), 409 `note_exists`, 409 `too_many_notes` (50) |
+| `DELETE` | `/settings/notes/{id}` | — | 204. 404 `unknown_note` |
+| `GET` | `/profile/export?workspace_id=&memory=&notes=` | `memory` and `notes` default false | the profile document (`09` §10.24): `{format: "codify-profile", version: 1, settings, roles, skills, memory, notes, left_out}`. Skills and memory come from `workspace_id`; `memory=true` without one is 422 `workspace_required`. No key, no address, no authority setting |
+| `POST` | `/profile/import` | `{profile, workspace_id?, apply: {settings, roles, skills, memory, notes}}` extra=forbid all the way down; `memory` and `notes` default false | `{applied: {settings, roles, skills, memory, notes}, skipped: [{what, reason}]}`. A file naming a `base_url`, a key, an unknown field, an unknown version or an oversized list is a 422 and **nothing is applied**. Never overwrites a skill, a memory subject or a note |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |

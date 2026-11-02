@@ -185,6 +185,12 @@ off disk or received over the bridge — so its containment is an allow-list, no
   implementation in `recall` would be a second answer to one question, and they would eventually disagree.
   It is computed over every scanned row, not just the matches, because the `fix_retry` that proves
   recovery is evidence and not itself a match.
+- **Opening a profile cannot widen the engine, and standing notes cannot carry a workspace's memory out.** A profile
+  (`docs/09` §10.24) is a file a person may be sent, so the import is an allowlist: tuning settings, role model choices and
+  skills only. It never sets network, browser, web, isolation, audio, checkpoint or CI switches, never a `base_url`, and a
+  role on a custom provider is skipped, because an address decides where code is sent. Skills reach the single creator door
+  (`docs/00` §6.9) and never replace a file. Standing notes (`docs/10` §8) are a separate table behind a separate tool, off by
+  default; `recall` cannot return one and `read_notes` cannot return an observation.
 - **The thread grain (`recall_threads`) reads a coarser unit on purpose.** It returns thread names,
   the workspace's recent asks (goal descriptions, clipped in the query), and run-outcome counts —
   never transcript bodies, never `turn_history`'s replies, never another workspace's threads (the

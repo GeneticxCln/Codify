@@ -394,3 +394,57 @@ new advisory fails until it is fixed or deliberately recorded.
   person swaps it. Replacing a file that is currently executing is a thing AppImageUpdate does with
   the runtime's cooperation, and doing it here would mean this app writing over the binary it is
   running from.
+
+## 7. Cross-platform: a spike, and what it found
+
+**Status: a spike, not a commitment.** The question was what a macOS or Windows build would have to replace. This is
+the inventory, read from the code on 2026-11-02, and a decision at the end. Nothing here changes what the engine or the
+window does today. "Linux only" in §6 is the current fact; this section says *which parts* make it so.
+
+### 7.1 What ties Codify to Linux
+
+| Part | Where | What it relies on | Elsewhere |
+|---|---|---|---|
+| **The command sandbox** | `engine/sandbox.py` (`bwrap` at `:523`, probe at `:226`), `engine/capabilities.py:137` | bubblewrap: user and mount namespaces, a read-only root, no network | **Not portable.** The jail is invariant 6's second layer. macOS has Seatbelt (`sandbox-exec`, deprecated) and no mount namespaces; Windows has nothing equivalent short of a container or WSL. `validate_argv` still holds, but "the filesystem is read-only except the workspace" would have to be re-earned per OS. |
+| **The machine tab's jail and overlay** | `src-tauri/src/machine.rs`, `machine/layer.rs`, `machine/guard.rs` | `bwrap`, `unshare`, an unprivileged overlay mount with `userxattr` (`layer.rs:41`) | **Not portable.** The project is the lower layer of an overlay that is never written. There is no unprivileged overlay on macOS or Windows. |
+| **The embedded browser pane** | `src-tauri/src/browser/` (`mod.rs`, `page_layer.rs`), `lib.rs`; `gtk = 0.18` in `Cargo.toml` | GTK 3 and WebKitGTK through wry: each page is a `gtk::Fixed` inside a `gtk::Overlay` the crate owns | **Rewrite.** wry builds child webviews differently on macOS (WKWebView) and Windows (WebView2). The layering that keeps a page under the DOM overlays is written against GTK widgets. |
+| **Microphone capture** | `engine/speech.py` (`pw-record`, `pw-dump`) | PipeWire's command-line tools, and the session's sound server socket | **Replace.** CoreAudio or WASAPI through a library, or the webview's own `getUserMedia` (which was rejected on purpose: audio is recorded in the engine, not the page). |
+| **Process teardown** | `engine/sandbox.py:746-799`, `engine/spawn_guard.py`, `engine/library.py:368`, `engine/app.py:1368` | `start_new_session`, `os.killpg`, `os.getpgid`, `prctl(PR_SET_PDEATHSIG)` (`spawn_guard.py:175`) | **Port.** POSIX process groups work on macOS. `PR_SET_PDEATHSIG` is Linux-only, but its polling fallback exists (`spawn_guard.py:219`). Windows needs job objects. |
+| **Resource limits** | `engine/spawn_guard.py:96-132` | `resource.setrlimit` (`RLIMIT_AS`, `CPU`, `FSIZE`, `CORE`) | **Port on macOS** (some limits are not enforced there). **Absent on Windows**: the `resource` module does not exist. |
+| **The state lock** | `engine/app.py:4` and `:227`, `engine/providers.py:1601` | `fcntl.flock` | **Port.** `fcntl` does not import on Windows; `msvcrt.locking` or a lock file with a PID would replace it. |
+| **The desktop shell's child tracking** | `src-tauri/src/lib.rs:320-381` | `pidfd_open` and `pidfd_send_signal` (Linux 5.3), `libc::geteuid`, `SIGKILL` | **Port.** A pidfd names one process and never a reused pid; macOS has no equivalent, so the guarantee would weaken to a pid plus a start-time check. |
+| **The folder dialog** | `engine/app.py:1282-1408` | `zenity` or `kdialog`, found with `shutil.which`, and `pgrep -f` over `/proc/<pid>/cmdline` | **Replace.** The shell's native dialog is the normal answer on every OS. |
+| **Packaging and CI** | `tauri.conf.json` (`deb`, `appimage`), `.github/workflows/*` (`ubuntu-latest`, `ubuntu-22.04`) | Linux packages and runners; no `aarch64` leg | **New work**: dmg or pkg and notarization on macOS, msi or nsis and signing on Windows, a runner per OS, and the §5 attestation per artifact. |
+
+### 7.2 What is already portable
+
+Python 3.10 without the modules above; FastAPI, uvicorn and httpx; SQLite; `keyring` (it has macOS and Windows backends);
+`git` and `rg` (separate programs the engine runs by name); the UI (React, Vite; no OS API); and the terminal tab, which
+uses `portable-pty` (`Cargo.toml:52`). `lib.rs` already gates some Linux behaviour behind `#[cfg(target_os = "linux")]`
+with a `not(...)` branch (`:326-346`, `:779-795`), so the shell is partly shaped for a second target. The engine's
+filesystem code uses `getattr(os, "O_NOFOLLOW", 0)` (`fs.py:574`), which degrades rather than failing to import.
+
+### 7.3 What it would take, by target
+
+* **Linux-only today, and the table's first three rows are why.** Everything else is a port. Those three are the
+  product's safety story: a read-only jail for commands, an overlay for the machine, and a page layer.
+* **macOS** is the nearer target: POSIX process groups, `fcntl`, `git` and `keyring` all work. The cost is the sandbox
+  (Seatbelt is deprecated and weaker than namespaces), the browser pane (WKWebView layering), audio and packaging. A
+  macOS engine **without** the machine tab and with a weaker, clearly labelled sandbox is the smallest honest slice,
+  and "clearly labelled" would mean `sandbox_isolation` reporting what it cannot do, as it already does when `bwrap` is
+  missing (`engine/capabilities.py`).
+* **Windows** is close to a different product. No namespaces, no `fcntl`, no `resource`, no process groups; the sandbox
+  and machine tab would be a container or WSL requirement, which is not "local-first" in the way the rest of this
+  document uses it.
+
+### 7.4 Decision
+
+**Stay Linux-only. The spike is closed and nothing is committed to.** The reasons are the table's first three rows: the
+safety guarantees in `docs/00` §6.6 are stated in terms of a jail that exists on one OS, and a port that quietly
+weakened them would make the invariant a different sentence on a different machine. This is a recommendation from the
+inventory, not a measurement of effort (no port was attempted, so no estimate is claimed).
+
+It would be worth reopening if one of these becomes true: a person needs the **engine and CLI** (`codify-cli`, `docs/09`
+§10.23) on macOS without the desktop shell, which needs only the "Port" rows; or the sandbox gets a second backend with
+a stated guarantee per OS. The first is the cheapest experiment, because the engine and the CLI are plain Python over
+HTTP and the shell is optional for them.

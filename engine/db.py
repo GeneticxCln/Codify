@@ -356,6 +356,16 @@ CREATE TABLE IF NOT EXISTS suggestions (
 
 CREATE INDEX IF NOT EXISTS idx_suggestions_open ON suggestions(workspace_id, status, updated_at DESC);
 
+-- Notes a person keeps for every project (engine/notes.py, docs/10 §8). Deliberately not tied to a workspace and
+-- deliberately not the observations table: observations are what one workspace's own runs taught, and they never
+-- leave it; a note is something the person wrote down to apply everywhere, and it reaches a run only when the
+-- `cross_workspace_notes` switch is on. `source` says whether the person wrote it here or a profile brought it.
+CREATE TABLE IF NOT EXISTS global_notes (
+  id TEXT PRIMARY KEY,
+  text TEXT NOT NULL,
+  source TEXT NOT NULL DEFAULT 'person',
+  created_at REAL NOT NULL
+);
 """
 
 

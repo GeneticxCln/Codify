@@ -1217,3 +1217,9 @@ class SuggestionAccept(BaseModel):
     model_config = {"extra": "forbid"}
     goal_id: str = Field(..., min_length=1, max_length=200)
 
+
+class NoteCreate(BaseModel):
+    """One standing note (`POST /settings/notes`). The service holds the real limit; this one only bounds the body."""
+
+    model_config = {"extra": "forbid"}
+    text: str = Field(..., min_length=1, max_length=2000)

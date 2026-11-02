@@ -2625,6 +2625,7 @@ the pipeline already makes, through the same service:
 | `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
 | `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |
 | `ask_user` | `engine/ask.py` | none — ends the run with one question for the person (a few options at most), and the answer is their next message, an ordinary turn (docs/00 §6.8). Offered on a turn before a plan exists, never after one and never while an approved plan is running |
+| `read_notes` | `engine/notes.py`, the `global_notes` table | read-only over the notes a person keeps for **every** project (`docs/10` §8). Offered only while `cross_workspace_notes` is on **and** at least one note exists; the handler re-checks the switch on every call. It cannot return an observation, and `recall` cannot return a note |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 **The prompt names every tool, and says what the engine does with a call.** `CONDUCTOR_SYSTEM_PROMPT`
@@ -3453,6 +3454,58 @@ offer's words through `POST /conversations/{id}/turns` with none of the pipeline
 an offer about another project cannot be sent from this one; Snooze and Dismiss start nothing; and an answer that is not a
 list is an empty inbox. `suggestionsInbox.test.ts` covers the drawer section and the Settings card, and
 `suggestionsApi.test.ts` the five calls. The bell adds the inbox to what is unread (`bellCount`).
+
+### 10.23 A second surface: `codify-cli`
+
+`codify-cli` (`engine/cli.py`, installed as a console script; the desktop launcher `scripts/codify` keeps its name) is a
+client of a **running** engine over the HTTP API the window uses. It starts no engine, reads no database, imports none of
+the engine's services (a test pins that `engine.home` is the only engine module it imports) and spawns no process. What
+the window can do through a route it can do; what a route refuses it is refused, in the engine's own words.
+
+* **Finding the engine.** `--port` or `CODIFY_ENGINE_PORT`, else the first port in 7430-7440 that answers like an engine.
+  A port is asked *without* the token and trusted only if it answers `401 unauthorized`, so the boot token is never offered
+  to whatever else is listening in that range.
+* **The token.** `--token`, `CODIFY_BOOT_TOKEN`, or the engine's own `boot_token` file (`docs/04` §6, mode `0600`). The file
+  is read and never created, and `engine.app` is never imported, because importing it creates the file.
+* **Commands.** `status`, `workspaces`, `goals`, `ask`, `suggestions` (list, scan, snooze, dismiss), `notes` (list, add,
+  delete) and `profile` (export, import); `--json` prints the engine's answer as it came.
+* **`ask` makes a turn the way the composer does** (`POST /conversations`, then `POST /conversations/{id}/turns` with the
+  words and no flag). With `--wait` it polls the goal until it settles and prints the reply (the last `log` event flagged
+  `turn`). **It does not approve a plan.** A plan comes back as `PENDING` and the client says it is waiting for the
+  window; there is no `start`, `apply` or `retry` command, so the second surface cannot be the way a write is authorised.
+* **Exit codes.** 0 done, 1 the engine refused (its message is printed), 2 usage, 3 the engine could not be reached.
+
+Proven by `tests/test_cli.py`, which runs the real commands against the real app over ASGI and the turn command against a
+stand-in engine (the real route would start a real model).
+
+### 10.24 The profile file
+
+`GET /profile/export` and `POST /profile/import` (`engine/profile.py`, `docs/04` §3) move a person's setup between
+machines as one JSON document: portable tuning settings, how each of the eight roles is configured, a workspace's skills,
+and, only when asked for, what that workspace has learned and the standing notes. Both are settings-class routes: the boot
+token reaches them and no skill, conductor tool or workspace file can.
+
+**It carries no credential.** Keys are not read. Every text field is passed through the engine's one scrubber
+(`providers.redact_secrets`) with every stored key as a known secret, so a key a prompt, skill, lesson or note quoted is
+removed from the file.
+
+**Opening one never widens what the engine may do.** The numeric settings it carries are an allowlist
+(`PORTABLE_INT_SETTINGS`), not a denylist, so a setting added later is left out until someone decides it belongs. Not
+carried, and ignored if a file has them: `sandbox_network`, `sandbox_isolation`, `browser_actions`, `web_fetch` and its
+hosts, `suggest_ci`, `cross_workspace_notes`, `laya_required`, `laya_checkpoint`, every audio setting, and any role's
+`base_url`, protocol or key. A role on a provider that is not built in is skipped (it would need an address, and an
+address decides where code is sent). The body is `extra=forbid` all the way down, so a file naming an address is a 422 and
+nothing is applied. `left_out` in the file says which and why, and the import report lists every refusal.
+
+**It overwrites nothing it did not ask about.** A skill that exists, a memory subject that exists and a note already kept
+are left alone and reported. Skills go through the creator's door, handed to the profile by the route (the route module is
+the only one that may name it, `docs/00` §6.9, held by `tests/test_invariants_at_their_boundary.py`). Settings and role
+configs are replaced, and only if the person chose to apply them. **Memory and notes are opt-in** on both sides of the file.
+Imported memory arrives as proof 1 with no evidence, flattened to one line, as a claim a person brought and not one this
+machine saw; imported notes are marked `imported` and `read_notes` says so.
+
+Proven by `tests/test_profile.py`, including three mutations a reviewer can repeat: disable the scrubber and the key test
+fails; let an authority setting be portable and the import test fails; make notes always offered and the default test fails.
 
 ## 11. The clipboard history (built)
 
