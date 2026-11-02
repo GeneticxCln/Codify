@@ -10,9 +10,10 @@ from typing import TYPE_CHECKING
 import json
 import time
 import uuid
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any
 
+from engine import cache_diagnostics
 from engine.conductor import CallBooks, ToolCallRequest
 from engine.default_prompts import DEFAULT_PROMPTS
 from engine.executor_support import AgentNotConfigured, AgentOutputInvalid
@@ -53,6 +54,17 @@ CONFIG_GAP_CODES = frozenset({
 })
 
 
+def prompt_facts(system: str, tool_names: Iterable[str], model: str, protocol: str, chars: int) -> dict[str, Any]:
+    """The content-free facts one call's usage event carries about its prompt: a fingerprint, the digests it is made
+    of, and a length. `protocol` is the provider slug, which is what a cache is keyed on besides the model."""
+    parts = cache_diagnostics.prompt_parts(system, tool_names, model, protocol)
+    return {
+        "prompt_fingerprint": cache_diagnostics.fingerprint(parts),
+        "prompt_parts": parts,
+        "prompt_chars": chars,
+    }
+
+
 class _CallAccounting:
     """One model call's books: the `usage` event it publishes, and the numbers
     the recorder reads back for the same call.
@@ -73,6 +85,7 @@ class _CallAccounting:
         provider: str,
         model: str,
         started: float | None = None,
+        prompt: dict[str, Any] | None = None,
     ) -> None:
         self._publish = publish
         self._role = role
@@ -82,6 +95,10 @@ class _CallAccounting:
         # event for the same call cannot report durations that differ by the time
         # it took to notice one had happened.
         self._started = time.monotonic() if started is None else started
+        # Digests and lengths of what was sent, never the text (`engine/cache_diagnostics.py`). Published with the
+        # usage so a cache miss can be attributed afterwards; kept out of `self.usage`, which is the provider's own
+        # numbers and goes into the trace.
+        self._prompt = prompt
         # The same usage kept aside for the trace record, so a replay's token
         # counts match the run it replays rather than being absent.
         self.usage: dict[str, Any] = {}
@@ -96,6 +113,7 @@ class _CallAccounting:
                 "model": self._model,
                 "duration_ms": self.duration_ms(),
                 **usage,
+                **(self._prompt or {}),
             }
         )
 
@@ -150,6 +168,10 @@ class _ConductorLedger:
         label, slug = self.identify(request.provider, request.model)
         books = self._orchestrator._accounting(
             self._goal_id, self._step_id, "conductor", slug, request.model,
+            prompt=prompt_facts(
+                request.system, request.tools, request.model, slug,
+                len(request.system) + sum(len(str(m.get("content") or "")) for m in request.messages),
+            ),
         )
         request.provider.usage_sink = books.sink
         return _ConductorCallBooks(self, request, label, slug, books)
@@ -238,12 +260,13 @@ class AgentOrchestrator:
     def _accounting(
         self, goal_id: str, step_id: str | None, role: str,
         provider: str, model: str, started: float | None = None,
+        prompt: dict[str, Any] | None = None,
     ) -> _CallAccounting:
         """One call's books. Every model call in a run gets one of these."""
         def publish(payload: dict[str, Any]) -> None:
             self.goals.publish(self._event(goal_id, step_id, "usage", payload))
 
-        return _CallAccounting(publish, role, provider, model, started)
+        return _CallAccounting(publish, role, provider, model, started, prompt)
 
     def gate_call(self, goal_id: str) -> GateCall:
         """The `GateCall` for the pre-flight gate, bound to one goal.
@@ -574,6 +597,7 @@ class AgentOrchestrator:
             call_started = time.monotonic()
             books = self._accounting(
                 goal_id, step_id, role, target.provider, model_name, call_started,
+                prompt_facts(system, (), model_name, target.provider, len(system) + len(user_prompt)),
             )
             provider.usage_sink = books.sink
             on_delta, flush_deltas = self._delta_publisher(goal_id, step_id, role, target.provider, model_name)
@@ -664,11 +688,12 @@ class AgentOrchestrator:
                 },
             ))
             repair_started = time.monotonic()
+            repair_prompt = _repair_prompt(user_prompt, problem, str(raw))
             repair_books = self._accounting(
                 goal_id, step_id, role, target.provider, model_name, repair_started,
+                prompt_facts(system, (), model_name, target.provider, len(system) + len(repair_prompt)),
             )
             provider.usage_sink = repair_books.sink
-            repair_prompt = _repair_prompt(user_prompt, problem, str(raw))
             try:
                 repaired = await provider.complete(
                     system_prompt=system,

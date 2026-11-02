@@ -33,6 +33,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from engine.cache_diagnostics import CallFacts, explain
 from engine.metrics import (
     STAGE_SUCCESS_OUTCOMES,
     _window_cutoff,
@@ -45,7 +46,7 @@ from engine.metrics import (
 #: so the fix-loop answer is the one the statistics screen shows.
 AUDIT_EVENT_TYPES: tuple[str, ...] = (
     "usage", "agent_call_failed", "stage_result", "fix_retry", "test_result", "step_status", "error",
-    "provider_fallback", "agent_assigned",
+    "provider_fallback", "agent_assigned", "session_compacted",
 )
 
 #: The most events one audit reads (newest first), the same bound the stats screens use; reaching it is reported.
@@ -94,6 +95,61 @@ def _tokens(payload: dict[str, Any]) -> tuple[int, int]:
 
 def _cache_tokens(payload: dict[str, Any]) -> tuple[int, int]:
     return _int(payload.get("cache_read_tokens")), _int(payload.get("cache_write_tokens"))
+
+
+def _facts(event: dict[str, Any]) -> CallFacts | None:
+    """The cache facts of one `usage` event, or None when it carries no fingerprint (an older engine, or the gate)."""
+    payload = _payload(event)
+    parts = payload.get("prompt_parts")
+    if not isinstance(parts, dict) or not all(isinstance(v, str) for v in parts.values()):
+        return None
+    read, write = _cache_tokens(payload)
+    return CallFacts(
+        parts={str(k): v for k, v in parts.items()}, timestamp=float(event.get("timestamp") or 0.0),
+        cache_read=read, cache_write=write,
+    )
+
+
+def _cache_report(events: list[dict[str, Any]], totals: dict[str, int]) -> dict[str, Any]:
+    """Cache reads against writes, and why the cache missed where it was in play and then read nothing.
+
+    A call is a *miss* when the call before it in the same goal and role wrote to or read from a cache and this one
+    read nothing. Its reason is `cache_diagnostics.explain` over the two fingerprints. Calls without a fingerprint can
+    be counted but not explained, and `coverage` says how many that is. Nothing here is a saving and nothing is a price:
+    the tokens are the provider's own counts, inside `input_tokens` either way.
+    """
+    reasons: dict[str, int] = {}
+    fingerprinted = 0
+    misses = 0
+    for goal_events in _by_goal(events).values():
+        last: dict[str, tuple[CallFacts, int]] = {}
+        compacted_at = [int(e.get("sequence") or 0) for e in goal_events if e.get("type") == "session_compacted"]
+        for event in goal_events:
+            if event.get("type") != "usage":
+                continue
+            facts = _facts(event)
+            if facts is None:
+                continue
+            fingerprinted += 1
+            role = str(_payload(event).get("role") or "")
+            sequence = int(event.get("sequence") or 0)
+            before = last.get(role)
+            if before is not None and (before[0].cache_read or before[0].cache_write) and not facts.cache_read:
+                between = any(before[1] < at < sequence for at in compacted_at)
+                reason = explain(before[0], facts, compacted_between=between)
+                reasons[reason] = reasons.get(reason, 0) + 1
+                misses += 1
+            last[role] = (facts, sequence)
+    read, write = totals["cache_read_tokens"], totals["cache_write_tokens"]
+    return {
+        "read_tokens": read,
+        "write_tokens": write,
+        "read_share_of_input": _share(read, totals["input_tokens"]),
+        "calls": totals["calls"],
+        "calls_with_fingerprint": fingerprinted,
+        "misses": misses,
+        "miss_reasons": sorted(reasons.items(), key=lambda kv: (-kv[1], kv[0])),
+    }
 
 
 def _payload(event: dict[str, Any]) -> dict[str, Any]:
@@ -366,6 +422,7 @@ def audit(
         "totals": {**totals, "total_tokens": total, "by_role": sorted(role_tokens.items(), key=lambda kv: -kv[1])},
         "findings": findings,
         "signals": signals,
+        "cache": _cache_report(inside, totals),
     }
 
 
@@ -433,6 +490,23 @@ def format_audit(result: dict[str, Any]) -> str:
             lines.append(f"  e.g. goal {_text(ex['goal_id'], 8)} step {_step(ex['step_id'])}: {ex['attempts']} earlier attempt(s), {_n(ex['tokens'])} tokens")
     else:
         lines.append("- fix-loop-retry-waste: no fix attempt that a retry then got past was recorded in this window.")
+
+    cache = result.get("cache") or {}
+    if cache.get("read_tokens") or cache.get("write_tokens"):
+        lines += ["", "Cache (the provider's own token counts; not a saving, not a price):"]
+        lines.append(
+            f"- {_n(cache['read_tokens'])} input tokens were read from a cache ({int(cache['read_share_of_input'] * 100)}% of input) "
+            f"and {_n(cache['write_tokens'])} were written to one."
+        )
+        covered = f"{_n(cache['calls_with_fingerprint'])} of {_n(cache['calls'])} calls carry a prompt fingerprint"
+        if cache["misses"]:
+            why = ", ".join(f"{reason} {count}" for reason, count in cache["miss_reasons"])
+            lines.append(
+                f"- {_n(cache['misses'])} call(s) read nothing right after a call that used the cache; attributed to: {why}. "
+                f"`none` means nothing the engine changed explains it. {covered}."
+            )
+        else:
+            lines.append(f"- no call read nothing right after a call that used the cache. {covered}.")
 
     lines += ["", "Signals (descriptive; none of these is classed as waste or recommends a change):"]
     if not result["signals"]:

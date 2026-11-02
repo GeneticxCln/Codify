@@ -76,22 +76,38 @@ def _avg(values: list[float]) -> int | None:
     return round(sum(values) / len(values)) if values else None
 
 
+def _count(value: Any) -> int:
+    """A token count from a payload: a plain non-negative integer, else 0 (a bool or a string is not a count)."""
+    return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
+
+
 def _empty_bucket() -> dict[str, Any]:
     return {
         "input_tokens": 0,
         "output_tokens": 0,
         "total_tokens": 0,
         "calls": 0,
+        # What a provider reported as read from, and written to, its prompt cache. They are inside `input_tokens`
+        # already (docs/16 item 6), so these are a view of it and never an addition to it.
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
         "durations": [],
     }
 
 
 def _finish(bucket: dict[str, Any]) -> dict[str, Any]:
     durations = bucket.pop("durations")
+    cached = bucket.get("cache_read_tokens", 0) + bucket.get("cache_write_tokens", 0)
     return {
         **bucket,
         # None on purpose: "no duration was recorded" is not "0ms".
         "avg_duration_ms": _avg(durations),
+        # Likewise: with no cache activity reported at all (a provider that does not report it, or never asked for
+        # one) the share of input read from a cache is unknown, not 0%.
+        "cache_read_ratio": (
+            round(bucket["cache_read_tokens"] / bucket["input_tokens"], 3)
+            if cached and bucket.get("input_tokens") else None
+        ),
     }
 
 
@@ -176,6 +192,8 @@ def summarize_usage(events: list[dict[str, Any]], window_days: int = 0, *, now: 
         "total_tokens": 0,
         "calls": 0,
         "failures": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
         "durations": [],
     }
     by_role: dict[str, dict[str, Any]] = {}
@@ -200,6 +218,10 @@ def summarize_usage(events: list[dict[str, Any]], window_days: int = 0, *, now: 
         i = p.get("input_tokens") or 0
         o = p.get("output_tokens") or 0
         d = p.get("duration_ms")
+        cr = _count(p.get("cache_read_tokens"))
+        cw = _count(p.get("cache_write_tokens"))
+        totals["cache_read_tokens"] += cr
+        totals["cache_write_tokens"] += cw
         totals["input_tokens"] += i
         totals["output_tokens"] += o
         totals["total_tokens"] += i + o
@@ -212,6 +234,8 @@ def summarize_usage(events: list[dict[str, Any]], window_days: int = 0, *, now: 
             b["output_tokens"] += o
             b["total_tokens"] += i + o
             b["calls"] += 1
+            b["cache_read_tokens"] += cr
+            b["cache_write_tokens"] += cw
             if isinstance(d, (int, float)):
                 b["durations"].append(d)
 

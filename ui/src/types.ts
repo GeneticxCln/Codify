@@ -410,6 +410,13 @@ export interface UsageLane {
   /** Mean call duration in ms over the calls that measured one; null when
    * none did — unknown, never "instant". */
   avg_duration_ms: number | null;
+  /** What the provider reported as read from, and written to, its prompt cache. Inside `input_tokens`, not on top of
+   * it. Absent on an engine that predates them. */
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  /** Share of input tokens read from a cache (0 to 1); null when no cache activity was reported at all, which is
+   * unknown and never 0%. */
+  cache_read_ratio?: number | null;
 }
 
 /** One stage of a goal's pipeline, as measured by the engine's

@@ -138,6 +138,22 @@ def _as_prose(raw: str) -> str:
 CHANGE_INTENTS = ("code_change", "ops_command")
 
 
+
+def conductor_system_prompt(skill_menu: str) -> str:
+    """The conductor's system prompt: a fixed text and the skills menu, and nothing else.
+
+    Its own function so a test can hold the property a prompt cache depends on: this string is re-sent on every call
+    of a run (and is the one block marked cacheable, docs/16 item 7), so it must be byte-identical from one call to
+    the next. Nothing that changes between calls (the time, a counter, an id) belongs in it; that goes in the
+    messages (`tests/test_prompt_prefix_stability.py`).
+    """
+    return (
+        CONDUCTOR_SYSTEM_PROMPT
+        + "\n\nSkills available in this workspace:\n" + skill_menu
+        + "\n\nCall `use_skill` with a skill's name when you want its full "
+        "instructions."
+    )
+
 class _Conduct(_Plan):
     """Chat turns and the conductor loop that drives a goal.
 
@@ -1130,12 +1146,7 @@ class _Conduct(_Plan):
         conductor = Conductor(
             provider, model, root,
             dispatch=self._conductor_dispatch(goal_id, goal, root, skills),
-            system_prompt=(
-                CONDUCTOR_SYSTEM_PROMPT
-                + "\n\nSkills available in this workspace:\n" + skills.menu()
-                + "\n\nCall `use_skill` with a skill's name when you want its full "
-                "instructions."
-            ),
+            system_prompt=conductor_system_prompt(skills.menu()),
             menu=menu,
             nudge=nudge,
             needs_action=lambda: not self.goals.steps(goal_id),

@@ -75,11 +75,15 @@ whose root is not the engine's directory, and an engine file no tool can reach w
 The `health_checks` table, its routes and a Settings tab are **not** built, and are not built until someone has run the
 skill enough to want a record.
 
-**P3 — Cache and context diagnostics. Status: planned.** `usage` events gain `prompt_fingerprint` (SHA-256 over system
-prompt, sorted tool names, model and protocol) and `prompt_chars`. A pure `cache_diagnostics.explain(previous, current)`
-names only reasons the engine can observe (`first_request`, `model_switch`, `system_changed`, `tools_changed`, `idle_ttl`,
-`none`). `audit_usage` gains a cache section; Stats shows cache read and write by role and model. Tokens are never
-converted to money. A prefix-stability test fails on an injected volatile string.
+**P3 — Cache and context diagnostics. Status: built.** `usage` events gain `prompt_fingerprint`, `prompt_parts` and
+`prompt_chars` (digests and a length, never text). `engine/cache_diagnostics.py` is pure and names only reasons the engine
+can observe (`first_request`, `model_switch`, `system_changed`, `tools_changed`, `compaction`, `idle_ttl`, `none`);
+`audit_usage` gains a cache section with reads, writes, the read share of input, and the reasons for each call that read
+nothing right after a call that used the cache; Stats shows the read share per role and model (null, not 0%, where no
+cache activity was reported). Tokens are never converted to money. `tests/test_prompt_prefix_stability.py` holds that the
+conductor's system prompt, every role prompt and the skills menu are byte-identical across clocks, ids and seeds, and fails
+on an injected volatile string; the conductor's prompt moved into `conductor_system_prompt` so it can be tested. There is
+no target for the read ratio: it is measured first.
 
 **P4 — Size budget. Status: planned.** `scripts/check_budgets.py` reads `ui/dist` after `make build-ui` and fails when
 the entry chunk or the total grows more than 10% over a recorded baseline. It runs inside `make check`; it needs no
