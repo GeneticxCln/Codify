@@ -556,6 +556,13 @@ Bind `127.0.0.1`. Port: first free in `7430-7440`, printed on stdout (`04` §6).
 
 All routes: `Authorization: Bearer <boot_token>` or `401` `unauthorized`.
 
+**A request body over 8 MiB is refused with `413 request_too_large`** in the engine's `{code, message}`
+shape. The middleware counts `http.request` chunks as they arrive, so a chunked body with no
+`Content-Length` is covered as well as an announced one (which is refused without being read). It sits
+inside auth: a request with no token is a 401 and its body is never pulled. `fs.MAX_EDIT_BYTES` is still
+the authority for a file's content — this is a transport ceiling, not an editor limit
+(`tests/test_request_size_limit.py`).
+
 Error body: `{ "code": str, "message": str }` — `ErrorBody` in `engine/models.py`, the
 one place that shape is defined. Extra keys are part of the contract, not a
 loophole: a refusal may attach the facts a caller needs to act

@@ -25,6 +25,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from engine import capabilities, home, speech, watchdog
 from engine import github_remote
@@ -531,6 +532,101 @@ def _same_secret(offered: str, expected: str) -> bool:
     property and cannot raise on content.
     """
     return secrets.compare_digest(offered.encode("utf-8"), expected.encode("utf-8"))
+
+
+# The largest request body the engine will read, counted whether or not the client declared a
+# Content-Length. Every route's real payload is far below this: a source file is capped at 1 MB
+# (`fs.MAX_EDIT_BYTES`), a turn is text, and an import is a stats document. This is a ceiling on
+# what the engine will buffer before it can say no, not a limit on what the API means.
+MAX_REQUEST_BODY_BYTES = 8 * 1024 * 1024
+
+
+class RequestSizeLimitMiddleware:
+    """Refuse a request body over `max_bytes` with the engine's `{code, message}` shape.
+
+    Registered *inside* auth (it is added before the auth middleware, so auth wraps it): a request with no
+    token is a 401 without its body being read. The Content-Length fast path refuses an announced oversize
+    body before a byte is pulled; the counting path is what covers a chunked body, where no length is
+    announced and the only honest answer is to count as it arrives.
+    """
+
+    def __init__(self, app: ASGIApp, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> None:
+        self.app = app
+        self.max_bytes = max_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        for name, value in scope.get("headers", []):
+            if name.lower() != b"content-length":
+                continue
+            try:
+                announced = int(value)
+            except ValueError:
+                break
+            if announced > self.max_bytes:
+                await self._reject(send)
+                return
+            break
+
+        received = 0
+        too_large = False
+        response_started = False
+        rejected = False
+
+        async def counted_receive() -> Message:
+            nonlocal received, too_large
+            if too_large:
+                # The app has been told the body ended; it must not pull another chunk.
+                return {"type": "http.request", "body": b"", "more_body": False}
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > self.max_bytes:
+                    # Do not raise: FastAPI wraps every exception from a body read in its own 400
+                    # ("There was an error parsing the body"), which would answer an oversized body
+                    # as a malformed one. Stop feeding it and replace the answer below.
+                    too_large = True
+                    return {"type": "http.request", "body": b"", "more_body": False}
+            return message
+
+        async def tracked_send(message: Message) -> None:
+            nonlocal response_started, rejected
+            if not too_large:
+                if message["type"] == "http.response.start":
+                    response_started = True
+                await send(message)
+                return
+            if response_started:
+                # The route had already begun answering before the body crossed the cap; its
+                # response is what the client is reading, and a second start would be invalid.
+                return
+            if not rejected:
+                rejected = True
+                await self._reject(send)
+
+        await self.app(scope, counted_receive, tracked_send)
+        if too_large and not response_started and not rejected:
+            await self._reject(send)
+
+    async def _reject(self, send: Send) -> None:
+        body = json.dumps({
+            "code": "request_too_large",
+            "message": f"the request body is over the {self.max_bytes} bytes this engine will read",
+        }).encode("utf-8")
+        await send({
+            "type": "http.response.start",
+            "status": 413,
+            "headers": [
+                (b"content-type", b"application/json"),
+                (b"content-length", str(len(body)).encode("ascii")),
+            ],
+        })
+        await send({"type": "http.response.body", "body": body})
+
+
+app.add_middleware(RequestSizeLimitMiddleware)
 
 
 @app.middleware("http")
