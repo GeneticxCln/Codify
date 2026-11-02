@@ -93,9 +93,14 @@ the measured build: entry chunk 450,680 bytes (about 640 kB before Settings and 
 2,030,178 bytes. A startup-time budget and new DOM smoke tests were dropped (§1): `scripts/tabs_smoke.py` needs a display
 and times seeding, and about 90 UI test files already mount through the DOM harness.
 
-**P5 — Skill contracts. Status: planned.** A test over every built-in: the loader reports no problems, names and
-descriptions are unique, a description is at most 200 characters and starts with a "Use when" clause, and a skill that
-loops has `## Stop when`. The six `builtin_profiles/*.json` gain `reviewed` and `sources`, validated for built-ins only.
+**P5 — Skill contracts. Status: built.** `tests/test_skill_contracts.py` holds every built-in to the routing contract:
+no loader problems, existing moves only, a description that is a sentence, unique and uncut at 200 characters, a
+`## Stop when` for any skill that declares `write` or `run_command`, and only citations of files that exist; each rule is
+shown able to fail. Six built-ins lacked a stop condition and gained one (`encode-a-lesson`, `merge-ready`,
+`ship-a-change`, `test-first`, `watch-ci`, `working-style`). The proposal's "Use when" and "Do not use" clauses were not
+adopted: 31 of 33 descriptions are clear without them, each extra clause is paid for in every conductor call, and 200
+characters leave no room for two. The six security profiles carry `reviewed` and `sources`, and `docs/19` §7 says what
+the monthly pass is and what the first `reviewed` date does and does not attest.
 
 **P6 — Parked, with gates.** A deferred tool tier (only if tools exceed 25% of prompt tokens after P3; reordering tools
 is forbidden because it invalidates the prefix), a skill A/B (needs benchmark variants), and a reference corpus (a new

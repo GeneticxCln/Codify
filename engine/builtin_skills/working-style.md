@@ -28,6 +28,12 @@ Use this at the start of any turn whose request is more than a single fact.
 6. **Stop when the goal is met.** Report what works and the command that showed
    it, what was not verified and why, and what only the person can do.
 
+## Stop when
+
+- The goal is met and the output of the last proving command has been shown.
+- A step needs an approval that has not been given: stop at that step.
+- Five iterations have not passed the check: report the last error and load `unstick`.
+
 ## What this refuses
 
 - A plan without a check is a wish. Add the check or leave the step out.

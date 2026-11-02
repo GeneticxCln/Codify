@@ -26,6 +26,12 @@ honest verdict about the PR.
 6. **Report the verdict, the head commit, the checks, the proof, the review
    outcome and the remaining risks.** Say the PR is open and unmerged.
 
+## Stop when
+
+- Every check is read and the verdict (ready, waiting or blocked) is stated with its evidence.
+- The next step needs a person's approval or action: say which, and stop.
+- The checks cannot be read: the verdict is blocked, not ready.
+
 ## Rules
 
 - Never merge, turn on auto-merge, join a merge queue or push to the default

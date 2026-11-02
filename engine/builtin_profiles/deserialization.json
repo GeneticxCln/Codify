@@ -1,6 +1,10 @@
 {
   "name": "deserialization",
   "description": "Loading objects from data that may not be trusted, which can run code.",
+  "reviewed": "2026-11-02",
+  "sources": [
+    "CWE-502"
+  ],
   "rules": [
     {
       "id": "py-pickle-load",

@@ -84,6 +84,13 @@ showed it), what you could not verify (and why), and what only the person can
 do. Leave a part out only when it is empty, and say "nothing I could not verify"
 once rather than implying it.
 
+## Stop when
+
+- Every approved step is written, verified, reviewed and summarized, and the final answer is given.
+- The critic asks for changes: the goal is paused. Tell the person the reasons and stop; only they resume it.
+- A move is refused (an unapproved plan, no step yet): say what is missing and stop. Do not look for another way to the same write.
+- The move budget is spent: say where the run stopped and what is left.
+
 ## What you must not do
 
 - Do not claim to have run, read, written or verified anything you did not

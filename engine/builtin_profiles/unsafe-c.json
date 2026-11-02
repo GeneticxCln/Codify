@@ -1,6 +1,14 @@
 {
   "name": "unsafe-c",
   "description": "C and C++ calls that overflow a buffer, run a shell or take a format string from data.",
+  "reviewed": "2026-11-02",
+  "sources": [
+    "CWE-78",
+    "CWE-120",
+    "CWE-134",
+    "CWE-242",
+    "CWE-377"
+  ],
   "rules": [
     {
       "id": "c-gets",
