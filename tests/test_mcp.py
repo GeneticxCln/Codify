@@ -8,11 +8,14 @@ and the only methods sent are `initialize`, `notifications/initialized` and
 
 from __future__ import annotations
 
+import asyncio
 import json
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
+
 import httpx
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
@@ -445,3 +448,134 @@ class McpReadCallTestCase(unittest.IsolatedAsyncioTestCase):
             self.assertEqual("object", by_name["search_issues"]["input_schema"]["type"])
             unknown = await client.get("/settings/mcp/nope/tools", headers=headers)
             self.assertEqual(404, unknown.status_code)
+
+
+async def _never_answers(request: httpx.Request) -> httpx.Response:
+    """A server that accepts the request and then says nothing, which a per-read timeout never ends."""
+    await asyncio.sleep(3600)
+    raise AssertionError("unreachable")
+
+
+class McpTotalDeadlineTestCase(unittest.IsolatedAsyncioTestCase):
+    """One call and one probe each have a bound on the whole, not only on each read."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name).resolve()
+        self.conn: sqlite3.Connection = connect(root / "test.db")
+        self.keychain = Keychain(secrets_path=root / "secrets.json")
+        self.service = McpService(self.conn, self.keychain, transport=httpx.MockTransport(_handler))
+
+    async def asyncTearDown(self) -> None:
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    async def _admitted(self, authority: str) -> dict[str, object]:
+        server = await self.service.create(McpServerCreate(name="Issues", url=PUBLIC))
+        self.service.set_tool_authority(
+            str(server["id"]), "search_issues", McpToolUpdate(authority=authority, enabled=True)
+        )
+        return server
+
+    async def test_a_call_that_is_never_answered_is_stopped_and_a_read_is_not_retried(self) -> None:
+        server = await self._admitted("read")
+        attempts = 0
+
+        async def silent(request: httpx.Request) -> httpx.Response:
+            nonlocal attempts
+            attempts += 1
+            return await _never_answers(request)
+
+        self.service._transport = httpx.MockTransport(silent)
+        with mock.patch("engine.mcp.CALL_TOTAL_TIMEOUT_S", 0.2):
+            with self.assertRaises(McpError) as stopped:
+                await asyncio.wait_for(self.service.call_tool(str(server["id"]), "search_issues", {}), 5)
+        self.assertEqual("mcp_timeout", stopped.exception.code)
+        self.assertEqual(1, attempts, "a server too slow to answer is not made faster by asking again")
+
+    async def test_an_act_call_that_times_out_says_it_may_have_happened(self) -> None:
+        server = await self._admitted("act")
+        self.service._transport = httpx.MockTransport(_never_answers)
+        with mock.patch("engine.mcp.CALL_TOTAL_TIMEOUT_S", 0.2):
+            with self.assertRaises(McpError) as stopped:
+                await asyncio.wait_for(
+                    self.service.call_tool(str(server["id"]), "search_issues", {}, goal_running=True), 5
+                )
+        self.assertEqual("mcp_timeout", stopped.exception.code)
+        self.assertIn("may have carried it out", str(stopped.exception))
+
+    async def test_a_probe_that_is_never_answered_is_stopped_and_recorded(self) -> None:
+        server = await self.service.create(McpServerCreate(name="Issues", url=PUBLIC))
+        self.service._transport = httpx.MockTransport(_never_answers)
+        with mock.patch("engine.mcp.PROBE_TOTAL_TIMEOUT_S", 0.2):
+            with self.assertRaises(ApiError) as stopped:
+                await asyncio.wait_for(self.service.probe(str(server["id"])), 5)
+        self.assertEqual("mcp_timeout", stopped.exception.code)
+        self.assertIn("took longer", str(self.service.get(str(server["id"]))["last_probe_error"]))
+
+
+class McpHeaderNameTestCase(unittest.IsolatedAsyncioTestCase):
+    """A credential header is a token the server can read and never one the engine writes itself."""
+
+    async def asyncSetUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        root = Path(self.temp_dir.name).resolve()
+        self.conn: sqlite3.Connection = connect(root / "test.db")
+        self.keychain = Keychain(secrets_path=root / "secrets.json")
+        self.service = McpService(self.conn, self.keychain, transport=httpx.MockTransport(_handler))
+
+    async def asyncTearDown(self) -> None:
+        self.conn.close()
+        self.temp_dir.cleanup()
+
+    async def test_a_bad_or_reserved_header_name_is_refused_when_saved(self) -> None:
+        for name, code in (
+            ("Host", "mcp_reserved_header"),
+            ("host", "mcp_reserved_header"),
+            ("Mcp-Session-Id", "mcp_reserved_header"),
+            ("Content-Type", "mcp_reserved_header"),
+            ("X-A\r\nX-B", "mcp_invalid_header"),
+            ("bad name:", "mcp_invalid_header"),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaises(ApiError) as refused:
+                    await self.service.create(
+                        McpServerCreate(
+                            name="s", url=PUBLIC, auth_kind="header", auth_header=name,
+                            secret="v",  # noqa: S106 — a fake value in a hermetic test
+                        )
+                    )
+                self.assertEqual(422, refused.exception.status)
+                self.assertEqual(code, refused.exception.code)
+        self.assertEqual([], self.service.servers(), "a refused server is not stored")
+
+    async def test_a_control_character_in_the_credential_is_refused(self) -> None:
+        with self.assertRaises(ApiError) as refused:
+            await self.service.create(
+                McpServerCreate(
+                    name="s", url=PUBLIC, auth_kind="bearer",
+                    secret="a\r\nX-Evil: 1",  # noqa: S106 — a fake value in a hermetic test
+                )
+            )
+        self.assertEqual("mcp_invalid_secret", refused.exception.code)
+
+    async def test_an_ordinary_header_name_still_works(self) -> None:
+        server = await self.service.create(
+            McpServerCreate(
+                name="s", url=PUBLIC, auth_kind="header", auth_header="X-Api-Key",
+                secret="v",  # noqa: S106 — a fake value in a hermetic test
+            )
+        )
+        self.assertEqual("X-Api-Key", server["auth_header"])
+
+    async def test_a_row_saved_before_the_check_fails_in_words_at_send_time(self) -> None:
+        server = await self.service.create(McpServerCreate(name="s", url=PUBLIC))
+        self.conn.execute(
+            "UPDATE mcp_servers SET auth_kind = 'header', auth_header = 'Host', api_key_ref = ? WHERE id = ?",
+            (f"mcp/{server['id']}", server["id"]),
+        )
+        self.conn.commit()
+        self.keychain.set_secret(f"mcp/{server['id']}", "v")
+        with self.assertRaises(ApiError) as refused:
+            await self.service.probe(str(server["id"]))
+        self.assertEqual("mcp_invalid_header", refused.exception.code)
