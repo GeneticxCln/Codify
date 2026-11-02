@@ -117,6 +117,10 @@ class BridgeAnswer(BaseModel):
     checked against the pending set anyway.
     """
 
+    # Unknown fields are refused like every other body this engine takes (docs/00 §6.2's rule, applied
+    # everywhere): the shell sends these four and nothing else.
+    model_config = {"extra": "forbid"}
+
     id: str
     ok: bool = True
     result: Any = None

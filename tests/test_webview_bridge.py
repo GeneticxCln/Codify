@@ -400,6 +400,14 @@ class TestTheShellRoutes(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(posted.json(), {"accepted": False})
 
+    async def test_an_answer_with_a_field_the_shell_never_sends_is_refused(self) -> None:
+        posted = await self.client.post(
+            "/bridge/answer",
+            headers=self.headers,
+            json={"id": "x", "ok": True, "result": PAGE, "agent_config": {"role": "fixer"}},
+        )
+        self.assertEqual(422, posted.status_code)
+
     async def test_an_empty_poll_returns_a_null_id_rather_than_a_404(self) -> None:
         body = (await self.client.get("/bridge/next?wait=0", headers=self.headers)).json()
         self.assertEqual(body, {"id": None})

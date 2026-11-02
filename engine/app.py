@@ -600,7 +600,11 @@ class RequestSizeLimitMiddleware:
                 more_body = index < len(chunks) - 1
                 index += 1
                 return {"type": "http.request", "body": body, "more_body": more_body}
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # The body is spent. What a route or a response asks for next is the client's *disconnect*, and
+            # that is the server's to say, when it happens: answering with another empty `http.request` made
+            # the disconnect listener of a streaming response (uvicorn speaks ASGI 2.3, which still has one)
+            # a loop that never yields, and so a stall of the whole event loop.
+            return await receive()
 
         await self.app(scope, replay, send)
 

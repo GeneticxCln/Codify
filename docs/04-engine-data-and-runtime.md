@@ -2457,7 +2457,7 @@ it cannot land a frame on anybody's event stream.
 |---|---|---|
 | `GET /bridge/state` | shell | `{attached, inflight, claimed, timeout_s, max_chars}` — read-only, so the shell can decide whether to start polling at all |
 | `GET /bridge/next?wait=<s>` | shell | the oldest unanswered question, or `{"id": null}` when `wait` seconds pass with none. `op` is `read_page` or `navigate`; `navigate` carries `url` |
-| `POST /bridge/answer` | shell | `{"id", "ok", "result" \| "error"}`; `{"accepted": false}` for an id nobody issued |
+| `POST /bridge/answer` | shell | `{"id", "ok", "result" \| "error"}` extra=forbid (422 for any other field); `{"accepted": false}` for an id nobody issued |
 
 `wait` is clamped to 0–60 s. The shell reads the base URL and boot token on **every** poll rather than
 capturing them at startup, because the engine can be restarted underneath a running shell and a base URL
