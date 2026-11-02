@@ -18,6 +18,7 @@ import {
   EngineInfo,
   Event,
   Goal,
+  Suggestion,
   ModelCatalog,
   ModelOption,
   AgentConfig,
@@ -35,6 +36,7 @@ import {
   createWorkspace,
   setWorkspaceDesignContract,
   createTurn,
+  recordSuggestionAccepted,
   getGoal,
   listGoals,
   getGoalEvents,
@@ -199,6 +201,8 @@ import { readSidebarOpen, writeSidebarOpen } from "./sidebarPref";
 import { closeDrawer, nextDrawer, type Drawer } from "./drawers";
 import { useSidebarYield } from "./useSidebarYield";
 import { useEngineNotices, useNotifications } from "./useNotifications";
+import { useSuggestions } from "./useSuggestions";
+import { bellCount, bellLabel } from "./suggestions.ts";
 import {
   catalogNotification,
   goalNotification,
@@ -808,6 +812,9 @@ export const App: React.FC = () => {
   const engineStderrRef = useRef<string[]>([]);
   engineStderrRef.current = engineStderr;
   useEngineNotices(engineConnection, notify, () => engineStderrRef.current[engineStderrRef.current.length - 1]);
+  // What the engine noticed and a person may want to act on (docs/09 §10.22). Read on a timer while the engine is
+  // up; it never sends anything. The bell counts it, and Send to chat in the drawer is the only way it becomes a turn.
+  const suggestionInbox = useSuggestions(engineConnection === "live");
 
   // Live goal streams (one per goal, with reconnect backoff).
   // Which answer about a goal is the newest one asked for; see `goalReadOrder.ts`.
@@ -3551,7 +3558,11 @@ export const App: React.FC = () => {
    * the command bar can keep the text. Losing a long prompt because a picker is
    * unset is not a recoverable mistake for the user.
    */
-  const handleSendMessage = async (promptText: string): Promise<boolean> => {
+  const handleSendMessage = async (
+    promptText: string,
+    /** Told which turn this became, once the engine has made it. The inbox uses it to record where an offer went. */
+    onDispatched?: (goal: Goal) => void | Promise<void>,
+  ): Promise<boolean> => {
     if (!selectedWs) {
       setError(
         "Select a project folder first (folder button in the command bar).",
@@ -3665,6 +3676,13 @@ export const App: React.FC = () => {
       // Recording arms one
       // run the way it was asked for, and stays off until asked again.
       setRecord(false);
+      if (onDispatched) {
+        try {
+          await onDispatched(goal);
+        } catch {
+          // The turn exists and is running; a bookkeeping call that failed after it changes nothing about it.
+        }
+      }
 
       // The optimistic message claims its goal *now*, from what the dispatch returned, and not
       // after the read below: hydration dedupes by goal id, so until this message carries one, a
@@ -3707,6 +3725,19 @@ export const App: React.FC = () => {
       setIsLoading(false);
     }
     return true;
+  };
+
+  /**
+   * Send an inbox offer to the chat. This is the person's click and nothing else: the offer's words go through the
+   * ordinary composer path, so the gate classifies them and the write gate applies exactly as if they had typed it,
+   * and then the engine is told which turn that was. The engine never starts one itself (docs/09 §10.22).
+   */
+  const handleSendSuggestion = async (suggestion: Suggestion) => {
+    if (selectedWs?.id !== suggestion.workspace_id) return;
+    await handleSendMessage(suggestion.prompt, async (goal) => {
+      await recordSuggestionAccepted(suggestion.id, goal.id);
+    });
+    await suggestionInbox.refresh();
   };
 
   const handleEnableExecution = async (goalId: string, version: number) => {
@@ -4327,13 +4358,15 @@ export const App: React.FC = () => {
             tone="accent"
             onClick={() => setDrawer((open) => nextDrawer(open, "notifications"))}
             title="Notifications — goals finished or failed, plans waiting for approval, engine and model changes"
-            aria-label={inbox.unread > 0 ? `Notifications, ${inbox.unread} unread` : "Notifications"}
+            aria-label={bellLabel(inbox.unread, suggestionInbox.items.length)}
           >
             <Bell className="w-3.5 h-3.5" />
             <span>Notifications</span>
-            {inbox.unread > 0 && (
+            {bellCount(inbox.unread, suggestionInbox.items.length) > 0 && (
               <Badge tone="info" icon={false} className="ml-0.5">
-                {inbox.unread > 99 ? "99+" : inbox.unread}
+                {bellCount(inbox.unread, suggestionInbox.items.length) > 99
+                  ? "99+"
+                  : bellCount(inbox.unread, suggestionInbox.items.length)}
               </Badge>
             )}
           </Toggle>
@@ -4644,6 +4677,18 @@ export const App: React.FC = () => {
             onClear={inbox.clear}
             onClose={() => setDrawer((open) => closeDrawer(open, "notifications"))}
             onOpenItem={handleOpenNotification}
+            suggestions={{
+              items: suggestionInbox.items,
+              snoozed: suggestionInbox.snoozed,
+              busyId: suggestionInbox.busyId,
+              error: suggestionInbox.error,
+              selectedWorkspaceId: selectedWs?.id,
+              workspaceNames: Object.fromEntries(workspaces.map((w) => [w.id, w.name])),
+              onSend: (suggestion) => void handleSendSuggestion(suggestion),
+              onSnooze: (id) => void suggestionInbox.snooze(id),
+              onDismiss: (id) => void suggestionInbox.dismiss(id),
+              onScan: () => void suggestionInbox.scan(),
+            }}
           />
         )}
 

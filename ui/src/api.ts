@@ -55,6 +55,8 @@ import type {
   WorkspaceGit,
   WorkspacePush,
   SurfaceRequest,
+  Suggestion,
+  SuggestionList,
 } from "./types.ts";
 
 /**
@@ -661,6 +663,9 @@ export async function saveEngineSettings(
     sandbox_network?: boolean;
     laya_required?: boolean;
     review_deep?: boolean;
+    suggestions?: boolean;
+    suggest_ci?: boolean;
+    suggest_paused_hours?: number;
     session_compact_auto?: boolean;
     session_compact_keep_turns?: number;
   }
@@ -1797,6 +1802,60 @@ export async function requestGoalAction(
     );
   }
   return res.json();
+}
+
+// ── the suggestions inbox (docs/09 §10.22) ────────────────────────────────────────────────────────────────────────
+// Four small calls and no more. None of them starts work: the engine's detectors fill the inbox, a person reads it,
+// and "accept" is the composer sending the offer's words as an ordinary turn followed by `recordSuggestionAccepted`,
+// which only tells the engine which turn that was.
+
+async function suggestionCall<T>(path: string, init: RequestInit, fallback: string): Promise<T> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+    },
+  });
+  if (!res.ok) throw await engineError(res, fallback);
+  return res.json() as Promise<T>;
+}
+
+/** What is open in the inbox now (and how many are asleep). One workspace's, or everyone's when none is named. */
+export function listSuggestions(workspaceId?: string): Promise<SuggestionList> {
+  const query = workspaceId ? `?workspace_id=${encodeURIComponent(workspaceId)}` : "";
+  return suggestionCall(`/suggestions${query}`, {}, "Could not load suggestions");
+}
+
+/** "Look now": the same read-only sweep the engine runs on its own. Answers how many offers it made. */
+export function scanSuggestions(): Promise<{ created: number }> {
+  return suggestionCall("/suggestions/scan", { method: "POST" }, "Could not check for suggestions");
+}
+
+export function snoozeSuggestion(id: string, hours: number): Promise<Suggestion> {
+  return suggestionCall(
+    `/suggestions/${encodeURIComponent(id)}/snooze`,
+    { method: "POST", body: JSON.stringify({ hours }) },
+    "Could not snooze the suggestion",
+  );
+}
+
+export function dismissSuggestion(id: string): Promise<Suggestion> {
+  return suggestionCall(
+    `/suggestions/${encodeURIComponent(id)}/dismiss`,
+    { method: "POST" },
+    "Could not dismiss the suggestion",
+  );
+}
+
+/** Tell the engine which turn the person made from an offer. It creates nothing; the turn already exists. */
+export function recordSuggestionAccepted(id: string, goalId: string): Promise<Suggestion> {
+  return suggestionCall(
+    `/suggestions/${encodeURIComponent(id)}/accept`,
+    { method: "POST", body: JSON.stringify({ goal_id: goalId }) },
+    "Could not record the suggestion",
+  );
 }
 
 export async function getGoal(goal_id: string): Promise<Goal> {

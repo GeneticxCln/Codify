@@ -1166,3 +1166,54 @@ LEGACY_ROLE_RENAMES: dict[str, str] = {
     "reviewer": "critic",
     "summarizer": "scribe",
 }
+
+
+# ── the suggestions inbox (engine/suggestions.py, docs/09 §10.22) ─────────────────────────────────────────────────
+#
+# A closed set, like the pause reasons: the inbox says something specific for each kind, and a new one cannot arrive
+# without a decision about what to say.
+SuggestionKind = Literal["failing_command", "paused_goal", "stale_health_review", "red_ci"]
+SuggestionStatus = Literal["open", "accepted", "dismissed"]
+
+
+class Suggestion(BaseModel):
+    """One thing the engine noticed. An offer: reading it does nothing, and only a person's click can act on it.
+
+    `evidence` is what the finding was read from, as short facts a person can check (ids, counts, times); text that
+    came from a repository or a model is a field of those facts, never part of `title` or `prompt` beyond a bounded,
+    single-line quotation. `prompt` is what the person's own turn would say if they accept.
+    """
+
+    id: str
+    workspace_id: str
+    kind: SuggestionKind
+    title: str
+    detail: str
+    evidence: list[dict[str, Any]]
+    prompt: str
+    status: SuggestionStatus
+    snoozed_until: float | None
+    goal_id: str | None
+    created_at: float
+    updated_at: float
+
+
+class SuggestionList(BaseModel):
+    """The inbox as a window shows it: what is open now, and how many are asleep."""
+
+    suggestions: list[Suggestion]
+    snoozed: int
+
+
+class SuggestionSnooze(BaseModel):
+    model_config = {"extra": "forbid"}
+    # A day is the useful unit and a week the longest: a suggestion put off for longer is one to dismiss.
+    hours: int = Field(24, ge=1, le=168)
+
+
+class SuggestionAccept(BaseModel):
+    """The turn a person made from a suggestion. The engine records the link; it never makes the turn."""
+
+    model_config = {"extra": "forbid"}
+    goal_id: str = Field(..., min_length=1, max_length=200)
+

@@ -158,6 +158,17 @@ fresh-context readers look at each step before the critic decides, at about two 
 (`docs/01`, deep review). Only a person can turn it on; `POST /goals` refuses a body that carries it. The result is
 drawn by `ReviewReport.tsx` in the goal's timeline and as a "Deep review" section of the audit report.
 
+### 3.0a The inbox switches
+
+Three engine settings behind the suggestions inbox (`docs/09` §10.22), written through `PUT /settings/engine` by
+`SuggestionsCard.tsx` in Settings → Engine. **`suggestions`** (default on) lets the engine look for a command that keeps
+failing, a goal paused for hours and a stale health review; it reads rows it already holds, makes no model call and
+starts nothing. **`suggest_paused_hours`** (default 6, 1 to 168) is how long a paused goal waits before it is raised.
+**`suggest_ci`** (default **off**) lets it also ask GitHub whether the workspace's current commit is red. It is the only
+detector that contacts another machine without a button being pressed, so the card says exactly what it sends: the
+workspace's own `origin` and HEAD commit to `api.github.com`, no credential, at most every thirty minutes, for a workspace
+that did something that day. `POST /goals` and `POST /conversations/{id}/turns` refuse a body that carries any of them.
+
 ### 3.0b The fail-closed gate switch
 
 `LayaRequiredToggle.tsx` sits in the gate card and writes `laya_required`. Off by default, because

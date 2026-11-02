@@ -53,6 +53,7 @@ from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportInvalid, StatsImportService
 from engine.model_catalog import ModelCatalogService
 from engine.catalog_watch import CatalogWatch
+from engine.suggestions import SuggestionWatch
 from engine.models import (
     BUILTIN_PROVIDERS,
     scrub_surrogates,
@@ -85,6 +86,10 @@ from engine.models import (
     SkillImport,
     ROLES,
     SpeakRequest,
+    Suggestion,
+    SuggestionAccept,
+    SuggestionList,
+    SuggestionSnooze,
     TurnCreate,
     VersionedAction,
     TraceToggle,
@@ -394,6 +399,11 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # (`engine/catalog_watch.py`), so a quiet engine spends nothing on it.
     watch_task = asyncio.create_task(app.state.catalog_watch.run())
     app.state.catalog_watch_task = watch_task
+    # The inbox's detectors (`engine/suggestions.py`, docs/09 §10.22). Built from the store, the settings and the
+    # workspace list and from nothing else: it is handed no provider, registry or executor, so a sweep has nothing
+    # to call a model with and nothing to start a turn with. It only fills the inbox.
+    app.state.suggestions = SuggestionWatch(conn, app.state.settings, app.state.workspaces)
+    suggestions_task = asyncio.create_task(app.state.suggestions.run())
     # One recorder for the engine's life (engine/speech.py): a microphone left open by a closed
     # window is closed here, and its file deleted, rather than left to the two-minute cap.
     app.state.recorder = speech.Recorder()
@@ -404,6 +414,13 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         # Stopped before the database closes, and before the socket does: a task
         # that outlived the state directory it was watching for is an orphan with a
         # publish callback into a store that is being closed underneath it.
+        suggestions_task.cancel()
+        try:
+            await suggestions_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"suggestions watcher had already stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         watch_task.cancel()
         try:
             await watch_task
@@ -1503,6 +1520,11 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     "tts_auto_read": (0, 1),
     # Whether model-proposed browser navigation, clicks and typing are allowed. Off by default.
     "browser_actions": (0, 1),
+    # The inbox's detectors (engine/suggestions.py): on by default because they only read and only offer; the CI
+    # one contacts GitHub on its own and is off until a person turns it on; hours before a paused goal is raised.
+    "suggestions": (0, 1),
+    "suggest_ci": (0, 1),
+    "suggest_paused_hours": (1, 168),
     # Whether the conductor may fetch web pages: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
     # public site. Off on a fresh install (engine/services.py says why). Three states, so not a switch: a
     # checkbox's `true` is refused here like any other number a person is choosing.
@@ -1520,7 +1542,7 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
-    "sandbox_network", "laya_required", "review_deep",
+    "sandbox_network", "laya_required", "review_deep", "suggestions", "suggest_ci",
 })
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
@@ -2300,6 +2322,56 @@ async def rename_conversation(
     """
     conversations: ConversationService = request.app.state.conversations
     return conversations.rename(conversation_id, body)
+
+
+# ── the suggestions inbox (engine/suggestions.py, docs/09 §10.22) ─────────────────────────────────────────────────
+#
+# Four routes, and none of them starts work. Reading the inbox, snoozing and dismissing change one row; `accept`
+# records which turn a person already made from an offer (the turn itself came through `POST /conversations/{id}/
+# turns`, the one door, with the offer's `prompt` as the person's own words). `scan` is the "look now" button: the
+# same read-only sweep the watcher runs, with no model in it.
+
+
+def _suggestion_service(request: Request) -> Any:
+    service = request.app.state.suggestions.service
+    return service
+
+
+@app.get("/suggestions", response_model=SuggestionList)
+async def list_suggestions(request: Request, workspace_id: str | None = Query(None, max_length=200)) -> SuggestionList:
+    if workspace_id is not None:
+        request.app.state.workspaces.get(workspace_id)
+    result: SuggestionList = await asyncio.to_thread(_suggestion_service(request).inbox, time.time(), workspace_id)
+    return result
+
+
+@app.post("/suggestions/scan")
+async def scan_suggestions(request: Request) -> dict[str, int]:
+    """Look now. Respects the `suggestions` setting like the watcher does, and every rate limit the watcher has."""
+    return {"created": await request.app.state.suggestions.sweep()}
+
+
+@app.post("/suggestions/{suggestion_id}/snooze", response_model=Suggestion)
+async def snooze_suggestion(suggestion_id: str, body: SuggestionSnooze, request: Request) -> Suggestion:
+    result: Suggestion = await asyncio.to_thread(
+        _suggestion_service(request).snooze, suggestion_id, body.hours, time.time()
+    )
+    return result
+
+
+@app.post("/suggestions/{suggestion_id}/dismiss", response_model=Suggestion)
+async def dismiss_suggestion(suggestion_id: str, request: Request) -> Suggestion:
+    result: Suggestion = await asyncio.to_thread(_suggestion_service(request).dismiss, suggestion_id, time.time())
+    return result
+
+
+@app.post("/suggestions/{suggestion_id}/accept", response_model=Suggestion)
+async def accept_suggestion(suggestion_id: str, body: SuggestionAccept, request: Request) -> Suggestion:
+    """Record the turn a person made from this offer. It creates nothing: the goal must already exist."""
+    result: Suggestion = await asyncio.to_thread(
+        _suggestion_service(request).accept, suggestion_id, body.goal_id, time.time()
+    )
+    return result
 
 
 @app.post("/conversations/{conversation_id}/archive", response_model=Conversation)

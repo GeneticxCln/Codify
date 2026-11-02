@@ -170,6 +170,18 @@ class SettingsService:
         # Whether the conductor may navigate, click or type in the user's browser tabs. Off unless a person
         # explicitly enables it: these actions can send data to sites and act on logged-in pages.
         "browser_actions": (0, lambda v: 1 if v == 1 else 0),
+        # Whether the engine looks for things worth a person's attention (`engine/suggestions.py`): a command that
+        # keeps failing, a goal paused for hours, a health review that has gone stale. It reads rows the engine
+        # already holds, makes no model call and starts no turn; it only fills the inbox. On by default for that
+        # reason, and a person can turn it off.
+        "suggestions": (1, lambda v: 1 if v else 0),
+        # Whether it may also ask GitHub for the workspace's current checks (a red CI run). Off unless asked for,
+        # because this is the one detector that contacts another machine without a button being pressed: the
+        # request names the repository's own public `origin` and its HEAD commit, carries no credential, and runs
+        # at most every thirty minutes per workspace that has had activity that day.
+        "suggest_ci": (0, lambda v: 1 if v == 1 else 0),
+        # How many hours a paused goal waits before it is worth mentioning.
+        "suggest_paused_hours": (6, lambda v: max(1, min(v, 168))),
         # Whether the conductor's `fetch_page` may read the web: 0 not at all, 1 only the sites in
         # `web_fetch_hosts`, 2 any public site. Off on a fresh install: the address a fetch asks for leaves
         # the machine from the engine itself and can carry what a turn has read (engine/web_fetch.py,

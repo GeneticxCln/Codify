@@ -694,6 +694,13 @@ export interface EngineSettings {
   laya_required?: EngineSettingValue;
   /** 1 = two fresh-context review lenses read each step before the critic decides (docs/21 P1). Off by default. */
   review_deep?: EngineSettingValue;
+  /** 1 = the engine looks for things worth attention and fills the inbox (docs/09 §10.22). On by default; reads only. */
+  suggestions?: EngineSettingValue;
+  /** 1 = the inbox may also ask GitHub whether the current commit is red. Off by default: the one detector that
+   * contacts another machine without a button being pressed. */
+  suggest_ci?: EngineSettingValue;
+  /** Hours a paused goal waits before the inbox raises it. */
+  suggest_paused_hours?: EngineSettingValue;
   /** 1 = summarise older thread turns automatically before answering. */
   session_compact_auto?: EngineSettingValue;
   /** How many recent turns stay verbatim beside the summary. */
@@ -1160,3 +1167,32 @@ export interface ChatMessage {
   auditDoc?: object;
 }
 
+
+
+/** What kind of thing the inbox noticed. A closed set, so the window says something specific for each (docs/09 §10.22). */
+export type SuggestionKind = "failing_command" | "paused_goal" | "stale_health_review" | "red_ci";
+
+/**
+ * One offer in the suggestions inbox. Reading it does nothing; accepting it is the person sending `prompt` as their
+ * own turn through the ordinary composer path, then telling the engine which turn that was.
+ */
+export interface Suggestion {
+  id: string;
+  workspace_id: string;
+  kind: SuggestionKind;
+  title: string;
+  detail: string;
+  evidence: Array<Record<string, unknown>>;
+  prompt: string;
+  status: "open" | "accepted" | "dismissed";
+  snoozed_until: number | null;
+  goal_id: string | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface SuggestionList {
+  suggestions: Suggestion[];
+  /** How many open offers are asleep, so the inbox can say there are more without showing them. */
+  snoozed: number;
+}

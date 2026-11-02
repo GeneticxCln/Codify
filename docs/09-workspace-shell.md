@@ -3399,6 +3399,61 @@ bounded stored summary, the auto batch floor, prompt injection, and the GET/POST
 `ui/tests/turnTranscript.test.ts` (the marker's wording, automatic vs manual, and that it does not
 copy the summary). Not proven: the drawer against a real long thread from a live provider.
 
+### 10.22 The suggestions inbox: the engine notices, a person decides
+
+The engine now looks for things worth a person's attention and puts them in an inbox. This is the one place it acts
+without being asked, so the rule is that it **offers and never acts**: a detector's whole output is a row in
+`suggestions` (`docs/04` §2), and nothing reads that row except the inbox.
+
+| Kind | Fires when | Reads |
+|---|---|---|
+| `failing_command` | a command the verifier ran failed three or more times in the last day and its newest run has not passed | `test_result` events |
+| `paused_goal` | a goal has waited for a person's Start longer than `suggest_paused_hours` (default 6) | goal rows and the pause reason on the last `goal_status` event |
+| `stale_health_review` | a project that has been worked in this week, and is at least two weeks old, has had no health review for two weeks | the `conductor loaded the health-review skill` log line (a review records nothing else, by design) |
+| `red_ci` | **only if `suggest_ci` is on:** GitHub reports the workspace's current commit failing | `read_checks` (`docs/04` §3.0.9) |
+
+**What a detector cannot do.** It is handed a connection, the settings and the workspace list, and nothing else: no
+provider, no registry, no executor. It makes no model call and starts no turn or goal. A turn is created only by
+`POST /conversations/{id}/turns` (`docs/00` §6.8) and only the fixer writes (§6.9); neither is reachable from an
+offer.
+
+**What accepting is.** The window sends the offer's `prompt` as the person's own turn through that one door, exactly
+as if they had typed it, and then calls `POST /suggestions/{id}/accept {goal_id}`. That route creates nothing: it checks
+that the goal exists, is in the offer's workspace and is newer than the offer, and records the link. Every prompt ends
+"Do not change anything until I approve", and an approved plan is still the only way anything is written, so an accepted
+offer is a *plan-only* turn in the sense that matters: it can read and propose, and it cannot write until the person
+presses Start. `TurnCreate` carries no pipeline flags, so "plan-only" is the prompt and the write gate, not a field.
+
+**What keeps it small.** One row per (workspace, kind, key) however often it is seen; at most five open per workspace;
+at most one new offer of a kind per hour per workspace; a dismissed or accepted one is not raised again for a week.
+Snooze hides one for 1 to 168 hours. An open offer is *removed* when its reason goes away (the goal was resumed, the
+command passes again, the commit is green); a dismissal is kept, because that is what the cooldown remembers. A
+sweep runs every ten minutes, starting a minute after boot, and `POST /suggestions/scan` runs one now. The
+`suggestions` setting (default on) turns the whole thing off.
+
+**The CI detector contacts GitHub on its own**, which nothing else in the engine does without a button, so it is off
+by default and Settings → Engine says what it does when it is on: the request names the workspace's own `origin` and
+HEAD commit, carries no credential, goes to `api.github.com` only, and is made at most every thirty minutes for a
+workspace that did something that day. An idle workspace is never asked about.
+
+**Quoted text.** A command line or a goal title is text from a repository or a model. It is collapsed to one line,
+stripped of backticks and capped before it goes into a title or a prompt, and a check's name from GitHub appears only in
+`evidence`, never in the prompt.
+
+**What is not detected.** A command typed in a terminal tab. The terminal belongs to the desktop shell, which does not
+see exit codes: reporting them needs shell integration (OSC 133) in the user's shell and a route to carry the result.
+`failing_command` reads the commands the engine itself ran. That is the honest scope until a terminal source exists.
+
+Proven by `tests/test_suggestions.py`: each detector's finding and its non-findings, the rules above against a clock,
+the CI opt-in and interval, the routes, and a month of ten-minute sweeps with every detector eligible and nobody
+clicking, which asserts no goal, event or conversation changed, no model was reached, and the inbox stayed at five.
+In the window, `ui/tests/suggestionsApp.test.ts` mounts the App against the recording fake engine and asserts the same
+from the other side: with nothing pressed, no turn, goal or acceptance is sent; **Send to chat** sends exactly the
+offer's words through `POST /conversations/{id}/turns` with none of the pipeline flags and then records the goal it made;
+an offer about another project cannot be sent from this one; Snooze and Dismiss start nothing; and an answer that is not a
+list is an empty inbox. `suggestionsInbox.test.ts` covers the drawer section and the Settings card, and
+`suggestionsApi.test.ts` the five calls. The bell adds the inbox to what is unread (`bellCount`).
+
 ## 11. The clipboard history (built)
 
 An icon-only **Clipboard** button sits immediately after Notifications in the header and opens a fourth drawer, in

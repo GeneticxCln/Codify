@@ -3,6 +3,7 @@ import { AlertTriangle, Bell, CheckCheck, CheckCircle2, Info, Trash2, X, XCircle
 import { relativeTime, unreadCount, type AppNotification, type NotificationTone } from "../notifications";
 import { IconButton } from "./ui/IconButton";
 import { toneText } from "./ui/Badge";
+import { SuggestionsSection } from "./SuggestionsSection";
 
 /**
  * The notifications drawer: the list, newest first, in the same place the other two drawers sit.
@@ -34,7 +35,9 @@ export const NotificationsDrawer: React.FC<{
   onClose: () => void;
   /** A row with somewhere to go was pressed. */
   onOpenItem: (item: AppNotification) => void;
-}> = ({ items, onMarkAllRead, onClear, onClose, onOpenItem }) => {
+  /** The suggestions inbox (docs/09 §10.22), drawn above the list. Absent where the window has none to offer. */
+  suggestions?: React.ComponentProps<typeof SuggestionsSection>;
+}> = ({ items, onMarkAllRead, onClear, onClose, onOpenItem, suggestions }) => {
   const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
     const timer = setInterval(() => setNow(Date.now()), REFRESH_MS);
@@ -75,6 +78,7 @@ export const NotificationsDrawer: React.FC<{
       </div>
 
       <div className="flex-1 overflow-y-auto overflow-x-hidden p-2 space-y-1">
+        {suggestions && <SuggestionsSection {...suggestions} />}
         {items.length === 0 ? (
           // What the drawer is for, in a sentence, because an empty list is the first thing anyone sees.
           <div className="flex flex-col items-center gap-2 px-4 py-10 text-center text-xs text-codify-muted">

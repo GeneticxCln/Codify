@@ -515,6 +515,30 @@ CREATE TABLE conversation_compactions (
 CREATE INDEX idx_conversation_compactions_thread
   ON conversation_compactions(conversation_id, created_at DESC);
 
+-- The suggestions inbox (engine/suggestions.py, docs/09 §10.22). A row is an offer, never an action. One per
+-- (workspace, kind, key), for good, so a detector that runs every ten minutes cannot make a second copy of a finding;
+-- `status` is open | accepted | dismissed and `snoozed_until` hides an open one. `goal_id` is the turn a person made
+-- from it, set only by the accept route after the turn exists. The cascade takes the offers with the workspace.
+CREATE TABLE suggestions (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,            -- failing_command | paused_goal | stale_health_review | red_ci
+  key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  evidence TEXT NOT NULL DEFAULT '[]',
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  snoozed_until REAL,
+  goal_id TEXT REFERENCES goals(id) ON DELETE SET NULL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  UNIQUE (workspace_id, kind, key)
+);
+
+CREATE INDEX idx_suggestions_open ON suggestions(workspace_id, status, updated_at DESC);
+
+
 -- Per-workspace skill switches (docs/02 §3.2): disabled names only, so a
 -- fresh workspace and a re-enabled skill are both "no row". The cascade takes
 -- the switches with the workspace.
@@ -588,6 +612,11 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/workspaces/{id}/git` | — | `{branch, detached, dirty, ahead, behind, reason}` — the panel header's branch and working-tree read (`09` §4). A folder that is not a repository, one with no commits and a detached HEAD are three quiet 200s: `branch` is null and `reason` says which. `dirty` is any changed, staged, unmerged or untracked path; `ahead`/`behind` are 0 without an upstream. Read through `GitService._run_text` and the read-only git table's hardening (`GIT_OPTIONAL_LOCKS=0`), so it adds no spawn site |
 | `POST` | `/workspaces/{id}/push` | — | `{ok, branch, remote, sha, pr_url, reason}` — a person's push (`09` §4). The branch is the repository's own and the refspec is fully qualified (`refs/heads/<branch>:refs/heads/<branch>`), so a branch name cannot become an option; `origin` comes from the workspace, and `remote` is that URL with any embedded userinfo stripped, so a token in it is never echoed into a response the window renders; a failure's git sentence has the same substitution. A refused push is a **200 with `ok:false`** and git's sentence (no `origin`, a detached HEAD, a refused key), because each is an outcome the header can show. `pr_url` is GitHub's compare form when `origin` is GitHub. The engine stores no GitHub token and creates no pull request through GitHub's API. A route a person presses, not a tool: no model path reaches it |
 | `GET` | `/workspaces/{id}/ci` | — | `{state, sha, url, checks, reason}` — the current commit's GitHub check runs, for the header's CI line. `state` is `none`, `pending`, `success`, `failure` or `unknown`; `unknown` carries a reason (no GitHub origin, no commit, a private repository, a spent anonymous rate limit). Reads `https://api.github.com/repos/{owner}/{repo}/commits/{sha}/check-runs`, with owner/repository parsed from the workspace's `origin` and `sha` from `HEAD` — never from the request — and sends no credential. `tests/test_workspace_push.py` drives it with `httpx.MockTransport` |
+| `GET` | `/suggestions?workspace_id=` | `workspace_id` optional | `{suggestions: Suggestion[], snoozed}` — the inbox (`09` §10.22): open offers not asleep, newest first, and how many are asleep. A `Suggestion` is `{id, workspace_id, kind, title, detail, evidence, prompt, status, snoozed_until, goal_id, created_at, updated_at}`. 404 `unknown_workspace` |
+| `POST` | `/suggestions/scan` | — | `{created}` — one sweep now: the same read-only detectors and rate limits the watcher runs, with no model call. `{created: 0}` when the `suggestions` setting is off |
+| `POST` | `/suggestions/{id}/snooze` | `{hours}` 1–168, default 24, extra=forbid | `Suggestion`. 409 `illegal_status` if it is not open |
+| `POST` | `/suggestions/{id}/dismiss` | — | `Suggestion`. 409 `illegal_status` if it is not open |
+| `POST` | `/suggestions/{id}/accept` | `{goal_id}` extra=forbid | `Suggestion` — records the turn a person already made from the offer; **creates nothing**. 409 `goal_not_in_workspace` / `goal_predates_suggestion`. A turn comes only from `POST /conversations/{id}/turns` (`00` §6.8) |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |

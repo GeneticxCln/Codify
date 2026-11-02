@@ -330,6 +330,32 @@ CREATE TABLE IF NOT EXISTS mcp_tools (
 );
 
 CREATE INDEX IF NOT EXISTS idx_mcp_tools_server ON mcp_tools(server_id, name);
+
+-- Things the engine noticed and a person may act on (docs/09 §10.22). A row is an offer, never an action: nothing
+-- reads one except the inbox, and the only way one becomes work is a person sending its `prompt` as a turn.
+-- One row per (workspace, kind, key), for good: a repeat of the same finding is the same row, so a detector that
+-- runs every ten minutes cannot make ten of them, and a dismissed one stays dismissed for its cooldown.
+-- `status` is open, accepted or dismissed; `snoozed_until` hides an open one until then. `goal_id` is the turn a
+-- person made from it, set only by the accept route.
+CREATE TABLE IF NOT EXISTS suggestions (
+  id TEXT PRIMARY KEY,
+  workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  kind TEXT NOT NULL,
+  key TEXT NOT NULL,
+  title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '',
+  evidence TEXT NOT NULL DEFAULT '[]',
+  prompt TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'open',
+  snoozed_until REAL,
+  goal_id TEXT REFERENCES goals(id) ON DELETE SET NULL,
+  created_at REAL NOT NULL,
+  updated_at REAL NOT NULL,
+  UNIQUE (workspace_id, kind, key)
+);
+
+CREATE INDEX IF NOT EXISTS idx_suggestions_open ON suggestions(workspace_id, status, updated_at DESC);
+
 """
 
 
