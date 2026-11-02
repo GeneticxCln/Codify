@@ -1,0 +1,42 @@
+# Weekly dependency updates, one grouped pull request per ecosystem so a week's bumps arrive
+# as four reviews, not forty. Each pull request runs the same check.yml as any other, and
+# nothing here merges itself. The advisory jobs in check.yml report known vulnerabilities in
+# what is already locked; this proposes the newer versions that would fix them.
+version: 2
+updates:
+  - package-ecosystem: pip
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      python:
+        patterns: ["*"]
+
+  - package-ecosystem: npm
+    directory: "/ui"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      ui:
+        patterns: ["*"]
+
+  - package-ecosystem: cargo
+    directory: "/src-tauri"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    groups:
+      rust:
+        patterns: ["*"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 2
