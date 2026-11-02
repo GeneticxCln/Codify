@@ -219,6 +219,14 @@ async def resolve_target(url: str, resolve: McpResolver = system_resolver) -> tu
 def _auth_headers(auth_kind: str, auth_header: str, secret: str) -> dict[str, str]:
     if auth_kind == "none" or not secret:
         return {}
+    if not secret.isascii():
+        # An HTTP header value is sent as ASCII. `httpx` raises `UnicodeEncodeError` while building the request,
+        # which is neither an `McpError` nor an `httpx.HTTPError`, so it escaped the probe and the call as a 500.
+        raise McpError(
+            "this server's credential has a character that cannot be sent in an HTTP header; "
+            "save it again in Settings → MCP using plain ASCII.",
+            "mcp_invalid_secret",
+        )
     if auth_kind == "bearer":
         return {"Authorization": f"Bearer {secret}"}
     # Checked again here and not only when the server is saved: a row written before the check existed is
@@ -891,6 +899,9 @@ class McpService:
         if any(ord(char) < 32 or ord(char) == 127 for char in secret):
             # A control character in a credential is a second header, or a request the server cannot parse.
             raise ApiError(422, "mcp_invalid_secret", "a credential cannot contain a control character")
+        if not secret.isascii():
+            # Sent as an HTTP header, which is ASCII: refused here in words rather than as a crash at the first call.
+            raise ApiError(422, "mcp_invalid_secret", "a credential must be plain ASCII to be sent in an HTTP header")
         if auth_kind == "none":
             return "", ""
         if auth_kind == "bearer":

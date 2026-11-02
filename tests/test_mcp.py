@@ -559,6 +559,31 @@ class McpHeaderNameTestCase(unittest.IsolatedAsyncioTestCase):
             )
         self.assertEqual("mcp_invalid_secret", refused.exception.code)
 
+    async def test_a_non_ascii_credential_is_refused_at_save(self) -> None:
+        """An HTTP header value is ASCII; `httpx` raises `UnicodeEncodeError` building the request otherwise."""
+        for kind in ("bearer", "header"):
+            with self.subTest(kind=kind), self.assertRaises(ApiError) as refused:
+                await self.service.create(
+                    McpServerCreate(
+                        name="s", url=PUBLIC, auth_kind=kind, auth_header="X-Api-Key" if kind == "header" else "",
+                        secret="sk-é☃",  # noqa: S106 — a fake value in a hermetic test
+                    )
+                )
+            self.assertEqual((422, "mcp_invalid_secret"), (refused.exception.status, refused.exception.code))
+        self.assertEqual([], self.service.servers())
+
+    async def test_a_stored_non_ascii_credential_fails_in_words_not_as_a_crash(self) -> None:
+        server = await self.service.create(McpServerCreate(name="s", url=PUBLIC))
+        self.conn.execute(
+            "UPDATE mcp_servers SET auth_kind = 'bearer', api_key_ref = ? WHERE id = ?",
+            (f"mcp/{server['id']}", server["id"]),
+        )
+        self.conn.commit()
+        self.keychain.set_secret(f"mcp/{server['id']}", "sk-é")
+        with self.assertRaises(ApiError) as refused:
+            await self.service.probe(str(server["id"]))
+        self.assertEqual("mcp_invalid_secret", refused.exception.code)
+
     async def test_an_ordinary_header_name_still_works(self) -> None:
         server = await self.service.create(
             McpServerCreate(
