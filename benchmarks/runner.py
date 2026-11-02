@@ -382,6 +382,27 @@ def _start_repository(workspace: Path) -> bool:
     return False
 
 
+def _build_registry(
+    conn: sqlite3.Connection, task: dict[str, Any], *, canned: bool, engine_db: Path | None, conductor: bool,
+) -> tuple[AgentRegistryService, CannedProvider | None]:
+    """The registry a task runs against: the scripted provider under a canned tier, the person's own configs otherwise."""
+    if canned:
+        provider = CannedProvider([dict(w) for w in task.get("canned_write", [])], conductor=conductor)
+        registry = AgentRegistryService(conn, CannedFactory(provider), Keychain())
+        for role in ROLES:
+            registry.set_config(role, AgentConfigUpdate(provider="ollama", model_name="bench"))
+        return registry, provider
+    ready = seed_agent_configs(engine_db or default_db_path(), conn)
+    missing = [r for r in ROLES if r not in ready]
+    if missing:
+        raise BenchmarkError(
+            "these roles have no model configured: "
+            f"{', '.join(missing)} — set them in Settings → Agents, or run "
+            "`--tier smoke`"
+        )
+    return AgentRegistryService(conn, ProviderFactory(Keychain()), Keychain()), None
+
+
 async def run_task(
     task: dict[str, Any],
     work_root: Path,
@@ -419,26 +440,9 @@ async def run_task(
             WorkspaceCreate(name=f"bench-{task['id']}", root_path=str(workspace))
         )
 
-        provider: CannedProvider | None = None
-        if canned:
-            provider = CannedProvider(
-                [dict(w) for w in task.get("canned_write", [])], conductor=driver == "conductor",
-            )
-            registry = AgentRegistryService(conn, CannedFactory(provider), Keychain())
-            for role in ROLES:
-                registry.set_config(
-                    role, AgentConfigUpdate(provider="ollama", model_name="bench")
-                )
-        else:
-            ready = seed_agent_configs(engine_db or default_db_path(), conn)
-            missing = [r for r in ROLES if r not in ready]
-            if missing:
-                raise BenchmarkError(
-                    "these roles have no model configured: "
-                    f"{', '.join(missing)} — set them in Settings → Agents, or run "
-                    "`--tier smoke`"
-                )
-            registry = AgentRegistryService(conn, ProviderFactory(Keychain()), Keychain())
+        registry, provider = _build_registry(
+            conn, task, canned=canned, engine_db=engine_db, conductor=driver == "conductor",
+        )
 
         goal = goals.create(
             GoalCreate(
@@ -616,7 +620,11 @@ def summarise(results: list[dict[str, Any]]) -> dict[str, Any]:
         if failure:
             code = str(failure.get("code"))
             failure_codes[code] = failure_codes.get(code, 0) + 1
+    from benchmarks.review_tier import summarise_review
+
+    review_summary = summarise_review(results)
     return {
+        **({"review": review_summary} if review_summary else {}),
         "tasks": total,
         "passed": passed,
         "failed": total - passed,
@@ -664,6 +672,12 @@ def _run_one(
     """
     started = time.monotonic()
     try:
+        if task.get("kind") == "review":
+            # A fixed diff handed to the reviewers, not a goal (`benchmarks/review_tier.py`). Imported here because
+            # that module builds on this one.
+            from benchmarks.review_tier import run_review_task
+
+            return asyncio.run(run_review_task(task, work_root, canned=canned, engine_db=engine_db, attempt=attempt))
         return asyncio.run(run_task(
             task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace, driver=driver,
         ))
@@ -766,6 +780,9 @@ def main(argv: list[str] | None = None) -> int:
                 raise BenchmarkError(f"no task {args.only!r} in tier {args.tier!r}")
         if not tasks:
             raise BenchmarkError(f"tier {args.tier!r} has no tasks to run")
+        from benchmarks.review_tier import expand_review_modes
+
+        tasks = expand_review_modes(tasks)
         canned = str(tier.get("provider", "configured")) == "canned"
         # Everything resolved before anything runs: a tier that fails halfway
         # has spent the budget and said nothing about what it reached.

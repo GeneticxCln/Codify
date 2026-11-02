@@ -39,6 +39,7 @@ labelled `tokens_are_synthetic` for the same reason.
 |---|---|---|---|
 | `smoke` | canned (`benchmarks/provider.py`) | Proves the harness. Deterministic, offline, ~90 ms. | nothing |
 | `repo_scale` | configured (your models) | Cross-file, multi-step refactors with a real test command at the end. | real tokens |
+| `review` | configured (your models) | Does a reviewer find a defect planted in a fixed diff, and does it cry wolf on a clean one? Standard critic against deep review (`docs/21` P1). | real tokens |
 
 The synthetic fixture under `benchmarks/fixtures/synthetic-repo/` is what makes
 `smoke` hermetic: a small Python module with a test suite, committed here, so
@@ -52,6 +53,27 @@ fixture, so they need no fetch and no third-party code. A task written against a
 *vendored* repository (§4) is the other kind: until one has been fetched, the tier
 fails with a diagnosis naming the missing repository rather than scoring an empty
 run as a perfect one.
+
+### The review tier
+
+A review task is not a goal. The fixer's output is whatever a model writes today, so a defect cannot be planted in
+it; each task instead hands the reviewers a **fixed diff** against the committed fixture and scores what came back
+(`benchmarks/review_tier.py`). Eight tasks ship: six with one planted defect each (an off-by-one, a missing call site,
+a path escape, an untested branch, a hard-coded token, a swallowed error) and two correct diffs as **controls**, which
+exist so that a false alarm can be counted. The diffs are written by hand against `synthetic-repo`, and their hunk
+headers are illustrative.
+
+Every task runs twice, as `<id>@standard` and `<id>@deep`, with `review_deep` set to 0 and 1 in a scratch store. The
+report's `summary.review` gives, per mode, the **counts** of defects the critic caught (it requested changes), defects
+the deep report named, false alarms on the controls (a request for changes, or any blocker or major finding), and the
+model calls spent: counts, because a rate over eight tasks reads as a precision it does not have. Run it with
+`--repeat 3` and read the three together.
+
+Under the canned provider the quality checks are `skipped` and the recall counts are `null`: a canned reviewer's reply
+is written by the harness, so a zero would say something was measured. What the canned run does prove, and
+`tests/test_review_benchmark.py` holds, is the wiring: deep mode records its lenses, standard mode none, and neither
+exceeds its call cap (3 for standard, 5 for deep: the critic's own answer and its two read-only command rounds, plus the
+two model lenses). `python3 -m benchmarks.runner --tier review` needs every role configured, like `repo_scale`.
 
 ## 3. Running them
 

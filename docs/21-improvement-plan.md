@@ -49,7 +49,7 @@ None of this adds a gate mechanism: a new check joins `make check` or an existin
 **P0 — Clarity. Status: built in this change.** `CLAUDE.md` trimmed from 21.8 KB to under 12 KB with every invariant
 quote byte-identical; a byte cap in `tests/test_claude_md_contracts.py`; this document registered in all four places.
 
-**P1 — Goldfish review. Status: engine and UI built (`engine/review.py`, the deep path in `_critic`, `review_deep`, the two events, `ReviewReport.tsx`, `DeepReviewCard.tsx`, the audit lane); the benchmark is planned.**
+**P1 — Goldfish review. Status: engine and UI built (`engine/review.py`, deep path in `_critic`, `review_deep`, the two events, `ReviewReport.tsx`, `DeepReviewCard.tsx`, the audit lane); the review tier is built (`benchmarks/review_tier.py`, `make bench-review`). The measured recall is not yet: it needs a real provider, and the default stays `standard` until it is.**
 - `engine/review.py`, pure: `ReviewPacket`, one `build_packet`, `parse_findings` (severity `blocker|major|nit`, non-empty
   scope and recommendation), a deterministic `synthesize` (dedupe by file, line and category; severity max; lens list kept),
   `render_report`. Lenses: *zoom-out* (YAGNI, reuse, premature abstraction), *comprehension* (can a fresh reader follow

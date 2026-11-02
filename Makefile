@@ -1,4 +1,4 @@
-.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup setup-laya doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-smoke smoke-tabs
+.PHONY: help test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup setup-laya doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-review bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -59,6 +59,7 @@ help:
 	@echo "  make run-engine-preview - Start the engine and print the token/port for the browser preview"
 	@echo "  make run-engine-scratch - Start an engine isolated under $(SCRATCH_HOME) (real ~/.codify untouched)"
 	@echo "  make bench-smoke  - Run the hermetic benchmark tier under both drivers (no network, no models, no spend)"
+	@echo "  make bench-review - Run the review tier: standard critic against deep review on planted defects (spends tokens)"
 	@echo "  make bench        - Run the repo_scale tier against your configured models (spends tokens; BENCH_DRIVER=recipe for the fixed pipeline)"
 	@echo "  make check        - Run all verifications (ruff + mypy + UI tests + UI test typecheck + Python tests + stream tests + benchmark smoke + UI build + Tauri check)"
 	@echo "  make ci           - Run the whole CI gate locally: make check plus the declared $(PY_MIN) leg"
@@ -338,6 +339,11 @@ run-engine-scratch:
 BENCH_DRIVER ?= conductor
 bench:
 	python3 -m benchmarks.runner --tier repo_scale --driver $(BENCH_DRIVER)
+
+# The review tier (docs/08, docs/21 P1) spends real tokens too, three runs of eight diffs in two modes by default, so
+# it is a deliberate command and not part of `check` or `ci`.
+bench-review:
+	python3 -m benchmarks.runner --tier review --repeat 3
 
 # Both drivers, because both are real paths: the conductor is what a person's goal gets, the recipe is what is left
 # for `parallel` goals and for an install with no tool-capable model.

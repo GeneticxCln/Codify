@@ -41,6 +41,8 @@ _CANNED_USAGE = {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140}
 # conductor benchmark's own test pins both against the engine.
 APPROVED_STEP = "The user has approved this plan and started it: "
 STEP_MOVES = ("write", "verify", "review", "summarize")
+# The words every review lens's system prompt carries (`engine.review.lens_system_prompt`).
+LENS_MARKER = "reading as the"
 _STEP_ID = re.compile(r"one step only: step (\S+?),")
 
 
@@ -73,6 +75,10 @@ class CannedProvider(BaseProvider):
         self.calls.append(role)
         if self.usage_sink is not None:
             self.usage_sink(dict(_CANNED_USAGE))
+        if role == "critic" and LENS_MARKER in system_prompt:
+            # A review lens (`engine/review.py`) is a critic call with its own contract. The canned reader found
+            # nothing, which is the one answer the harness can give without pretending to have read the diff.
+            return json.dumps({"findings": []})
         return json.dumps(self._reply(role))
 
     @property
