@@ -70,6 +70,14 @@ A gate that cannot run is a **skipped** gate, never a broken pipeline: `LayaServ
 catches everything and the pipeline proceeds exactly as it did before Laya existed. Skipping is
 logged (`log` event, level `info`) and surfaced in Settings, so a silent no-op can't hide.
 
+The one exception is the engine-wide `laya_required` setting (0 by default). When it is 1, a gate
+that is `unavailable` — configured, but its call failed or returned nothing usable — refuses the
+turn or goal with the `laya_required` error instead of running unguarded. A gate nobody configured
+is still a deliberate `skipped` gate (`LayaNotConfigured`, `unavailable=False`) and is not refused,
+so a fresh install is not locked out by the setting. This is the only mode in which the gate fails
+closed; the default stays fail-open because the gate is an optional accelerator, and a missing gate
+must not make the engine unusable.
+
 The routable checkpoints are preloaded on purpose: without it, traffic that alternates languages
 rebuilds a checkpoint per request (upstream measured 7–10 s per switch). Only `english` and
 `multilingual` are preloaded, not `Router(preload=True)`'s all three: the third, `typed-decisions`,

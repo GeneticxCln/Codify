@@ -410,6 +410,42 @@ class TestAQuestionIsAnswered(TurnTestCase):
             stages[0]["detail"], "fallback model returned no typed answers"
         )
 
+    async def test_a_required_gate_refuses_the_turn_it_could_not_check(self) -> None:
+        # The default is fail-open, because a gate with no model is a fresh install and not a broken
+        # install. `laya_required` is the opt-in that turns "not checked" into "not answered".
+        self.settings.set_int("laya_required", 1)
+        executor = self._executor(_UnavailableGate())
+        executor.settings = self.settings
+        app.state.executor = executor
+        goal = self._turn("hi")
+        await executor.run_chat(goal.id)
+
+        self.assertEqual("FAILED", self.goals.get(goal.id).status)
+        errors = [
+            e.payload for e in self.goals.events_after(goal.id, 0) if e.type == "error"
+        ]
+        self.assertEqual(["laya_required"], [e.get("code") for e in errors])
+        self.assertIn("required", str(errors[0].get("message")))
+        self.assertFalse(
+            any("run continued" in str(log.get("message")) for log in self._logs(goal.id)),
+            "a refused turn must not also say it continued",
+        )
+
+    async def test_a_required_gate_refuses_a_goal_before_planning(self) -> None:
+        self.settings.set_int("laya_required", 1)
+        executor = self._executor(_UnavailableGate())
+        executor.settings = self.settings
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="do it"))
+
+        await executor.run_planning(goal.id)
+
+        self.assertEqual("FAILED", self.goals.get(goal.id).status)
+        self.assertEqual([], self.goals.steps(goal.id), "the gate must fail before a plan exists")
+        errors = [
+            e.payload for e in self.goals.events_after(goal.id, 0) if e.type == "error"
+        ]
+        self.assertEqual(["laya_required"], [e.get("code") for e in errors])
+
 
 class TestOnlyQuestionsSkipThePipeline(TurnTestCase):
     async def test_a_code_change_runs_the_whole_pipeline(self) -> None:

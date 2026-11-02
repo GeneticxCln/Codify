@@ -1490,13 +1490,16 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     "web_fetch": (0, 2),
     # Workspace commands may reach the network only when a person asks; a goal can opt in with `allow_network`.
     "sandbox_network": (0, 1),
+    # Fail closed when the pre-flight gate cannot answer (docs/05 §3). Off by default: an install with
+    # no gate model still runs, exactly as it did before the setting existed.
+    "laya_required": (0, 1),
 }
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
-    "sandbox_network",
+    "sandbox_network", "laya_required",
 })
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest

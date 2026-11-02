@@ -238,6 +238,17 @@ class _Conduct(_Plan):
                     engine="skipped", skipped_reason=f"gate error: {exc}", unavailable=True
                 )
                 gate_stage.record("unavailable", decision.skipped_reason)
+        if self._gate_required() and decision.unavailable:
+            # The opt-in fail-closed mode. Without it, an unavailable gate is a warning and the turn runs;
+            # with it, a request that was not checked is not answered, because the person asked for the
+            # check to be a condition of running.
+            self._fail(
+                goal_id, None, "laya_required",
+                "The pre-flight gate is required (laya_required) but it could not answer, "
+                "so this turn was refused.",
+                role="laya",
+            )
+            return
         # A gate that could not answer is something a person has to act on: the turn was not checked,
         # and staying silent about that is the same trust-me with less evidence. It is a warning, not a
         # block — the gate has never been allowed to fail a turn it could not judge (docs/05) — and it

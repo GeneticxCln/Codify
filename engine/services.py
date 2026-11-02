@@ -143,6 +143,10 @@ class SettingsService:
         # talks to the internet is a supply-chain and data-leak surface, and a goal's own `allow_network`
         # opts that one run in.
         "sandbox_network": (0, lambda v: 1 if v else 0),
+        # Fail closed when the pre-flight gate cannot answer. Off by default: the gate is an optional
+        # accelerator, and refusing every request on an install without a working gate would make the
+        # engine unusable. A person who wants the guarantee turns it on.
+        "laya_required": (0, lambda v: 1 if v else 0),
         # Whether an approved plan is executed by the conductor or by the
         # engine's own sequence. 1 leaves the conductor driving, which is the
         # point of having one; 0 is the escape hatch for a model that is not yet

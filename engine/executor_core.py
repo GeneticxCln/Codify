@@ -313,6 +313,15 @@ class _ExecutorCore:
         except Exception:
             return False
 
+    def _gate_required(self) -> bool:
+        """Whether an unavailable pre-flight gate must refuse the request (`laya_required`)."""
+        if self.settings is None:
+            return False
+        try:
+            return bool(self.settings.get_int("laya_required"))
+        except Exception:
+            return False
+
     def _parallel_width(self) -> int:
         """The configured parallel width: env override, then persisted setting,
         then the built-in default. Read per batch, so a settings change lands

@@ -83,6 +83,14 @@ class _Plan(_Design):
                 # The block reached the end without declaring an outcome, and a
                 # gate that raised is the one outcome that is not a clean skip.
                 laya_stage.record("unavailable", decision.skipped_reason)
+        if self._gate_required() and decision.unavailable:
+            self._fail(
+                goal_id, None, "laya_required",
+                "The pre-flight gate is required (laya_required) but it could not answer, "
+                "so this goal was refused before any step ran.",
+                role="laya",
+            )
+            return
         if decision.engine != "skipped":
             self.goals.publish(self._event(
                 goal_id, None, "agent_assigned",
