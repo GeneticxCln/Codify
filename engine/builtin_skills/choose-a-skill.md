@@ -33,6 +33,12 @@ has more than one plausible recipe.
 | wasted model calls | `usage-audit` |
 | the shape of a change before its code | `blueprint` |
 | one attempt may land on the wrong shape | `compare-approaches` |
+| a behaviour, screen or output that must match a reference | `match-a-reference` |
+| motion in an interface | `ui-motion`, then `design-review` |
+| a note or comment that points at one place | `scoped-fix` |
+| a README, release note or post with numbers in it | `claims-ledger`, then `plain-prose` |
+| a measured number to push up or down | `tune-to-a-number` |
+| a short film, explainer or animated demo as code | `film-as-code` |
 
 ## Rules
 

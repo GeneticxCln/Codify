@@ -1,7 +1,7 @@
 # CLAUDE.md — working rules for this repository
 
 **This file is a distillation, not a second source of truth.** Everything below is
-sourced from `CONTRIBUTING.md` and `docs/00`–`21`; where this file and either of
+sourced from `CONTRIBUTING.md` and `docs/00`–`22`; where this file and either of
 those disagree, **they win and this file is the bug**. `tests/test_claude_md_contracts.py`
 fails if the invariants quoted here drift from `docs/00` §6, and caps this file's size, so
 that is enforced.
@@ -77,7 +77,7 @@ src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
 scripts/        fake_ollama.py (drive a goal with no API keys)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–21, below
+docs/           00–22, below
 ```
 
 ## Working rules
@@ -132,6 +132,7 @@ docs/           00–21, below
 | `docs/19` | deepseek-stack audit: native recipes |
 | `docs/20` | MCP admission design: invariant 10 |
 | `docs/21` | Improvement plan: review lenses, budgets, skill contracts |
+| `docs/22` | Motion and film audit: six native recipes |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

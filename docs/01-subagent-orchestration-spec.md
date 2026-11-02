@@ -649,15 +649,17 @@ and `tests/test_failure_visibility.py` for the output.
 librarian, design, planner — whether or not the request needed them, which made
 the sequence a property of the code rather than a decision of the decider. The
 seven stage moves replaced it, and the sequence they are used in is a *skill*
-(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of thirty-four built-ins in that directory. The set is:
-`adopt-a-change`, `blast-radius`, `blueprint`, `catch-up`, `choose-a-skill`, `compare-approaches`,
-`context-transfer`, `decision-log`, `design-review`, `encode-a-lesson`, `engineering-principles`,
-`explain-code`, `health-review`, `inspect-an-artifact`, `merge-ready`, `plain-prose`, `plan-loop`,
-`prepare-a-pull-request`, `prove`, `resume-long-run`, `review-loop`, `review-replies`,
-`revive-a-change`, `second-opinion`, `security-review`, `sharpen-the-ask`, `ship-a-change`,
-`ship-with-a-person`, `test-first`, `unstick`, `usage-audit`, `watch-ci`, `wide-audit`,
-`working-style`. All are data; `ship-a-change` is the old compiled order, and the rest cover
-review, proof, shipping, long-run state and understanding (docs/19). See docs/09 §10.14.
+(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of forty built-ins in that directory. The set is:
+`adopt-a-change`, `blast-radius`, `blueprint`, `catch-up`, `choose-a-skill`, `claims-ledger`,
+`compare-approaches`, `context-transfer`, `decision-log`, `design-review`, `encode-a-lesson`,
+`engineering-principles`, `explain-code`, `film-as-code`, `health-review`, `inspect-an-artifact`,
+`match-a-reference`, `merge-ready`, `plain-prose`, `plan-loop`, `prepare-a-pull-request`, `prove`,
+`resume-long-run`, `review-loop`, `review-replies`, `revive-a-change`, `scoped-fix`, `second-opinion`,
+`security-review`, `sharpen-the-ask`, `ship-a-change`, `ship-with-a-person`, `test-first`,
+`tune-to-a-number`, `ui-motion`, `unstick`, `usage-audit`, `watch-ci`, `wide-audit`, `working-style`.
+All are data; `ship-a-change` is the old compiled order, and the rest cover review, proof, shipping,
+long-run state and understanding (docs/19), and matching a reference, interface motion, scoped fixes,
+claims, tuning to a number and films as code (docs/22). See docs/09 §10.14.
 
 The menu is the workspace's, not the model's. Settings → Agent skills lists every skill that
 workspace's menu would contain and stores a disabled name in `workspace_disabled_skills` for that
