@@ -41,7 +41,7 @@ a built-in.
 | `make build-ui` | TypeScript check (`src` only) + Vite build; `make budgets` then checks its size (`ui/budgets.json`) |
 | `make check-tauri` | `cargo check`/`test` (jail tests need `bwrap`, `unshare`, an unprivileged overlay mount; `make doctor` says which), clippy `-D warnings`, `scripts/check_msrv.py`, `cargo fmt --check` |
 | `make check-history` | Every commit in `HISTORY_RANGE`, not just the tip; pre-push runs it second |
-| `make ci-report`, `make check-ghidra` | Publish `make ci`'s verdict as a GitHub status / the Ghidra fallback against a real install. Neither is in `check` or `ci` |
+| `make ci-report`, `make check-ghidra` | `make ci`'s verdict as a GitHub status / the Ghidra fallback on a real install. Neither is in `check` or `ci` |
 
 `make ci` is the real gate; `.github/workflows/check.yml` runs the same targets on a clean machine.
 `make hooks` installs `.githooks/` (`pre-commit`: `make lint typecheck`; `pre-push`: `make ci`).
@@ -124,14 +124,14 @@ docs/           00–21, below
 | `docs/11` | Ruflo audit |
 | `docs/12` | Scrapling audit: `fetch_page` |
 | `docs/13` | Grepify audit: `scan_code` |
-| `docs/14` | REA audit: Ghidra fallback, native binary reader |
+| `docs/14` | REA audit: `analyze_binary` |
 | `docs/15` | Xerg audit: `audit_usage` |
-| `docs/16` | DeepInfer and cmux audit: prompt-prefix reuse, JSON-schema replies |
-| `docs/17` | leanrea audit: the cost of one conductor call |
+| `docs/16` | DeepInfer and cmux audit |
+| `docs/17` | leanrea audit |
 | `docs/18` | Release and updates |
-| `docs/19` | deepseek-stack audit: the 24 native recipes |
+| `docs/19` | deepseek-stack audit: native recipes |
 | `docs/20` | MCP admission design: invariant 10 |
-| `docs/21` | Improvement plan: review lenses, health, cache diagnostics, size budget, skill contracts |
+| `docs/21` | Improvement plan: review lenses, budgets, skill contracts |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.
