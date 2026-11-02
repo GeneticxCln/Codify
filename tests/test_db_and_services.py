@@ -1,10 +1,11 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+import hashlib
 import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
 
-from engine.db import SCHEMA, _add_column, connect
+from engine.db import SCHEMA, SCHEMA_VERSION, _add_column, connect
 from typing import Any
 
 from engine.models import (
@@ -764,6 +765,68 @@ class TestAMigrationThatCannotRunSaysSo(unittest.TestCase):
         corrupt.write_bytes(b"this is not a sqlite database\n" * 40)
         with self.assertRaises(sqlite3.DatabaseError):
             connect(corrupt)
+
+
+class TestTheSchemaVersionIsStamped(unittest.TestCase):
+    """`PRAGMA user_version` says which build last shaped the file, so an older build can refuse a newer one.
+
+    Migrations here are `ALTER TABLE ... ADD COLUMN` only, which an older engine sharing the same `~/.codify` (a
+    checkout beside the installed app) reads without harm, so the number does NOT move for those. It moves when a
+    migration an older build could misread is added: a dropped or retyped column, a table rewritten. Until then
+    nothing could tell such a file from any other, and the older engine would run against it.
+    """
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.path = Path(self.temp_dir.name) / "stamped.db"
+
+    @staticmethod
+    def _version(path: Path) -> int:
+        raw = sqlite3.connect(path)
+        try:
+            return int(raw.execute("PRAGMA user_version").fetchone()[0])
+        finally:
+            raw.close()
+
+    def test_a_fresh_store_is_stamped(self) -> None:
+        connect(self.path).close()
+        self.assertEqual(SCHEMA_VERSION, self._version(self.path))
+        self.assertEqual(1, SCHEMA_VERSION, "bump only for a non-additive migration; docs/04 says why")
+
+    def test_a_store_from_before_the_stamp_is_stamped_and_keeps_its_rows(self) -> None:
+        conn = connect(self.path)
+        conn.execute("INSERT INTO engine_settings (key, value, updated_at) VALUES ('parallel_width', '3', 1)")
+        conn.commit()
+        conn.close()
+        raw = sqlite3.connect(self.path)
+        raw.execute("PRAGMA user_version = 0")  # what every install made before this build has
+        raw.close()
+
+        conn = connect(self.path)
+        self.addCleanup(conn.close)
+        self.assertEqual(SCHEMA_VERSION, self._version(self.path))
+        self.assertEqual(3, SettingsService(conn).get_int("parallel_width"))
+
+    def test_a_store_written_by_a_newer_build_is_refused_untouched(self) -> None:
+        raw = sqlite3.connect(self.path)
+        raw.execute("PRAGMA user_version = 999")
+        raw.close()
+        before = hashlib.sha256(self.path.read_bytes()).hexdigest()
+
+        with self.assertRaises(RuntimeError) as caught:
+            connect(self.path)
+
+        message = str(caught.exception)
+        self.assertIn(str(self.path), message, "the message names the file")
+        self.assertIn("newer", message)
+        self.assertEqual(999, self._version(self.path), "the stamp is not lowered")
+        self.assertEqual(before, hashlib.sha256(self.path.read_bytes()).hexdigest(), "nothing in the file changed")
+        raw = sqlite3.connect(self.path)
+        try:
+            self.assertEqual([], raw.execute("SELECT name FROM sqlite_master").fetchall(), "no schema was added")
+        finally:
+            raw.close()
 
 
 class TestRoleMigration(unittest.TestCase):

@@ -369,6 +369,16 @@ CREATE TABLE IF NOT EXISTS global_notes (
 """
 
 
+#: Which shape of the store this build writes, kept in `PRAGMA user_version`.
+#:
+#: Every migration here is `ALTER TABLE ... ADD COLUMN` or `CREATE ... IF NOT EXISTS`, which an older engine sharing
+#: the same `~/.codify` (a checkout beside the installed app) reads without harm, so the number does NOT move for
+#: those. It moves, by one, in the commit that adds a migration an older build could misread: a dropped or retyped
+#: column, a rewritten table, a changed meaning. `_prepare` refuses a file stamped higher than this, before it
+#: touches it, and stamps an older or unstamped one after migrating it (docs/04).
+SCHEMA_VERSION = 1
+
+
 def default_db_path() -> Path:
     """Where the store lives, decided in `engine/home.py` and nowhere else."""
     return home.db_path()
@@ -561,6 +571,14 @@ def _prepare(conn: sqlite3.Connection, db_path: Path, on_role_migrated: Any | No
     """Everything `connect` does to an open connection: the schema, the migrations, the seed."""
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA busy_timeout = 5000")
+    # Before the schema script, so a file from a newer build is refused untouched rather than migrated by a build
+    # that does not know what the newer one changed.
+    stamped = int(conn.execute("PRAGMA user_version").fetchone()[0])
+    if stamped > SCHEMA_VERSION:
+        raise RuntimeError(
+            f"the database at {db_path} was written by a newer Codify (schema {stamped}; this build reads up to "
+            f"{SCHEMA_VERSION}). Update Codify, or point CODIFY_HOME at a different folder; nothing in the file was changed."
+        )
     conn.executescript(SCHEMA)
     # SQLite gives the `-wal` and `-shm` files it creates the main file's mode, so a fresh
     # database needs nothing here. An older build's did not, and they exist by now.
@@ -661,6 +679,8 @@ def _prepare(conn: sqlite3.Connection, db_path: Path, on_role_migrated: Any | No
                 pass
     seed_agents(conn)
     conn.commit()
+    # `PRAGMA` takes no bound parameter; the value is this module's own integer.
+    conn.execute(f"PRAGMA user_version = {int(SCHEMA_VERSION)}")
 
 
 def migrate_agent_roles(conn: sqlite3.Connection) -> list[tuple[str, str]]:
