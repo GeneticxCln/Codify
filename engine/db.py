@@ -405,7 +405,7 @@ class _PerThreadConnection(sqlite3.Connection):
                 raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
             connection = self._local.connection
             if connection is None:
-                connection = sqlite3.connect(self._database, check_same_thread=False, timeout=30.0)
+                connection = sqlite3.connect(self._database, check_same_thread=False)
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA busy_timeout = 5000")
                 connection.execute("PRAGMA foreign_keys = ON")
@@ -506,7 +506,7 @@ def connect(
         raise RuntimeError(f"database path is a directory: {db_path}")
     home.ensure_private_file(db_path)
     conn = sqlite3.connect(
-        db_path, check_same_thread=False, timeout=30.0, factory=_PerThreadConnection,
+        db_path, check_same_thread=False, factory=_PerThreadConnection,
     )
     try:
         _prepare(conn, db_path, on_role_migrated)

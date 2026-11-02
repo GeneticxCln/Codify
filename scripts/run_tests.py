@@ -26,6 +26,8 @@ from __future__ import annotations
 import re
 import subprocess
 import sys
+import threading
+from typing import IO, TextIO
 
 # unittest writes the summary to stderr. `Ran N tests` and the verdict are
 # separate lines and either order of the verdict's own decoration is fine
@@ -81,15 +83,36 @@ def main(argv: list[str] | None = None) -> int:
     if not args:
         args = ["discover", "-s", "tests", "-p", "test_*.py", "-v"]
 
-    proc = subprocess.run(  # noqa: S603 — fixed `sys.executable -m unittest` prefix plus a developer's own arguments; no shell, nothing a model produced
+    # Streamed, not merely captured: a full suite is minutes of silence otherwise, and a developer watching
+    # the gate cannot tell a slow test from a hung one. Each pipe is drained on its own thread while the copy
+    # is kept for the summary/leak/escape checks below, so the two behaviours do not trade off.
+    proc = subprocess.Popen(  # noqa: S603 — fixed `sys.executable -m unittest` prefix plus a developer's own arguments; no shell, nothing a model produced
         [sys.executable, "-m", "unittest", *args],
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
-        check=False,
+        bufsize=1,
     )
-    output = proc.stdout + proc.stderr
-    sys.stdout.write(proc.stdout)
-    sys.stderr.write(proc.stderr)
+    if proc.stdout is None or proc.stderr is None:
+        raise RuntimeError("the test runner's output pipes were not created")
+    captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+
+    def pump(pipe: IO[str], sink: TextIO, key: str) -> None:
+        for line in pipe:
+            captured[key].append(line)
+            sink.write(line)
+            sink.flush()
+
+    pumps = [
+        threading.Thread(target=pump, args=(proc.stdout, sys.stdout, "stdout"), daemon=True),
+        threading.Thread(target=pump, args=(proc.stderr, sys.stderr, "stderr"), daemon=True),
+    ]
+    for thread in pumps:
+        thread.start()
+    proc.wait()
+    for thread in pumps:
+        thread.join()
+    output = "".join(captured["stdout"]) + "".join(captured["stderr"])
 
     if proc.returncode == 0 and not completed(output):
         sys.stderr.write(
