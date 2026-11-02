@@ -1,6 +1,14 @@
 {
   "name": "crypto",
   "description": "Weak or misused cryptography: broken hashes and ciphers, switched-off certificate checks, guessable tokens.",
+  "reviewed": "2026-11-02",
+  "sources": [
+    "CWE-295",
+    "CWE-327",
+    "CWE-328",
+    "CWE-338",
+    "CWE-347"
+  ],
   "rules": [
     {
       "id": "py-weak-hash",

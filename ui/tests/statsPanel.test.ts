@@ -121,6 +121,36 @@ test("topLanes orders by spend, keeps the biggest, and says what the rest add up
   assert.equal(topLanes({ a: lane(1) }, false).hidden, 0);
 });
 
+test("a lane that reported cache use shows its read share, and one that did not shows nothing", async () => {
+  const cached = { ...lane(10_000, 4), cache_read_tokens: 4_000, cache_write_tokens: 1_500, cache_read_ratio: 0.4 };
+  const silent = { ...lane(5_000, 2), cache_read_tokens: 0, cache_write_tokens: 0, cache_read_ratio: null };
+  await withDom(async (dom) => {
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const path = new URL(String(input)).pathname;
+      if (path === "/stats/overview") {
+        return json({
+          window_days: 0, generated_at: NOW_S, daily: [],
+          goals: { goals: 1, active: 0, succeeded: 1, failed: 0, cancelled: 0, success_rate: 100 },
+          usage: { ...lane(15_000, 6), failures: 0, by_role: { conductor: cached, critic: silent }, by_model: {} },
+        });
+      }
+      if (path === "/stats/failures") return json({ total: 0, retries: 0, causes: [], by_role: {}, by_stage: {}, window_days: 0, recovered: 0, recovery_rate: null, generated_at: NOW_S });
+      if (path === "/stats/history") return json({ days: [] });
+      if (path === "/stats/import") return json({ imported: false, days: [], source: null, imported_at: null });
+      throw new Error(`no answer for ${path}`);
+    }) as typeof fetch;
+    const api = await import("../src/api.ts");
+    api.setEngineInfo({ port: 7431, token: "t" });
+    const { StatsPanel } = await import("../src/components/StatsPanel.tsx");
+    await dom.render(h(StatsPanel));
+    for (let i = 0; i < 8; i++) await dom.settle();
+    const rows = [...card(dom, "By role").querySelectorAll(".flex.items-center.gap-2.text-xs")];
+    const byName = (name: string) => rows.find((r) => r.textContent?.startsWith(name));
+    assert.match(byName("conductor")?.textContent ?? "", /cache 40%/);
+    assert.doesNotMatch(byName("critic")?.textContent ?? "", /cache/, "an unknown share was drawn as a number");
+  });
+});
+
 const COVER = { goals: 900, goal_cap: 5000, events: 20000, event_cap: 20000, truncated: true, since: NOW_S - 100 * DAY };
 
 test("a window that reaches past where the read begins says from when it counts", () => {

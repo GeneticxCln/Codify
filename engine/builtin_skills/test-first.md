@@ -30,6 +30,12 @@ rather than claimed.
    timing-only failure), use the closest runnable check: a script, a
    reproduction command or a log check. Say why the test was not written.
 
+## Stop when
+
+- The new test failed for the right reason before the fix and passes after it, and both runs are shown.
+- Three fix attempts have failed: load `unstick` instead of a fourth variation.
+- No test can express the bug: say so and stop, rather than write one that mostly tests mocks.
+
 ## Rules
 
 - Never edit a test to match a wrong implementation.

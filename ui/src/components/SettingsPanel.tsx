@@ -19,6 +19,7 @@ import { WebAccessCard } from "./WebAccessCard";
 import { BrowserActionsCard } from "./BrowserActionsCard";
 import { SandboxCard } from "./SandboxCard";
 import { LayaRequiredToggle } from "./LayaRequiredToggle";
+import { DeepReviewCard } from "./DeepReviewCard";
 import { EngineRuntimeCard } from "./EngineRuntimeCard";
 import { SelectMenu } from "./SelectMenu";
 import { Sliders, ShieldCheck, Zap, AlertTriangle, Cpu, Wand2, Wrench, Workflow, Save, RotateCcw } from "lucide-react";
@@ -785,6 +786,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <WebAccessCard />
       <BrowserActionsCard />
       <SandboxCard />
+      <DeepReviewCard />
 
       <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">
         <div className="flex items-center gap-2 text-xs font-semibold text-codify-secondary">

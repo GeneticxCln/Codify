@@ -36,6 +36,16 @@ librarian, so it locks a direction from evidence rather than from a blank page);
 settings screen renders that rather than keeping its own description — a second copy is how a screen
 ends up promising an ability the engine no longer grants.
 
+**Deep review.** The engine-wide switch `review_deep` (0 by default; `PUT /settings/engine`, so a person's, never a
+goal's or a model's) puts two fresh-context readers before the critic's decision. Each is a `critic` call with a
+different system prompt (a lens is a parameter, never a ninth role) and is shown only the packet `engine/review.py`
+builds: the request, the step, the acceptance lines, the diff and the paths. The librarian's evidence and the
+fixer's summaries never reach a lens. A third lens, readiness (do the paths the step names exist, did source change
+with no test), is answered from the disk with no model call. The merged findings are appended to the critic's own
+prompt as evidence, and the critic still decides. A lens whose reply is unusable after the one re-ask is recorded
+`not_run` and not retried; if no model lens ran, the critic is sent exactly its standard prompt. Typical cost is two
+extra model calls per reviewed step, and the events are `review_lens` and `review_report` (the event table in `04`).
+
 The gate is not a pipeline stage: it runs once per goal before the librarian and never receives or
 produces a `PlanStep`. See `05` for its typed contract, engines, and blocking policy.
 
@@ -639,10 +649,10 @@ and `tests/test_failure_visibility.py` for the output.
 librarian, design, planner — whether or not the request needed them, which made
 the sequence a property of the code rather than a decision of the decider. The
 seven stage moves replaced it, and the sequence they are used in is a *skill*
-(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of thirty-three built-ins in that directory. The set is:
+(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of thirty-four built-ins in that directory. The set is:
 `adopt-a-change`, `blast-radius`, `blueprint`, `catch-up`, `choose-a-skill`, `compare-approaches`,
 `context-transfer`, `decision-log`, `design-review`, `encode-a-lesson`, `engineering-principles`,
-`explain-code`, `inspect-an-artifact`, `merge-ready`, `plain-prose`, `plan-loop`,
+`explain-code`, `health-review`, `inspect-an-artifact`, `merge-ready`, `plain-prose`, `plan-loop`,
 `prepare-a-pull-request`, `prove`, `resume-long-run`, `review-loop`, `review-replies`,
 `revive-a-change`, `second-opinion`, `security-review`, `sharpen-the-ask`, `ship-a-change`,
 `ship-with-a-person`, `test-first`, `unstick`, `usage-audit`, `watch-ci`, `wide-audit`,

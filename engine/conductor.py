@@ -214,6 +214,9 @@ class ToolCallRequest:
     messages: list[dict[str, Any]]
     temperature: float
     max_tokens: int
+    #: The names of the tools offered on this call, for the prompt fingerprint (`engine/cache_diagnostics.py`).
+    #: Names only: a description is prompt text, and the diagnostics keep none.
+    tools: tuple[str, ...] = ()
 
 
 class CallBooks(Protocol):
@@ -506,7 +509,7 @@ class Conductor:
             books = (
                 self._ledger.open(ToolCallRequest(
                     self.provider, self.model, self.system_prompt, messages,
-                    CALL_TEMPERATURE, CALL_MAX_TOKENS,
+                    CALL_TEMPERATURE, CALL_MAX_TOKENS, tuple(t.name for t in self.tools),
                 ))
                 if self._ledger is not None else None
             )

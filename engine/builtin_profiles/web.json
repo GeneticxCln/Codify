@@ -1,6 +1,16 @@
 {
   "name": "web",
   "description": "Web application settings and calls that widen the attack surface: debug on, open CORS, no CSRF, markup trusted.",
+  "reviewed": "2026-11-02",
+  "sources": [
+    "CWE-79",
+    "CWE-352",
+    "CWE-489",
+    "CWE-601",
+    "CWE-614",
+    "CWE-942",
+    "CWE-1327"
+  ],
   "rules": [
     {
       "id": "py-debug-on",

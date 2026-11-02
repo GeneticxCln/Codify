@@ -5,6 +5,8 @@ import React, {
   useMemo,
   useRef,
   useSyncExternalStore,
+  lazy,
+  Suspense,
 } from "react";
 import {
   Workspace,
@@ -183,10 +185,12 @@ import { BrowserPane } from "./components/BrowserPane";
 import { classifyBrowserAddress } from "./browserDispatch";
 import { TerminalPane } from "./components/TerminalPane";
 import { DEFAULT_GRID, type Grid } from "./terminalModel";
-import { StatsPanel } from "./components/StatsPanel";
 import { ChatTimeline } from "./components/ChatTimeline";
 import { looksLikeAudit } from "./components/AuditReport";
-import { SettingsModal } from "./components/SettingsModal";
+// Opened by a click, never on first paint, so neither rides in the entry chunk. `SettingsModal` carries the
+// whole Settings screen (every card, the appearance pane, MCP); `StatsPanel` the statistics drawer.
+const SettingsModal = lazy(() => import("./components/SettingsModal").then((m) => ({ default: m.SettingsModal })));
+const StatsPanel = lazy(() => import("./components/StatsPanel").then((m) => ({ default: m.StatsPanel })));
 import { CommandPalette } from "./components/CommandPalette";
 import { buildPaletteItems, type PaletteItem } from "./commandPalette";
 import { resolveShortcut } from "./shortcuts";
@@ -671,6 +675,9 @@ export const App: React.FC = () => {
   // control in reach was a Send button that was idle almost all the time.
   const [activeGoalId, setActiveGoalId] = useState<string | null>(null);
   const [isSettingsOpen, setIsSettingsOpen] = useState(false);
+  // Latches at the first open, so the lazily loaded Settings screen is fetched when asked for and kept.
+  const settingsEverOpened = useRef(false);
+  if (isSettingsOpen) settingsEverOpened.current = true;
   // Which settings tab to land on. A failure diagnosis sends the user straight
   // to the screen that holds the fix instead of making them find it.
   const [settingsTab, setSettingsTab] = useState<SettingsTab>("keys");
@@ -4619,7 +4626,9 @@ export const App: React.FC = () => {
               </IconButton>
             </div>
             <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
-              <StatsPanel />
+              <Suspense fallback={null}>
+                <StatsPanel />
+              </Suspense>
             </div>
           </aside>
         )}
@@ -4722,6 +4731,10 @@ export const App: React.FC = () => {
             edge; their menus open UP over the chat, never over the textarea. */}
 
       {/* Global Settings Modal */}
+      {/* Mounted at the first open and kept: closing must not drop what the screen holds, and a modal that
+          has never been opened has nothing to hold. */}
+      {settingsEverOpened.current && (
+      <Suspense fallback={null}>
       <SettingsModal
         isOpen={isSettingsOpen}
         initialTab={settingsTab}
@@ -4738,6 +4751,8 @@ export const App: React.FC = () => {
           loadModelSignals();
         }}
       />
+      </Suspense>
+      )}
 
       {/* Ctrl+K. After SettingsModal in the DOM on purpose: both sit at z-50, and
           a later sibling paints above — the palette must be reachable while

@@ -105,6 +105,8 @@ export type EventType =
    * Session drawer.
    */
   | "session_compacted"
+  | "review_lens"
+  | "review_report"
   /**
    * The engine's own per-stage measurement (docs/04 §4.7). Listed here because
    * the engine publishes it into this goal's log, so `GET /goals/{id}/events`
@@ -408,6 +410,13 @@ export interface UsageLane {
   /** Mean call duration in ms over the calls that measured one; null when
    * none did — unknown, never "instant". */
   avg_duration_ms: number | null;
+  /** What the provider reported as read from, and written to, its prompt cache. Inside `input_tokens`, not on top of
+   * it. Absent on an engine that predates them. */
+  cache_read_tokens?: number;
+  cache_write_tokens?: number;
+  /** Share of input tokens read from a cache (0 to 1); null when no cache activity was reported at all, which is
+   * unknown and never 0%. */
+  cache_read_ratio?: number | null;
 }
 
 /** One stage of a goal's pipeline, as measured by the engine's
@@ -683,6 +692,8 @@ export interface EngineSettings {
   sandbox_network?: EngineSettingValue;
   /** 1 = an unavailable pre-flight gate refuses the turn instead of warning (docs/05 §3). */
   laya_required?: EngineSettingValue;
+  /** 1 = two fresh-context review lenses read each step before the critic decides (docs/21 P1). Off by default. */
+  review_deep?: EngineSettingValue;
   /** 1 = summarise older thread turns automatically before answering. */
   session_compact_auto?: EngineSettingValue;
   /** How many recent turns stay verbatim beside the summary. */

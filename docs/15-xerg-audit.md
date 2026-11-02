@@ -88,8 +88,11 @@ twelve are counted rather than dropped (the lesson of `docs/14` §8, the `scan_c
   structured field, plus whether the call failed. That changes the event contract (`engine/models.py` `EventType`, `docs/04`'s event table,
   `ui/src/types.ts`, `tests/test_event_type_contract.py`), so it is its own change, with its own decision about what a hash may reveal.
 * **Cache reuse** is built (`docs/16` items 6–7): the counts are recorded and the conductor marks its system prefix cacheable on Anthropic, so
-  the audit shows whether it hit. A churn *rate* would still need the provider to report which write a read repaid, or the engine to track a
-  prefix id across calls — nothing records that today.
+  the audit shows whether it hit. A churn *rate* would still need the provider to report which write a read repaid. What is built since
+  (`docs/21` P3) is the *why* of a miss, not a rate: every `usage` event carries digests of its system prompt and tool set, and the audit
+  has a cache section that names, for each call that read nothing right after a call that used the cache, the first thing that changed
+  (`model_switch`, `system_changed`, `tools_changed`, `compaction`, `idle_ttl`, or `none` when nothing the engine changed explains it).
+  Digests and lengths only, so the audit can say why without keeping a word of any prompt, and still in tokens, never in money.
 * **Dollars** would reverse `docs/04` §4.7. The only form that fits its reasoning is a rate file the person supplies and owns, with every
   figure labelled an estimate from their rates; nothing bundled and nothing fetched.
 * **A results pane** needs a read-only route in `docs/04` that takes the boot token, a section in the statistics drawer, and mounted tests

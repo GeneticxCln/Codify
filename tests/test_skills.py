@@ -322,6 +322,29 @@ class TestWhatShipsWithCodify(unittest.TestCase):
             self.assertIn(kept, recipe.body, f"the skill dropped {kept!r}")
 
 
+    def test_the_health_review_proposes_and_records_nothing(self) -> None:
+        """A self-certified checklist would be the first place the person stopped owning the outcome (docs/21)."""
+        skills, problems = builtin_skills(ConductorTools.NAMES)
+        self.assertEqual(problems, [])
+        recipe = {s.name: s for s in skills}["health-review"]
+        self.assertLessEqual(len(recipe.description), MAX_DESCRIPTION_CHARS)
+        # Read-only by its declared moves: no writer, no command, no commit, nothing that records a verdict.
+        self.assertEqual(set(recipe.moves), {"read_file", "search_code", "scan_code", "git_history", "read_ci", "recall"})
+        for forbidden in ("write", "run_command", "summarize", "verify", "call_mcp"):
+            self.assertNotIn(forbidden, recipe.moves)
+        items = re.findall(r"(?m)^(\d+)\. \*", recipe.body)
+        self.assertEqual([str(n) for n in range(1, 16)], items, "fifteen numbered items, in order")
+        for group in ("Foundations", "Source control", "Quality", "Safety", "Design and UX", "Shipping"):
+            self.assertIn(f"**{group}", recipe.body)
+        for kept in (
+            "No evidence, no pass",       # a pass needs evidence
+            "never counted as one",      # not applicable is not a pass
+            "a person records the outcome",
+            "## Stop when",
+        ):
+            self.assertIn(kept, recipe.body, f"the skill dropped {kept!r}")
+
+
 class TestDisabledSkills(SkillCase):
     """A person's toggle removes a name from the menu, not the file from the disk."""
 
@@ -430,20 +453,19 @@ class TestTheMenuAndTheDocsAgree(unittest.TestCase):
 
     The menu is `builtin_skills()`; the documentation list is the prose that names every recipe. They
     used to be maintained by hand, which is exactly how a new skill is added and the docs keep saying
-    eight. This test derives both sides: every shipped name must appear in each of the three docs that
+    eight. This test derives both sides: every shipped name must appear in each of the two docs that
     list the set, no doc may cite a `builtin_skills/<name>.md` that is not shipped, and the count word
     in `docs/01` must match the directory.
     """
 
     DOCS = (
-        "CLAUDE.md",
         "docs/01-subagent-orchestration-spec.md",
         "docs/09-workspace-shell.md",
     )
     NUMBER_WORDS = {
         1: "one", 2: "two", 3: "three", 4: "four", 5: "five",
         6: "six", 7: "seven", 8: "eight", 9: "nine", 10: "ten",
-        11: "eleven", 12: "twelve", 33: "thirty-three",
+        11: "eleven", 12: "twelve", 33: "thirty-three", 34: "thirty-four",
     }
 
     def test_every_built_in_is_named_in_the_docs_and_no_retired_one_is(self) -> None:
@@ -467,7 +489,7 @@ class TestTheMenuAndTheDocsAgree(unittest.TestCase):
 
         word = self.NUMBER_WORDS.get(len(names))
         self.assertIsNotNone(word, "the count needs a word in the docs; extend NUMBER_WORDS")
-        docs01 = Path(self.DOCS[1]).read_text(encoding="utf-8")
+        docs01 = Path(self.DOCS[0]).read_text(encoding="utf-8")
         self.assertIn(
             f"one of {word} built-ins",
             docs01,

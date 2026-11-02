@@ -147,6 +147,11 @@ class SettingsService:
         # accelerator, and refusing every request on an install without a working gate would make the
         # engine unusable. A person who wants the guarantee turns it on.
         "laya_required": (0, lambda v: 1 if v else 0),
+        # Deep review (docs/21 P1): before the critic decides, two readers shown only the request, the step and the
+        # diff are asked their one question each, and the critic gets their findings as evidence. Off by default
+        # because it spends extra model calls on every reviewed step; a model or a skill cannot turn it on, only
+        # a person through `PUT /settings/engine`.
+        "review_deep": (0, lambda v: 1 if v else 0),
         # Whether an approved plan is executed by the conductor or by the
         # engine's own sequence. 1 leaves the conductor driving, which is the
         # point of having one; 0 is the escape hatch for a model that is not yet

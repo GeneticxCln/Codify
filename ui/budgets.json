@@ -1,0 +1,16 @@
+{
+  "_read_this_first": "Baselines for scripts/check_budgets.py (docs/21 P4). A budget is a baseline with a tolerance, not an absolute limit: growth past tolerance_pct fails `make budgets`. To raise a baseline, edit it here and say why in `reason`; the diff is the review. Sizes are bytes of ui/dist after `make build-ui`.",
+  "tolerance_pct": 10,
+  "budgets": {
+    "dist_total_bytes": {
+      "baseline": 2030178,
+      "reason": "Everything in the build, including the on-demand chunks (editor, terminal, settings, stats) and logo.gif.",
+      "measured_at": "2026-11-02, v1.3.6 plus the lazy Settings/Stats split"
+    },
+    "entry_chunk_bytes": {
+      "baseline": 450680,
+      "reason": "The module script loaded on first paint. It was about 640 kB until Settings and Stats became lazy chunks; the deep-review card and report added about 3 kB.",
+      "measured_at": "2026-11-02, v1.3.6 plus the lazy Settings/Stats split"
+    }
+  }
+}

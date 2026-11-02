@@ -110,7 +110,32 @@ than maintaining a second one.
 handoff sections, design limits and the menu/docs agreement; `tests/test_conductor_prompt.py` checks that no
 built-in names a removed tool. The native recipes are prose, so they are verified as data, not as a capability.
 
-## 7. What this does not claim
+## 7. Keeping the built-ins current
+
+A skill is data, and data decays: a command it names is renamed, a doc it cites is moved, a description stops
+matching what the skill does. The upkeep is mechanical where it can be and a monthly pass where it cannot.
+
+**Held by `tests/test_skill_contracts.py` on every run.** Every built-in loads with no problems and declares only
+moves that exist. Its description is a sentence that fits the 200 characters the menu shows without being cut (a
+clipped description ends in an ellipsis, and that is the tell), and no two descriptions are the same or one inside the
+other. A skill that declares `write` or `run_command` has a `## Stop when`. Every `docs/`, `engine/`, `tests/` or
+`scripts/` path a skill cites exists. A workspace skill is loaded, never judged: a person's own recipe is not refused
+for style.
+
+**The monthly pass, by a person.** For each built-in, re-read its description against its body (is it still the one
+sentence that tells the conductor when to reach for it?), re-run the move it leans on hardest, and delete or merge a
+skill nobody reached for. `audit_usage` and the goals' `use_skill` calls say which were loaded. A skill that earns no
+use for a quarter goes on a decay list in the pass's notes and is removed the next quarter unless something loaded it.
+Whether a skill makes the conductor *better* is not measured: that needs the benchmark harness to run a task with the
+skill on and off (`docs/21` P6), and until then a skill is kept on its reasoning and its use, not on a number.
+
+**Security profiles carry provenance.** Each `engine/builtin_profiles/*.json` has `reviewed` (an ISO date) and
+`sources` (the CWE ids its rules cite, kept equal to the rules by the same test). `reviewed` is the date a person last
+compared the rules with their sources. Its first value, 2026-11-02, only attests the field's introduction: the suite
+already checks that every rule matches its own positive examples and none of its negatives, and nobody re-derived the
+rules from the CWE entries that day. The next real review replaces it.
+
+## 8. What this does not claim
 
 - That those 24 recipes make the engine cheaper or better. They change the order the conductor is told to work in,
   and nothing more.

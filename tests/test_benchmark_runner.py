@@ -82,11 +82,15 @@ class ManifestTests(unittest.TestCase):
     def test_every_check_is_a_kind_the_runner_can_actually_run(self) -> None:
         known = {"goal_completed", "stages", "files_written", "file_exists",
                  "file_contains", "test_command"}
+        from benchmarks.review_tier import REVIEW_CHECKS
+
         manifest = load_manifest()
         for task in manifest["tasks"]:
+            # A review task is scored by `benchmarks/review_tier.py`, which owns its own kinds.
+            allowed = REVIEW_CHECKS if task.get("kind") == "review" else known
             for check in task["checks"]:
                 with self.subTest(task=task["id"], check=check["type"]):
-                    self.assertIn(check["type"], known)
+                    self.assertIn(check["type"], allowed)
 
     def test_smoke_tier_is_canned_so_it_can_never_spend(self) -> None:
         manifest = load_manifest()

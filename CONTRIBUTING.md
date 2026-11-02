@@ -30,6 +30,7 @@ runs everything in one pass:
 | `make test` | full Python suite (411 tests today — the number moves, so trust the run) |
 | `make test-streams` | the concurrency/stream-isolation tests, **by name** (not just via discovery) |
 | `make build-ui` | TypeScript check (`src` only) + Vite production build |
+| `make budgets` | `make build-ui`, then `scripts/check_budgets.py`: the entry chunk and the whole build against the baselines in `ui/budgets.json`, 10% tolerance (part of `make check`) |
 | `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; the machine tab's tests run a real `bwrap` jail and mount its project layer through `unshare`, so they need user namespaces and an unprivileged overlay mount, and `make doctor` checks all of it) + `cargo fmt --check` on the desktop shell |
 | `make check-history` | every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`) builds, not just the tip |
 
@@ -243,7 +244,7 @@ credentials with `CODIFY_HOME` and disables the OS keychain (see
 `engine/home.py`). If your change needs state, put it under `CODIFY_HOME`.
 
 **`CLAUDE.md` is a distillation, not a second source of truth.** It is the
-agent-facing version of this file and `docs/00`–`20`, and it is deliberately
+agent-facing version of this file and `docs/00`–`21`, and it is deliberately
 short: depth is a pointer, not a copy. When the two disagree, this file and
 `docs/` win and `CLAUDE.md` is the bug —
 `tests/test_claude_md_contracts.py` fails if the invariants it quotes drift
@@ -328,7 +329,7 @@ in the open text (unsaved: it never writes). The run exits non-zero unless it co
 
 ## Docs
 
-Architecture lives in `docs/00`–`20` (`07` is the spawn guard and the
+Architecture lives in `docs/00`–`21` (`07` is the spawn guard and the
 deterministic tests; `08` is the benchmark harness and the vendoring policy;
 `10` is the agent-memory model; `11` is the Ruflo audit; `12` is the Scrapling audit; `13` is the Grepify audit; `14` is the REA audit; `15` is the Xerg audit; `16` is the DeepInfer and cmux audit and its plan; `17` is the leanrea audit; `18` is release and updates; `19` is the deepseek-stack audit; `20` is the MCP admission design, phase 3: per-tool Read/Act authority, the read call path, and act calls gated on the goal's stored `RUNNING` status). If
 your change alters a documented contract — orchestration, settings, security,

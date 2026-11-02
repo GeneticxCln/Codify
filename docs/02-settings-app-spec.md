@@ -150,6 +150,14 @@ command still runs the repository's own code. It is not a permission to trust a 
 The engine-wide network permission is separate from a goal's per-run `allow_network`: the setting
 says commands may use the network at all, the goal says this run may.
 
+### 3.0a Deep review
+
+`DeepReviewCard.tsx` (Settings → Agents, below the sandbox card) writes the `review_deep` engine setting through
+`PUT /settings/engine`; it is absent on an engine that does not report the key. Off by default: on, two
+fresh-context readers look at each step before the critic decides, at about two extra model calls per reviewed step
+(`docs/01`, deep review). Only a person can turn it on; `POST /goals` refuses a body that carries it. The result is
+drawn by `ReviewReport.tsx` in the goal's timeline and as a "Deep review" section of the audit report.
+
 ### 3.0b The fail-closed gate switch
 
 `LayaRequiredToggle.tsx` sits in the gate card and writes `laya_required`. Off by default, because

@@ -600,7 +600,11 @@ class RequestSizeLimitMiddleware:
                 more_body = index < len(chunks) - 1
                 index += 1
                 return {"type": "http.request", "body": body, "more_body": more_body}
-            return {"type": "http.request", "body": b"", "more_body": False}
+            # The body is spent. What a route or a response asks for next is the client's *disconnect*, and
+            # that is the server's to say, when it happens: answering with another empty `http.request` made
+            # the disconnect listener of a streaming response (uvicorn speaks ASGI 2.3, which still has one)
+            # a loop that never yields, and so a stall of the whole event loop.
+            return await receive()
 
         await self.app(scope, replay, send)
 
@@ -1500,13 +1504,15 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # Fail closed when the pre-flight gate cannot answer (docs/05 §3). Off by default: an install with
     # no gate model still runs, exactly as it did before the setting existed.
     "laya_required": (0, 1),
+    # Whether the critic is preceded by two fresh-context review lenses (docs/21 P1). Off by default.
+    "review_deep": (0, 1),
 }
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
-    "sandbox_network", "laya_required",
+    "sandbox_network", "laya_required", "review_deep",
 })
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
@@ -2602,6 +2608,7 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
     plan_edits = []
     fallbacks = []
     fix_retries = []
+    review_reports = []
     errors = []
     status_timeline = []
     step_outcomes: dict[str, dict[str, Any]] = {}
@@ -2639,6 +2646,8 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
                 "reason": p.get("reason"),
                 "at": when,
             })
+        elif e.type == "review_report":
+            review_reports.append({"step": step_label(e.step_id), **p, "at": when})
         elif e.type == "error":
             errors.append({
                 "step": step_label(e.step_id),
@@ -2694,6 +2703,8 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
         "plan_edits": plan_edits,
         "fallbacks": fallbacks,
         "fix_retries": fix_retries,
+        # Deep review (docs/21 P1): one merged report per reviewed step when `review_deep` was on, else empty.
+        "review_reports": review_reports,
         "errors": errors,
         "step_outcomes": [
             {"step_id": sid, **entry} for sid, entry in step_outcomes.items()

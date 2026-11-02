@@ -144,6 +144,28 @@ class TestUsageAggregation(unittest.TestCase):
         out = summarize_usage(events, window_days=0)
         self.assertIsNone(out["avg_duration_ms"])
 
+    def test_cache_use_is_summed_per_lane_and_unreported_is_none_never_zero(self) -> None:
+        cached = usage_ev("conductor", "p", "m", 1000, NOW - 3)
+        cached["payload"].update({"cache_read_tokens": 400, "cache_write_tokens": 100})
+        more = usage_ev("conductor", "p", "m", 1000, NOW - 2)
+        more["payload"].update({"cache_read_tokens": 100})
+        plain = usage_ev("critic", "p", "m", 1000, NOW - 1)
+        out = summarize_usage([cached, more, plain], window_days=0)
+        self.assertEqual((500, 100), (out["cache_read_tokens"], out["cache_write_tokens"]))
+        self.assertEqual(0.167, out["cache_read_ratio"])
+        conductor = out["by_role"]["conductor"]
+        self.assertEqual((500, 100, 0.25), (
+            conductor["cache_read_tokens"], conductor["cache_write_tokens"], conductor["cache_read_ratio"]))
+        self.assertIsNone(out["by_role"]["critic"]["cache_read_ratio"], "no cache report is unknown, not 0%")
+        self.assertEqual(0, out["by_role"]["critic"]["cache_read_tokens"])
+
+    def test_a_cache_count_that_is_not_a_count_is_ignored(self) -> None:
+        odd = usage_ev("fixer", "p", "m", 1000, NOW - 1)
+        odd["payload"].update({"cache_read_tokens": True, "cache_write_tokens": "7"})
+        out = summarize_usage([odd], window_days=0)
+        self.assertEqual((0, 0), (out["cache_read_tokens"], out["cache_write_tokens"]))
+        self.assertIsNone(out["cache_read_ratio"])
+
     def test_failures_are_counted_and_never_add_tokens(self) -> None:
         events = [
             usage_ev("fixer", "p", "m", 10, NOW - 3, duration_ms=100),

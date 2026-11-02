@@ -130,6 +130,12 @@ KNOWN_SUFFIXES = (".md", ".py", ".toml", ".json", ".yml", ".yaml", ".sh", ".txt"
 # how a guarantee quietly stops being checked.
 KNOWN_DANGLING: frozenset[tuple[str, str]] = frozenset()
 
+# `CLAUDE.md` is paid for on every session, so its length is a contract and not a taste. It was 21.8 KB when it
+# carried the role catalogue and the list of built-in skills, both of which `docs/01` and `docs/19` already own.
+# The bar is 12 KB: the invariants and the gate table alone are about 8.5 KB, so a lower number would be met only by
+# cutting a contract. To grow past it, move prose into the doc that owns it, and do not raise this number.
+MAX_CLAUDE_MD_BYTES = 12 * 1024
+
 
 def _content_words(text: str) -> set[str]:
     """Distinct lowercase words of `text`, minus pure function words and bare numbers.
@@ -394,6 +400,15 @@ class ClaudeMdContractsTest(unittest.TestCase):
             CLAUDE_MD.is_file(),
             "CLAUDE.md is missing; the agent-facing rules and their pointer to "
             "CONTRIBUTING.md/docs went with it",
+        )
+
+    def test_claude_md_stays_within_its_byte_budget(self) -> None:
+        size = len(CLAUDE_MD.read_bytes())
+        self.assertLessEqual(
+            size,
+            MAX_CLAUDE_MD_BYTES,
+            f"CLAUDE.md is {size} bytes, over its {MAX_CLAUDE_MD_BYTES}-byte budget. Every session pays "
+            "for this file: move the depth into the doc that owns it and leave a pointer here",
         )
 
     def test_every_documented_invariant_is_quoted(self) -> None:
@@ -778,3 +793,39 @@ class TestTheMachineToolsAreNamed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheAgentFilesCountWhatTheDocsCount(unittest.TestCase):
+    """An agent that says "nine invariants" about a list of ten reviews nine."""
+
+    NUMBER_WORDS = {
+        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    }
+
+    def _owner_invariants(self) -> int:
+        text = next(PROJECT_ROOT.glob("docs/00-*.md")).read_text(encoding="utf-8")
+        section = text.split("## 6. Invariants", 1)[1].split("\n## 7", 1)[0]
+        return len(re.findall(r"(?m)^### 6\.\d+", section)) or len(re.findall(r"(?m)^\d+\.\s", section))
+
+    def test_no_agent_file_names_a_wrong_invariant_count(self) -> None:
+        expected = self._owner_invariants()
+        self.assertGreaterEqual(expected, 10, "could not count the invariants in docs/00 §6")
+        for path in (PROJECT_ROOT / ".claude" / "agents").glob("*.md"):
+            text = path.read_text(encoding="utf-8")
+            for word, number in self.NUMBER_WORDS.items():
+                if re.search(rf"\b{word} (?:non-negotiable )?invariants\b", text, re.I):
+                    with self.subTest(file=path.name, said=word):
+                        self.assertEqual(
+                            expected, number,
+                            f"{path.name} says {word} invariants; docs/00 §6 has {expected}",
+                        )
+
+    def test_the_contract_keeper_maps_every_numbered_doc(self) -> None:
+        keeper = (PROJECT_ROOT / ".claude" / "agents" / "docs-contract-keeper.md").read_text(encoding="utf-8")
+        for doc in sorted((PROJECT_ROOT / "docs").glob("[0-9][0-9]-*.md")):
+            number = doc.name[:2]
+            with self.subTest(doc=number):
+                self.assertIn(
+                    f"`docs/{number}`", keeper,
+                    f"docs-contract-keeper has no row for docs/{number}, so a change to its subject is never checked",
+                )

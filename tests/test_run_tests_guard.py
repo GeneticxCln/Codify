@@ -337,7 +337,10 @@ class RunnerKillsItsChildTest(unittest.TestCase):
             child: int | None = None
             try:
                 deadline = time.monotonic() + 30
-                while not pid_file.exists():
+                # Until the pid is *in* the file, not merely until the file exists: the child creates it with
+                # `open(..., 'w')` and writes the pid a moment later, and under load the gap is long enough to
+                # read an empty file (`int('')`). Existence was the wrong thing to wait for.
+                while not (pid_file.exists() and pid_file.read_text().strip()):
                     self.assertIsNone(wrapper.poll(), "the wrapper exited before its test started")
                     self.assertLess(time.monotonic(), deadline, "the test child never started")
                     time.sleep(0.05)

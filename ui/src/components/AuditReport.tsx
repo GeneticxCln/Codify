@@ -12,7 +12,9 @@ import {
   BellOff,
   ChevronDown,
   ChevronRight,
+  Eye,
 } from "lucide-react";
+import { ReviewReport, looksLikeReviewReport, type ReviewReportPayload } from "./ReviewReport";
 
 /**
  * A downloaded audit document, rendered back into a readable report.
@@ -52,6 +54,8 @@ export interface AuditDoc {
     reason?: string;
     at?: number;
   }[];
+  /** One per reviewed step when `review_deep` was on: the lenses that ran, and what they found (docs/21 P1). */
+  review_reports?: (Partial<ReviewReportPayload> & { step?: string | null; at?: number })[];
   errors?: {
     step?: string | null;
     role?: string;
@@ -169,6 +173,9 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
   const planEdits = doc.plan_edits ?? [];
   const fallbacks = doc.fallbacks ?? [];
   const fixRetries = doc.fix_retries ?? [];
+  const reviews = (doc.review_reports ?? []).filter(
+    (r): r is ReviewReportPayload & { step?: string | null; at?: number } => looksLikeReviewReport(r),
+  );
   const errors = doc.errors ?? [];
   const steps = doc.step_outcomes ?? [];
   const timeline = doc.status_timeline ?? [];
@@ -299,6 +306,22 @@ export function AuditReport({ doc }: { doc: AuditDoc }) {
             </div>
             {retry.reason && <div className="text-xs text-codify-muted">{retry.reason}</div>}
             <div className="text-2xs text-codify-muted">{fmtTime(retry.at)}</div>
+          </div>
+        ))}
+      </Section>
+
+      {/* Deep review: what the fresh-context readers found, and which of them ran */}
+      <Section
+        icon={<Eye className="w-3.5 h-3.5 text-codify-info" />}
+        title="Deep review"
+        count={reviews.length}
+        tone="bg-codify-info/15 text-codify-info-ink"
+        defaultOpen
+      >
+        {reviews.map((r, i) => (
+          <div key={i} className="space-y-1">
+            <div className="text-2xs text-codify-muted">{stepName(r.step, "step")}</div>
+            <ReviewReport report={r} />
           </div>
         ))}
       </Section>

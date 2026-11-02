@@ -12,6 +12,7 @@ file's content — this is a transport ceiling, not an editor limit.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import unittest
 from typing import Any, cast
@@ -129,3 +130,38 @@ class RequestSizeLimitTest(unittest.IsolatedAsyncioTestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ReplayStopsAtTheBodyTest(unittest.IsolatedAsyncioTestCase):
+    """After the body, the next thing a route is told is the client's own disconnect, never more body."""
+
+    async def test_a_second_read_waits_for_the_real_disconnect(self) -> None:
+        disconnect = asyncio.Event()
+        seen: list[Message] = []
+        reads = 0
+
+        async def receive() -> Any:
+            nonlocal reads
+            reads += 1
+            if reads == 1:
+                return {"type": "http.request", "body": b"{}", "more_body": False}
+            await disconnect.wait()
+            return {"type": "http.disconnect"}
+
+        async def route(scope: Scope, receive: Any, send: Any) -> None:
+            seen.append(await receive())
+            # What a streaming response's disconnect listener does: ask until told the client left.
+            waiting = asyncio.ensure_future(receive())
+            await asyncio.sleep(0.05)
+            seen.append(cast(Message, {"type": "pending" if not waiting.done() else waiting.result()["type"]}))
+            disconnect.set()
+            seen.append(await waiting)
+
+        async def send(message: Any) -> None:
+            raise AssertionError("the route does not answer in this test")
+
+        await asyncio.wait_for(RequestSizeLimitMiddleware(route)(scope([]), receive, lambda m: send(m)), 5)
+
+        self.assertEqual("http.request", seen[0]["type"])
+        self.assertEqual("pending", seen[1]["type"], "the listener was handed more body instead of waiting")
+        self.assertEqual("http.disconnect", seen[2]["type"])

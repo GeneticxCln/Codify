@@ -1,59 +1,51 @@
 # CLAUDE.md — working rules for this repository
 
 **This file is a distillation, not a second source of truth.** Everything below is
-sourced from `CONTRIBUTING.md` and `docs/00`–`19`; where this file and either of
+sourced from `CONTRIBUTING.md` and `docs/00`–`21`; where this file and either of
 those disagree, **they win and this file is the bug**. `tests/test_claude_md_contracts.py`
-fails if the invariants quoted here drift from `docs/00` §6, so that is enforced, not
-merely intended.
-
-It stays short on purpose. An agent pays this file's length on every session, so depth
-is a pointer below rather than a copy of a 24 KB README.
+fails if the invariants quoted here drift from `docs/00` §6, and caps this file's size, so
+that is enforced.
 
 ## What this is
 
-Codify is a local-first, multi-agent AI coding assistant and desktop app. Three tiers,
-and knowing which one you are in tells you what you may touch:
+Codify is a local-first, multi-agent AI coding assistant and desktop app. Three tiers;
+knowing which one you are in tells you what you may touch:
 
 | Tier | Language | Owns |
 |---|---|---|
 | Desktop shell | Rust / Tauri v2 | App lifecycle, owns the engine process, boot token |
 | UI | React 19 / TypeScript / Vite / Tailwind | Settings screen, goal chat, stats |
-| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request when available, and `laya_required` makes an unavailable gate refuse instead; the **conductor** — a loop, not a ninth role — then decides which of the other seven run and in what order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`) and *skills* it can load. The recipe that used to be compiled in — `librarian` → `design` → `planner` → `fixer` → `verifier` → `critic` → `scribe` — is now the built-in skill `ship-a-change` (`engine/builtin_skills/`), and a workspace can replace it. The directory's other built-ins are `context-transfer`, a recipe for packaging a degraded thread into one pasteable block for a new thread (load it when the thread is long enough that the model is losing track), and `security-review`, which sequences `scan_code` and `read_file` for a security review of the workspace. The fourth, `usage-audit`, has the conductor report wasted model calls honestly in tokens with `audit_usage`, and the fifth, `inspect-an-artifact`, orders `analyze_binary`, `read_file`, `search_code` and `scan_code` for a question about a compiled file or a generated bundle, which is the order that keeps a single read of the file on the cheap path. The sixth, `unstick`, names the assumption two failed fixes shared and probes it once, so a repeating failure changes mechanism instead of getting a third variation. The seventh, `blast-radius`, makes a change prove the one fact it is safe because of, beyond its diff; the eighth, `prove`, runs the narrowest real check and reads the first error; the ninth, `design-review`, audits a screen against the generic-look bans and the states it owes, and says plainly when it cannot see the screen. `fixer` is still the only writer and `verifier` still the only role that runs a command.
+| Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |
 
-The 24 deepseek-stack adaptations are `working-style`, `engineering-principles`, `choose-a-skill`, `plan-loop`, `resume-long-run`, `decision-log`, `review-loop`, `second-opinion`, `compare-approaches`, `wide-audit`, `sharpen-the-ask`, `blueprint`, `test-first`, `prepare-a-pull-request`, `watch-ci`, `ship-with-a-person`, `merge-ready`, `adopt-a-change`, `revive-a-change`, `review-replies`, `explain-code`, `catch-up`, `encode-a-lesson` and `plain-prose`. Their person-only actions still belong to the person; see `docs/19`.
+The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the
+**conductor** — a loop, not a ninth role — decides which of the other seven run and in what
+order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`)
+and *skills* it can load. `fixer` is the only writer and `verifier` the only role that runs a
+command. The default recipe is the built-in skill `ship-a-change`; every built-in lives in
+`engine/builtin_skills/` and is catalogued in `docs/01` and `docs/19`. A workspace can replace
+a built-in.
 
 ## The gate is `make check` / `make ci`
 
-`pytest` or `npm test` alone is **not** the gate, and a green run of either does not
-mean the change is shippable.
+`pytest` or `npm test` alone is **not** the gate; a green run of either does not mean the change is shippable.
 
 | Target | What it runs |
 |---|---|
-| `make setup` / `make doctor` | From a fresh clone: create `.venv` + install everything / check the machine, and this checkout's `.venv` against `pyproject.toml`, and say how to fix what is missing (read-only). The Makefile prefers `./.venv/bin` automatically, except inside the 3.10 floor leg |
-| `make check` | Everything below, including the benchmark smoke (`make bench-smoke`), on the interpreter you have |
-| `make ci` | `make check`, then the same Python legs again on the declared 3.10 minimum |
-| `make lint` | `ruff check engine tests scripts benchmarks` — rules and target Python pinned in `pyproject.toml` |
-| `make typecheck` | `mypy` over `engine`, `tests`, `scripts` — config pinned in `pyproject.toml` |
-| `make test` | Full Python suite via `unittest` |
-| `make test-streams` | Stream-isolation tests **by name**, not just by discovery |
-| `make bench-smoke` | The hermetic benchmark tier under both drivers — no network, no models, no spend; part of `make check` |
-| `make test-ui` | `ui/tests/` through `node --test` (needs Node 22.22.2+, 24.15+ or 26+; checked before it runs) |
-| `make typecheck-ui-tests` | `tsc --noEmit` over `ui/src` **and** `ui/tests` — config `ui/tsconfig.test.json` |
-| `make build-ui` | TypeScript check (`src` only) + Vite production build |
-| `make check-tauri` | `cargo check` + `cargo test` (under Xvfb when there is no display; includes the machine tab's real-jail tests, which need `bwrap`, `unshare` and an unprivileged overlay mount, not only user namespaces; `make doctor` fails on each) + `cargo clippy --all-targets -D warnings` + the declared Rust version against the locked graph (`scripts/check_msrv.py`) + `cargo fmt --check` |
-| `make ci-python-floor` | Only the 3.10 leg; never skips — it fails with install instructions |
-| `make ci-report` | `make ci`, then publishes its verdict on the commit as a GitHub status (context local/make-ci) via `gh`. Not a second gate: it runs the one gate and reports it, and refuses a dirty tree — the mark a PR still carries when Actions cannot give one (it was billing-locked once) |
-| `make check-ghidra` | The **Ghidra fallback** of `analyze_binary` against a real install (`GHIDRA_INSTALL_DIR`; `GHIDRA_CHECK_ARGS="--cancel"` also kills a real run). It forces the fallback, so a valid ELF cannot be answered by the native reader instead. Not part of `check` or `ci`, and it fails rather than skips without Ghidra: the gate drives a stand-in for `analyzeHeadless`, so this is the one check that the export script runs inside the real thing |
-| `make check-history` | Every commit in `HISTORY_RANGE` (default `origin/<branch>..HEAD`), not just the tip. Separate from the gate on purpose: `make ci` asks about the tree you are about to share, this asks about the commits on the way to it. Pre-push runs it second, and it declines a one-commit range — that has no middle. It takes its tools and test interpreter from `.venv/bin` however it is started (as the Makefile does), and exits 2 with the fix, instead of blaming every commit, when that interpreter cannot import the engine |
+| `make setup` / `make doctor` | Fresh clone: make `.venv` and install / check the machine and `.venv` against `pyproject.toml` |
+| `make check` | Everything below on the interpreter you have, including `bench-smoke` |
+| `make ci` | `make check`, then the same Python legs on the declared 3.10 floor (`make ci-python-floor` is that leg alone) |
+| `make lint` / `make typecheck` | `ruff` / `mypy`; config pinned in `pyproject.toml` |
+| `make test` / `make test-streams` | Python suite via `unittest` / stream-isolation tests **by name** |
+| `make bench-smoke` | Hermetic benchmark tier, both drivers: no network, models or spend |
+| `make test-ui` / `make typecheck-ui-tests` | `ui/tests/` via `node --test` (Node 22.22.2+, 24.15+ or 26+) / `tsc --noEmit` over `ui/src` **and** `ui/tests` |
+| `make build-ui` | TypeScript check (`src` only) + Vite build; `make budgets` then checks its size (`ui/budgets.json`) |
+| `make check-tauri` | `cargo check`/`test` (jail tests need `bwrap`, `unshare`, an unprivileged overlay mount; `make doctor` says which), clippy `-D warnings`, `scripts/check_msrv.py`, `cargo fmt --check` |
+| `make check-history` | Every commit in `HISTORY_RANGE`, not just the tip; pre-push runs it second |
+| `make ci-report`, `make check-ghidra` | Publish `make ci`'s verdict as a GitHub status / the Ghidra fallback against a real install. Neither is in `check` or `ci` |
 
-`make ci` is the real gate. `.github/workflows/check.yml` describes the same targets
-split by toolchain and runs on every pull request and every push to `master` (and by
-hand, `workflow_dispatch`): a second opinion from GitHub's runners, on a clean machine;
-`make ci` in the Makefile is what gates a push.
-
-`make hooks` installs the versioned hooks in `.githooks/` (`pre-commit` runs
-`make lint typecheck`; `pre-push` runs `make ci`). Do not add a second gate mechanism
-for the same checks.
+`make ci` is the real gate; `.github/workflows/check.yml` runs the same targets on a clean machine.
+`make hooks` installs `.githooks/` (`pre-commit`: `make lint typecheck`; `pre-push`: `make ci`).
+Do not add a second gate mechanism for the same checks.
 
 ## Invariants — non-negotiable
 
@@ -75,33 +67,17 @@ Quoted from `docs/00` §6, which is the owner. Do not weaken one to make a chang
 ```
 engine/         Python: orchestration, providers, sandbox, git, db, trace
   models.py     ROLES + ROLE_JOB + ROLE_TIMING — the one place roles are defined
-  default_prompts.py   one system prompt per role
-  chat_prompts.py  the turn + conductor prompts — no AgentRole, so not in the file above
-  replies.py      extract_json (what a model's reply contains) and the re-ask prompt — pure, no orchestrator
   conductor.py    the loop that decides the sequence; its moves are the pipeline's own doors
-  executor.py     assembles ExecutorService from layers, each calling only those below it: executor_core, _evidence,
-                  _design, _plan, _steps, _conduct; exceptions in executor_support, the model-call path in
-                  agent_orchestrator, the conductor's moves in conductor_tools
-  skills.py       built-in + workspace recipes (`.codify/skills/`) discovered and loaded as data
-  toolcall.py     the neutral tool-calling shape and its four protocol translations
-  spawn_guard.py process guard; every spawn routes through it, and it applies a spawn site's resource limits (`Limits`)
-  binary_inspect.py   the native ELF/PE/Mach-O reader behind `analyze_binary`; no process and no Ghidra
-  binary_analysis.py  `analyze_binary`: native first; Ghidra is the guarded one-shot fallback (docs/14 §4, §9)
-  usage_audit.py  `audit_usage`: wasted model calls in tokens, a pure read over recorded events (docs/15)
-  speech.py       voice: dictation and read-aloud through an OpenAI-compatible speech provider; the engine records the mic (pw-record)
-  surfaces.py     the bridge for what the app window owns: the engine asks, the window answers, ops are fixed strings in a table;
-                  surface_editor.py is the editor's table (`read_editor`, `open_in_editor`, `edit_editor`; none touches the disk),
-                  surface_machine.py the machine tab's (`read_machine`, `run_in_machine`, `key_in_machine`, `reset_machine`; no op opens a machine)
+  executor.py     ExecutorService, built in layers (executor_core … _conduct); moves in conductor_tools
+  skills.py       built-in + workspace recipes (`.codify/skills/`) loaded as data
+  spawn_guard.py  every spawn routes through it
+  surfaces.py     the window bridge; surface_machine.py holds `read_machine`, `run_in_machine`, `key_in_machine`, `reset_machine`
 ui/             React 19 + TS + Vite; ui/tests/ run through node --test
 src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
-scripts/        fake_ollama.py (drive a goal with no API keys; FAKE_CONDUCTOR=1 plays a tool-calling conductor), replay_trace.py
-                 drive_a_turn.py (drive a turn against a real local model; --approve presses Start),
-                 make_logo.py, check_history.py (does every commit in a range build),
-                 bundle_engine.py / lock_engine.py / smoke_bundle.py (the engine a package carries; packaging/ holds its pin and lock)
+scripts/        fake_ollama.py (drive a goal with no API keys)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–20, below
-.githooks/      versioned pre-commit / pre-push
+docs/           00–21, below
 ```
 
 ## Working rules
@@ -110,68 +86,52 @@ docs/           00–20, below
   they are untrusted: a skill may sequence moves that already exist and nothing more. It
   cannot define a move, widen `validate_argv`, or reach the `write` gate, which reads the
   goal's stored status rather than anything the model was told (invariant 9).
-- **Engine changes need a test that fails without them.** The suite exists to catch what
-  this project has actually gotten wrong: hung test commands, swept git commits, crossed
-  event streams, credentials escaping to a real `~/.codify`.
-- **No test may skip itself out of a guarantee.** If a test needs a dependency, declare
-  it and let the suite fail loudly without it.
-- **Stream guarantees live in `tests/stream_isolation.py` only.** Both concurrency layers
-  assert through it so they cannot drift apart.
+- **Engine changes need a test that fails without them**, aimed at what this project has
+  actually gotten wrong: hung test commands, swept git commits, crossed event streams,
+  credentials escaping to a real `~/.codify`.
+- **No test may skip itself out of a guarantee.** Declare the dependency and fail loudly.
+- **Stream guarantees live in `tests/stream_isolation.py` only.**
 - **Never touch the developer's real state.** Tests are hermetic via `tests/hermetic.py`;
-  state goes under `CODIFY_HOME`, never a real `~/.codify`.
-- **No hardcoded model lists.** Models come from live provider discovery. "The provider
-  knows its models" is a design decision, not an oversight.
-- **Do not let the gate depend on your machine.** Rules, target Python and the mypy
-  config live in `pyproject.toml`, not in a command line.
-- **A green tip is not a green history.** The UI suite reads source text as contract,
-  so a commit that adds a component and a test asserting the shell mounts it is red
-  until the commit that mounts it. `make ci` cannot see that; `make check-history` is
-  the leg that can, and a split is only worth making if every commit in it builds.
-- **Type annotations are checked, not decorative.** mypy must pass on every type you
-  write. A `type: ignore` carries its exact error code, and an ignore that stops being
-  needed is itself an error. The same is true of TypeScript, in `ui/tests/` as much as
-  in `ui/src/`: `node --test` runs the suite with `--experimental-strip-types`, which
-  *erases* types rather than checking them, so a test that builds a value an interface
-  no longer accepts passes. `make typecheck-ui-tests` is the leg that says so.
-- **A new ruff `S` finding is a decision, not noise.** Each `per-file-ignores` entry
-  names its exemption with the reason it is safe; widen deliberately, with the fixes.
-- **No new process start outside the spawn guard.** `tests/test_no_unguarded_spawns.py`
-  freezes every spawn site in `engine/`, `benchmarks/` and `scripts/`; route through an
-  existing choke point or justify a new entry in that table.
-- **No third-party source is committed here.** `benchmarks/vendor.py` fetches a
-  permissively licensed, SHA-pinned snapshot only when a person asks, and writes a
-  notice beside it recording upstream, SHA, licence and reason. A benchmark that
-  needs a repo it does not have fails and says so; it never scores the absence as
-  a pass. See `docs/08`.
-- **3.10 is a real deployment target.** The shell boots a checkout's engine as `python3 -m engine`,
-  so syntax the newest interpreter accepts can still be a `SyntaxError` there. A package carries its
-  own CPython instead (the newest `check.yml` leg; `docs/18` §2), so both ends are shipped.
+  state goes under `CODIFY_HOME`.
+- **No hardcoded model lists.** Models come from live provider discovery.
+- **The gate must not depend on your machine.** Rules and config live in `pyproject.toml`.
+- **A green tip is not a green history.** The UI suite reads source text as contract, so a
+  commit that adds a component before the commit that mounts it is red; `make check-history` sees that.
+- **Type annotations are checked.** A `type: ignore` carries its exact error code;
+  `node --test` erases types, so `make typecheck-ui-tests` is what checks `ui/tests/`.
+- **A new ruff `S` finding is a decision**: each `per-file-ignores` entry names its reason.
+- **No new process start outside the spawn guard**; `tests/test_no_unguarded_spawns.py`
+  freezes every spawn site.
+- **No third-party source is committed here**; `benchmarks/vendor.py` fetches a pinned
+  snapshot only when a person asks (`docs/08`).
+- **3.10 is a real deployment target** (the shell boots `python3 -m engine`).
 
 ## Depth, on demand
 
 | Doc | Read it for |
 |---|---|
 | `docs/00` | Architecture overview, component list, the invariants above |
-| `docs/01` | Subagent orchestration spec, roles, `AgentConfig`, providers |
+| `docs/01` | Roles, `AgentConfig`, providers, the built-in skills |
 | `docs/02` | Settings UI + Tauri; the only mutator |
 | `docs/03` | Security and roadmap: keyring, SSRF, boot token |
-| `docs/04` | Workspace/Goal/PlanStep/Event SQL, HTTP+WS, sandbox argv, fallbacks |
-| `docs/05` | The Laya System-1 gate and its thresholds |
+| `docs/04` | SQL, HTTP+WS, sandbox argv, events, fallbacks |
+| `docs/05` | The Laya gate and its thresholds |
 | `docs/06` | Live model discovery — why there is no catalog |
 | `docs/07` | Spawn guard and deterministic tests |
-| `docs/08` | Benchmarks: what a number may claim, and the no-third-party-source policy |
-| `docs/09` | The workspace shell: conversation model, tab rules, both panes, the browser pane's separate-window decision, §10 on what a turn is, §11 clipboard, §12 split panes, §13 the editor and the surface bridge, §14 the machine (a jailed shell the assistant may type into) |
-| `docs/10` | Agent memory: the Hindsight audit — what was built (`recall`, `recall_threads`, keyword search, the durable observation store and its fading), and what was rejected |
-| `docs/11` | The Ruflo audit: which ideas were borrowed, which were refused and by which invariant, and what was not read |
-| `docs/13` | The Grepify audit: `scan_code`, the built-in scanner for code review (curated profiles, masking, workspace profiles as data), and what of Grepify was taken |
-| `docs/12` | The Scrapling audit: `fetch_page` (a request the engine makes to an address a model chose), its rules, what of Scrapling was refused, and the native parser that replaced it |
-| `docs/14` | The REA audit: what a reverse-engineering MCP server and its Ghidra provider teach this engine, the guarded Ghidra fallback, the gaps it found (child resource limits and a cancellable worker, both closed), and §9's native reader that now answers first |
-| `docs/15` | The Xerg audit: `audit_usage`, the native audit of wasted model calls in tokens (coverage first; retry waste and the fix loop measured; cache reads and writes measured as a signal, never a saving; tool-loop waste reported as not measurable), and what of Xerg's skill was taken |
-| `docs/16` | The DeepInfer and cmux audit: what is portable from a serving framework and an agent terminal (terminal OSC notifications into the inbox, bounded transcript replay, JSON-schema replies, prompt-prefix reuse), what is refused and by which invariant, and the plan |
-| `docs/18` | Release and updates: a release is a tag (three files and the tag must agree, `scripts/release_notes.py`), the deb and AppImage hold the shell and the engine with its own CPython (the bundle, its pinned interpreter and hashed lock, the smoke that boots it before publishing), the workflow's decisions, and what the About tab's update button does and refuses — one GET to GitHub when a person clicks, a package written to their downloads folder, nothing installed |
-| `docs/17` | The leanrea audit: the 8 KB routing-table skill that argues against REA's 207 tools — what is already this engine's design, the gap its trap list found (`search_code` now names the directories its walk pruned), the measured cost of one conductor call, and the two small rows built |
-| `docs/19` | The deepseek-stack audit: 29 skills read in full, the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models) |
-| `docs/20` | The MCP admission design: invariant 10 (a remote data source, never a capability), remote-only transport, per-tool Read/Act authority, and the tests that hold it. **Phase 3 is built: per-tool Read/Act authority, `list_mcp_tools` and `call_mcp`; act is gated on the goal's stored `RUNNING` status** |
+| `docs/08` | Benchmarks: what a number may claim |
+| `docs/09` | Workspace shell; §10 what a turn is, §14 the machine |
+| `docs/10` | Agent memory: `recall`, observations |
+| `docs/11` | Ruflo audit |
+| `docs/12` | Scrapling audit: `fetch_page` |
+| `docs/13` | Grepify audit: `scan_code` |
+| `docs/14` | REA audit: Ghidra fallback, native binary reader |
+| `docs/15` | Xerg audit: `audit_usage` |
+| `docs/16` | DeepInfer and cmux audit: prompt-prefix reuse, JSON-schema replies |
+| `docs/17` | leanrea audit: the cost of one conductor call |
+| `docs/18` | Release and updates |
+| `docs/19` | deepseek-stack audit: the 24 native recipes |
+| `docs/20` | MCP admission design: invariant 10 |
+| `docs/21` | Improvement plan: review lenses, health, cache diagnostics, size budget, skill contracts |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.

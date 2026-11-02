@@ -40,6 +40,12 @@ correction the person gave once is not this either.
 6. **Report** each class with its evidence, the level chosen, and why a higher
    level was not possible.
 
+## Stop when
+
+- The check exists, fails on the old mistake, passes on the fix, and the report says what it enforces.
+- Three lessons are encoded this session. Note the rest for later.
+- Nothing can enforce the lesson: record it as prose, say that it is only prose, and stop.
+
 ## Rules
 
 - Do not weaken an existing test or lint rule to make room for the new one.

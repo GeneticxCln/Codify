@@ -1,5 +1,6 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import difflib
+import errno
 import os
 import re
 import tempfile
@@ -7,7 +8,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from engine.fs import MAX_DIFF_BYTES, FileSystemService, GitMetadataError, PathEscapeError
+from engine.fs import MAX_DIFF_BYTES, FileAccessError, FileSystemService, GitMetadataError, PathEscapeError
 from engine.library import text_lines
 from typing import Any
 
@@ -775,3 +776,34 @@ class TestAWriteCannotBeRedirectedThroughItsTempFile(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestACreateWorksWhereThereAreNoHardLinks(unittest.TestCase):
+    """`create_text` publishes with `os.link`; a filesystem without hard links must still create, and still never replace."""
+
+    def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
+        self.root = Path(self.temp_dir.name).resolve()
+        self.fs = FileSystemService(str(self.root))
+
+    def test_a_create_succeeds_when_the_filesystem_refuses_a_link(self) -> None:
+        with mock.patch("engine.fs.os.link", side_effect=OSError(errno.EPERM, "no hard links here")):
+            created = self.fs.create_text(".codify/skills/new.md", "hello\n")
+        self.assertEqual("hello\n", (self.root / ".codify/skills/new.md").read_text())
+        self.assertEqual(6, created.size)
+        self.assertEqual([], [p.name for p in (self.root / ".codify/skills").iterdir() if p.name.endswith(".codify-tmp")])
+
+    def test_the_fallback_still_refuses_a_file_that_appeared_after_the_check(self) -> None:
+        target = self.root / "late.md"
+        target.write_text("mine")
+        with mock.patch("engine.fs.os.link", side_effect=OSError(errno.ENOTSUP, "nope")):
+            with self.assertRaises(FileExistsError):
+                self.fs._write_atomic(target, b"theirs", replace=False)
+        self.assertEqual("mine", target.read_text())
+
+    def test_a_link_error_that_is_not_about_support_is_still_an_error(self) -> None:
+        with mock.patch("engine.fs.os.link", side_effect=OSError(errno.ENOSPC, "disk full")):
+            with self.assertRaises(FileAccessError):
+                self.fs.create_text("full.md", "x")
+        self.assertFalse((self.root / "full.md").exists())

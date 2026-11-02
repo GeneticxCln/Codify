@@ -1,6 +1,14 @@
 {
   "name": "injection",
   "description": "Where untrusted text can become code, a SQL statement, a shell command or markup.",
+  "reviewed": "2026-11-02",
+  "sources": [
+    "CWE-78",
+    "CWE-79",
+    "CWE-89",
+    "CWE-95",
+    "CWE-1336"
+  ],
   "rules": [
     {
       "id": "py-eval-exec",

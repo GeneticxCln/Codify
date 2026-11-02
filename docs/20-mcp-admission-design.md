@@ -260,7 +260,12 @@ switch, and a tool row with **Authority** (Not admitted / Read / Act), **Enabled
 * Display name.
 * Server URL; helper text says HTTPS, public host, no query string.
 * Authentication: None, Bearer token, or Custom header (name + value). The value is a password field and is
-  never shown again.
+  never shown again. The header name must be an HTTP token (letters, digits and the punctuation RFC 9110
+  allows; no space, colon, CR or LF) and may not be one the engine writes itself (`Host`, `Content-Type`,
+  `Content-Length`, `Accept`, `Mcp-Protocol-Version`, `Mcp-Session-Id` and the other framing headers): 422
+  `mcp_invalid_header` / `mcp_reserved_header`. A credential with a control character is 422
+  `mcp_invalid_secret`. A row saved before this check fails at send time with `mcp_invalid_header`, in words,
+  and is never sent.
 * **Save and probe** stores the address and runs the probe. A failure shows the engine's reason (DNS, refused
   address, TLS, HTTP status, protocol version) and leaves the row in place so the person can fix or remove it.
 * **Probe now** on the server card tries again. There is no separate Test connection: Save and probe and
@@ -289,8 +294,10 @@ shows calls.
 | Arguments per call | 8 KB | The engine sends an object, not a file |
 | Result | 16,000 chars | One tool result cannot fill the context |
 | Calls per conductor run | 8 | A run cannot spend its budget in a remote loop |
-| Request timeout | 20 s | A stuck server does not hold a turn |
-| Probe timeout | 10 s | Settings stays responsive |
+| Request timeout | 20 s | One read, one connect: a stuck server does not hold a request |
+| Probe timeout | 10 s | One read of a probe request: Settings stays responsive |
+| Whole call | 60 s | Resolution, handshake, every request and every reply together. A server that answers a byte at a time never trips a per-read timeout, so this is the bound that ends it: `mcp_timeout`, not retried. An `act` call that times out says the server may have carried it out |
+| Whole probe | 60 s | The same bound for `initialize` and every `tools/list` page; the failure is stored as the server's last probe error |
 
 On failure the engine returns a short sentence to the conductor and an event to the UI; it does not retry an
 `act` call (a retry can duplicate a side effect) and does not fall back to another server. A `read` call may be

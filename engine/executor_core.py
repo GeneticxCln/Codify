@@ -322,6 +322,15 @@ class _ExecutorCore:
         except Exception:
             return False
 
+    def _review_deep(self) -> bool:
+        """Whether the critic is preceded by the review lenses (`review_deep`, docs/21 P1)."""
+        if self.settings is None:
+            return False
+        try:
+            return bool(self.settings.get_int("review_deep"))
+        except Exception:
+            return False
+
     def _parallel_width(self) -> int:
         """The configured parallel width: env override, then persisted setting,
         then the built-in default. Read per batch, so a settings change lands

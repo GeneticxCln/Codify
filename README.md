@@ -587,6 +587,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/18`](docs/18-release-and-updates.md) | Release and updates: a release is a tag, what the deb and AppImage hold, how the release workflow is built, and what the About tab's update button does and refuses |
 | [`docs/19`](docs/19-deepseek-stack-audit.md) | The deepseek-stack audit: 29 skills read in full, the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models) |
 | [`docs/20`](docs/20-mcp-admission-design.md) | The MCP admission design: invariant 10, remote-only transport, per-tool Read/Act authority, and the tests that hold it. Phase 3 is built (per-tool Read/Act authority, `list_mcp_tools`, `call_mcp`); act is gated on the goal's stored `RUNNING` status |
+| [`docs/21`](docs/21-improvement-plan.md) | The improvement plan: goldfish review lenses, person-recorded project health, content-free cache diagnostics, a size budget, skill contracts, and the status of each |
 
 ## 📂 Layout
 
@@ -598,7 +599,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
-docs/       00–19, the specifications this README summarises
+docs/       00–21, the specifications this README summarises
 ```
 
 ## 📄 License

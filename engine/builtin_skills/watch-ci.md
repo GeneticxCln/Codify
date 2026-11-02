@@ -33,6 +33,12 @@ repository or commit.
 6. **Stop after five fix-and-push cycles** without a terminal answer. Report
    what still fails and what was tried.
 
+## Stop when
+
+- Every check on the pushed commit is passing, or each failing one is reported with its output.
+- Checks are still pending or unknown after one read: report them as that and stop; do not poll.
+- The failure is not in this workspace's code (a CI outage, a missing secret): say so and stop.
+
 ## Rules
 
 - One read per event, not a sleep-and-poll loop.

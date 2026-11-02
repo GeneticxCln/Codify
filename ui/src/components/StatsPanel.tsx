@@ -146,6 +146,14 @@ const UsageTable: React.FC<{
               {lane.calls} call{lane.calls === 1 ? "" : "s"} ·{" "}
               {fmtDuration(lane.avg_duration_ms)}
             </span>
+            {lane.cache_read_ratio != null && (
+              <span
+                className="text-codify-muted w-16 text-right shrink-0"
+                title={`${Math.round(lane.cache_read_ratio * 100)}% of input tokens were read from the provider's prompt cache; ${fmtTokens(lane.cache_write_tokens ?? 0)} were written to it. Counted inside the input tokens, not as a saving.`}
+              >
+                cache {Math.round(lane.cache_read_ratio * 100)}%
+              </span>
+            )}
           </div>
         ))}
       </div>
