@@ -649,10 +649,10 @@ and `tests/test_failure_visibility.py` for the output.
 librarian, design, planner — whether or not the request needed them, which made
 the sequence a property of the code rather than a decision of the decider. The
 seven stage moves replaced it, and the sequence they are used in is a *skill*
-(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of thirty-three built-ins in that directory. The set is:
+(`engine/builtin_skills/ship-a-change.md`) rather than control flow. It is one of thirty-four built-ins in that directory. The set is:
 `adopt-a-change`, `blast-radius`, `blueprint`, `catch-up`, `choose-a-skill`, `compare-approaches`,
 `context-transfer`, `decision-log`, `design-review`, `encode-a-lesson`, `engineering-principles`,
-`explain-code`, `inspect-an-artifact`, `merge-ready`, `plain-prose`, `plan-loop`,
+`explain-code`, `health-review`, `inspect-an-artifact`, `merge-ready`, `plain-prose`, `plan-loop`,
 `prepare-a-pull-request`, `prove`, `resume-long-run`, `review-loop`, `review-replies`,
 `revive-a-change`, `second-opinion`, `security-review`, `sharpen-the-ask`, `ship-a-change`,
 `ship-with-a-person`, `test-first`, `unstick`, `usage-audit`, `watch-ci`, `wide-audit`,

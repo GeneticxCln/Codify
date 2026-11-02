@@ -65,10 +65,15 @@ quote byte-identical; a byte cap in `tests/test_claude_md_contracts.py`; this do
   The default stays `standard`; the measured recall and false-positive counts are reported as they come out.
 - Rollback: set `review_deep` to 0. No migration.
 
-**P2 — Project health. Status: planned, deliberately small.** A `builtin_health.json` of checklist items, each mapped to
-a capability that exists (`scan_code`, `audit_usage`, `design-review`, `security-review`, `wide-audit`, `prove`), and a
-`health-review` skill that returns proposed verdicts with evidence and records nothing. The `health_checks` table, its
-routes and a Settings tab are **not** built until the skill has been used enough to show they are wanted.
+**P2 — Project health. Status: built as a skill only.** `engine/builtin_skills/health-review.md` walks fifteen items in six
+groups (foundations, source control, quality, safety, design and UX, shipping). Each item names the existing tool that
+checks it (`read_file`, `search_code`, `scan_code`, `git_history`, `read_ci`, and `design-review` for the one visual
+item), and the skill returns a *proposed* verdict with evidence for each. Its declared moves are all read-only, so it
+records nothing and cannot; a not-applicable item is never counted as a pass; a pass without evidence is refused by the
+skill's own rules. The checklist lives in the skill body, not in an engine JSON file: a skill is read in a workspace
+whose root is not the engine's directory, and an engine file no tool can reach would be a checklist nobody could run.
+The `health_checks` table, its routes and a Settings tab are **not** built, and are not built until someone has run the
+skill enough to want a record.
 
 **P3 — Cache and context diagnostics. Status: planned.** `usage` events gain `prompt_fingerprint` (SHA-256 over system
 prompt, sorted tool names, model and protocol) and `prompt_chars`. A pure `cache_diagnostics.explain(previous, current)`
