@@ -15,8 +15,8 @@ name: check
 # and a WebSocket isolation test that skipped itself (passing) whenever an
 # undeclared `websockets` package was missing.
 #
-# NOTE: this workflow runs on every pull request, on every push to master, and by hand
-# (`workflow_dispatch`). The gate is still `make ci` in the Makefile (the pre-push hook,
+# NOTE: this workflow runs on every pull request, on every push to master, by hand
+# (`workflow_dispatch`), and once a week (`schedule`, advisory jobs only). The gate is still `make ci` in the Makefile (the pre-push hook,
 # `make hooks`), which runs these same targets on the developer's machine, on the host
 # toolchain and on the declared-minimum Python (provisioning it rather than skipping it).
 # This is the second opinion from a machine that is not theirs: a clean Ubuntu image with
@@ -52,6 +52,12 @@ on:
   push:
     branches: [master]
   workflow_dispatch:
+  # An advisory is published against code that has not changed, so the audit jobs also run on a
+  # clock, Mondays 05:17 UTC. The build and test jobs below carry `if: github.event_name !=
+  # 'schedule'`: re-running the suite on an unchanged master would spend runner minutes and
+  # learn nothing.
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -63,6 +69,7 @@ concurrency:
 jobs:
   python:
     name: python ${{ matrix.python }} — lint, tests, stream isolation
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -127,6 +134,7 @@ jobs:
 
   ui:
     name: ui — unit tests, typecheck, build
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -165,6 +173,7 @@ jobs:
 
   rust:
     name: rust — cargo check, tests, fmt
+    if: github.event_name != 'schedule'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4

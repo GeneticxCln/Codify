@@ -20,8 +20,8 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-.venv/
-venv/
+.venv
+venv
 ENV/
 
 # Codify runtime
@@ -32,7 +32,9 @@ ENV/
 *.db-shm
 
 # Node / Web UI
-node_modules/
+# No trailing slash on these two: a worktree links the main checkout's .venv and node_modules
+# in as symlinks, and a pattern ending in `/` matches directories only, so the link got committed.
+node_modules
 ui/dist/
 .vite/
 npm-debug.log*
