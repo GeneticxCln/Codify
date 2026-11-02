@@ -773,11 +773,15 @@ async def request_validation_error(
     shown = ", ".join(fields[:5])
     if len(fields) > 5:
         shown += f" (+{len(fields) - 5} more)"
+    # A syntax error has no field: its `loc` is the offset in the text, which read as "1 field(s) rejected: 1".
+    not_json = bool(errors) and all(err.get("type") == "json_invalid" for err in errors)
     return JSONResponse(
         {
             "code": "invalid_request",
             "message": (
-                f"{len(errors)} field(s) rejected by validation: {shown}"
+                "the request body is not valid JSON"
+                if not_json
+                else f"{len(errors)} field(s) rejected by validation: {shown}"
                 if fields
                 else "the request body was rejected by validation"
             ),
