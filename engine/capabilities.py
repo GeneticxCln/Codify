@@ -130,10 +130,17 @@ def sandbox_report() -> dict[str, Any]:
     """Whether this host can build the workspace-command jail, and where bwrap is.
 
     A fact about the host, not the chosen mode: the mode is a setting, and `auto` on a host
-    without bubblewrap is the one combination a person needs to see before a command runs.
+    without a usable bubblewrap is the combination a person needs to see before a command runs.
+    Installed is not enough: user namespaces can be disabled or AppArmor-restricted, and then every
+    bwrap invocation fails before the command starts. The probe is shared with the jail itself.
     """
     bwrap = shutil.which("bwrap")
-    return {"bwrap": bwrap, "available": bwrap is not None}
+    if bwrap is None:
+        return {"bwrap": None, "available": False}
+    # Local import: capabilities is imported at app boot, and sandbox owns the probe.
+    from engine.sandbox import bwrap_can_jail
+
+    return {"bwrap": bwrap, "available": bwrap_can_jail(bwrap)}
 
 
 def _warnings(
@@ -211,6 +218,10 @@ def startup_lines() -> list[str]:
     sandbox = report["sandbox"]
     if sandbox["available"]:
         lines.append(f"sandbox jail bwrap at {sandbox['bwrap']}")
+    elif sandbox["bwrap"]:
+        lines.append(
+            f"sandbox jail bwrap at {sandbox['bwrap']} cannot build a jail — auto mode runs commands unjailed"
+        )
     else:
         lines.append("sandbox jail unavailable — auto mode runs commands unjailed")
     lines.extend(f"warning: {warning}" for warning in report["warnings"])

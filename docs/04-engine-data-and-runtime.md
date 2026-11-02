@@ -1469,7 +1469,9 @@ folder) is put to the model once, with the reason and, for an edit, the alternat
 fixer is shown is read by `FileSystemService.read_text_with_version_or_none`, which also records
 `version_of` of the exact bytes it showed (and `""` for a path that did not exist yet). The `fs.apply` at the
 end of the same call passes that map as `expected_versions`, the guard Apply has used for reviewed
-dry-run proposals. A path whose bytes moved writes nothing (phase one refuses before phase two), and the
+dry-run proposals. Both sides of that lookup are normalized (`./a.py`, `a.py` and `sub//b.py` name the same
+file), so a planner's spelling cannot walk past a fixer's spelling and overwrite the edit the guard exists
+to protect. A path whose bytes moved writes nothing (phase one refuses before phase two), and the
 refusal is `FileMovedUnderProposalError` rather than a malformed-reply `ValueError`: `_fixer` catches it,
 re-reads the suggested paths, and asks the fixer **once** more with the prompt rebuilt from the current
 contents — the same one-retry budget a path refusal gets. A second move fails the step with
@@ -1901,9 +1903,12 @@ redirected `CODIFY_HOME` outside the home gets its own tmpfs, so this run's data
 engine's `sandbox_network` switch, default off. `HOME` is the tmpfs path, so a build's cache writes are discarded with
 the jail.
 
-`required` refuses with `command_not_allowed` when `bwrap` is not installed; `auto` runs the same command unjailed and
-reports `isolation: "off"` with an `isolation_warning` that the executor writes to the goal's event stream; `off` is the
-deliberate opt-out. `isolation` is `"bwrap"` when the jail ran. A `SandboxService()` constructed without settings (a bare
+`required` refuses with `command_not_allowed` when `bwrap` is not installed **or cannot build a jail**; `auto`
+probes the installed binary with a real trivial invocation (cached per binary), falls back to the same unjailed path,
+and reports `isolation: "off"` with an `isolation_warning` that the executor writes to the goal's event stream. This
+is the installed-but-useless host — user namespaces disabled or AppArmor-restricted — where `which` alone used to
+claim `isolation: "bwrap"` while every command failed. `off` is the deliberate opt-out, and `capabilities.sandbox_report()`
+uses the same probe so Settings and the boot log do not promise a jail the host cannot make. `isolation` is `"bwrap"` when the jail ran. A `SandboxService()` constructed without settings (a bare
 test harness, the read-only librarian path) has no jail, because it cannot see the person's setting; the engine always
 passes `SettingsService` (`app.state.sandbox`). The jail does not replace `validate_argv` and does not admit a program the
 table refuses. Proven by `tests/test_sandbox_jail.py`, which runs real bwrap and checks a state-directory secret, a write
@@ -2138,7 +2143,8 @@ the two cannot drift). A browser-chosen `Origin`, when present, must be one of `
 sends none — the Tauri shell, a command-line test — is admitted by its token, and a foreign origin is closed
 `4403`. The auth wait is still five seconds, but at most `WS_MAX_PENDING` (16) sockets may be waiting for it
 at once; the next one is accepted only long enough to be closed `4429`, and a departure during the wait
-releases its slot. uvicorn's `ws_max_size` is 64 KiB, so a frame larger than any auth message is closed
+releases its slot. A socket that presents the boot token on the Upgrade has already authenticated: it does not
+take a pending slot, so a local flood of silent sockets cannot lock out the UI's header-authenticated stream. uvicorn's `ws_max_size` is 64 KiB, so a frame larger than any auth message is closed
 `1009` before a handler sees it (`tests/test_ws_hardening.py`). A legitimate stream is unchanged, and the
 isolation guarantees are still the ones `tests/stream_isolation.py` states.
 

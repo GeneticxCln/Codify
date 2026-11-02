@@ -158,6 +158,16 @@ class TestTheFrameAndSocketBounds(ServerCase):
             closed = caught.exception
             assert isinstance(closed, websockets.ConnectionClosed)
             self.assertEqual(WS_TOO_MANY_PENDING, close_code(closed))
+
+            # A client that proved its token on the Upgrade is not waiting for the
+            # auth frame's slot and must still get in while the flood holds them.
+            authed = await websockets.connect(self.url, additional_headers=AUTH)
+            await asyncio.sleep(0.1)
+            self.assertIsNone(
+                authed.close_code,
+                "an unauthenticated flood locked out a header-authenticated client",
+            )
+            await authed.close()
         finally:
             for wire in held:
                 await wire.close()

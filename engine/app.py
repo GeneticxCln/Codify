@@ -3525,6 +3525,20 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
     accepted and closed with the reason (4401 bad token, 4403 foreign Origin, 4429 over the cap).
     """
     state = websocket.app.state
+    expected_token = getattr(state, "token", None) or BOOT_TOKEN
+    origin = websocket.headers.get("origin")
+    if origin is not None and origin not in UI_ORIGINS:
+        await websocket.accept()
+        await _close_quietly(websocket, WS_ORIGIN_REFUSED)
+        return False
+    # A client that authenticated on the Upgrade is not waiting for a frame and
+    # must not be behind the cap's unauthenticated queue. Check it before taking
+    # a pending slot; otherwise sixteen silent sockets can lock out the UI even
+    # though it presented the boot token in its header.
+    auth_header = websocket.headers.get("authorization", "")
+    if _same_secret(auth_header, f"Bearer {expected_token}"):
+        await websocket.accept()
+        return True
     pending = int(getattr(state, "ws_pending", 0))
     if pending >= WS_MAX_PENDING:
         await websocket.accept()
@@ -3533,26 +3547,16 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
     state.ws_pending = pending + 1
     try:
         await websocket.accept()
-        origin = websocket.headers.get("origin")
-        if origin is not None and origin not in UI_ORIGINS:
-            await _close_quietly(websocket, WS_ORIGIN_REFUSED)
-            return False
-        expected_token = getattr(state, "token", None) or BOOT_TOKEN
-        auth_header = websocket.headers.get("authorization", "")
-        authenticated = _same_secret(auth_header, f"Bearer {expected_token}")
-        if not authenticated:
-            try:
-                msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_S)
-                auth_msg = json.loads(msg)
-                token = str(auth_msg.get("token") or "")
-                if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):
-                    authenticated = True
-            except Exception:
-                pass
-        if not authenticated:
-            await _close_quietly(websocket, 4401)
-            return False
-        return True
+        try:
+            msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_S)
+            auth_msg = json.loads(msg)
+            token = str(auth_msg.get("token") or "")
+            if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):
+                return True
+        except Exception:
+            pass
+        await _close_quietly(websocket, 4401)
+        return False
     finally:
         state.ws_pending = max(0, int(getattr(state, "ws_pending", 1)) - 1)
 

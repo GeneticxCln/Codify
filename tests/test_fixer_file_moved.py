@@ -21,7 +21,7 @@ from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/herm
 from tests.test_fixer_reask import Factory, Gate, ReAskCase, ScriptedProvider
 
 from engine.executor import ExecutorService
-from engine.fs import FileSystemService, version_of
+from engine.fs import FileMovedUnderProposalError, FileSystemService, version_of
 from engine.models import ROLES, AgentConfigUpdate
 from engine.providers import Keychain
 from engine.sandbox import SandboxService
@@ -116,6 +116,34 @@ class TestAFileThatMovedWhileTheFixerAnswered(FileMovedCase):
 
         self.assertEqual(version_of((self.root / "a.py").read_bytes()), versions["a.py"])
         self.assertEqual("", versions["new.py"], "a path that did not exist must be recognised as absent")
+
+    async def test_the_version_guard_matches_the_same_path_spelled_differently(self) -> None:
+        """A planner's `./a.py` must guard the fixer's `a.py` (and the reverse).
+
+        The versions map used to be keyed by the planner's spelling and looked up by the
+        fixer's exact spelling, so an alias skipped the check and overwrote the person's
+        edit made while the fixer was answering.
+        """
+        self.build()
+        fs = FileSystemService(str(self.root))
+        (self.root / "sub").mkdir()
+        (self.root / "sub" / "b.py").write_text("value = 1\n", encoding="utf-8")
+        edited = "value = 99\n# person's edit\n"
+
+        for suggested, written in (("./a.py", "a.py"), ("sub//b.py", "sub/b.py")):
+            with self.subTest(suggested=suggested, written=written):
+                versions: dict[str, str | None] = {}
+                self.executor._suggested_paths_context(fs, [suggested], versions=versions)
+                (self.root / written).write_text(edited, encoding="utf-8")
+
+                with self.assertRaises(FileMovedUnderProposalError):
+                    fs.apply(
+                        [{"path": written, "action": "update", "content": "value = 2\n"}],
+                        dry_run=False,
+                        expected_versions=versions,
+                    )
+
+                self.assertEqual(edited, (self.root / written).read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

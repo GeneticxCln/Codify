@@ -171,9 +171,20 @@ class MismatchWarningTests(unittest.TestCase):
 
 class SandboxReportTests(unittest.TestCase):
     def test_bwrap_is_reported_by_its_path(self) -> None:
-        with patch("shutil.which", return_value="/usr/bin/bwrap"):
+        with (
+            patch("shutil.which", return_value="/usr/bin/bwrap"),
+            patch("engine.sandbox.bwrap_can_jail", return_value=True),
+        ):
             report = capabilities.sandbox_report()
         self.assertEqual(report, {"bwrap": "/usr/bin/bwrap", "available": True})
+
+    def test_an_installed_bwrap_that_cannot_jail_is_unavailable(self) -> None:
+        with (
+            patch("shutil.which", return_value="/usr/bin/bwrap"),
+            patch("engine.sandbox.bwrap_can_jail", return_value=False),
+        ):
+            report = capabilities.sandbox_report()
+        self.assertEqual(report, {"bwrap": "/usr/bin/bwrap", "available": False})
 
     def test_missing_bwrap_is_unavailable_not_unknown(self) -> None:
         with patch("shutil.which", return_value=None):

@@ -84,6 +84,20 @@ class FileNotTextError(Exception):
         self.reason = reason
 
 
+def _expected_version_key(path: str) -> str:
+    """The same path spelling `ExecutorService._norm_path` uses for plan paths.
+
+    A planner and a fixer can name one file differently (`./a.py`, `a.py`, `sub//b.py`).
+    `expected_versions` is keyed by the spelling the planner used, so an exact lookup
+    silently skips the guard when the fixer writes the canonical spelling.
+    """
+    text = (path or "").strip()
+    if text.startswith("/"):
+        text = text.lstrip("/")
+    normalized = os.path.normpath(text)
+    return "" if normalized == "." else normalized.casefold()
+
+
 class FileMovedUnderProposalError(ValueError):
     """A write was based on bytes the file no longer holds.
 
@@ -661,6 +675,15 @@ class FileSystemService:
         if reason is not None:
             raise ProtectedRootError(str(self.root), reason)
 
+        # The planner's spelling and the fixer's spelling are not necessarily the same.
+        # Normalise both sides so `./a.py` cannot walk past a version recorded for `a.py`
+        # (or the reverse) and overwrite a person's mid-call edit.
+        expected = (
+            {_expected_version_key(path): version for path, version in expected_versions.items()}
+            if expected_versions is not None
+            else None
+        )
+
         # ── phase 1: resolve and validate everything, touch nothing ──────────────
         summaries: list[dict[str, Any]] = []
         # Where each path stands after the operations planned so far: its text, or None once deleted.
@@ -704,10 +727,11 @@ class FileSystemService:
                         f"{rel} exists but cannot be read ({note[len(UNREADABLE):]}), so it cannot be changed "
                         f"or deleted safely. Leave {rel} alone"
                     )
-            if expected_versions is not None and rel in expected_versions and target not in virtual:
+            expected_key = _expected_version_key(rel)
+            if expected is not None and expected_key in expected and target not in virtual:
                 # `""` and None both mean "the path did not exist" (a create proposal stores `""`;
                 # an absent file's version is None). Normalising them keeps a create checkable.
-                if (bases.get(target) or "") != (expected_versions[rel] or ""):
+                if (bases.get(target) or "") != (expected[expected_key] or ""):
                     # Its own class: a malformed proposal and a file that moved are different answers. A
                     # fresh run asks the fixer once more with the current bytes; a replay fails the step.
                     raise FileMovedUnderProposalError(rel)

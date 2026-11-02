@@ -59,7 +59,7 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
         "Popen": "the guard itself: the one process the engine spawns to lead a command's group and kill it when the engine dies",
     },
     "engine/sandbox.py": {
-        "Popen": "the model-driven command: guarded_argv/guarded_env + start_new_session, pinned by tests/test_sandbox.py",
+        "Popen": "the model-driven command, and the one-shot bwrap probe that decides whether auto can build a jail: each guarded_argv/guarded_env + start_new_session; the command is pinned by tests/test_sandbox.py and the probe by tests/test_sandbox_jail.py",
     },
     "engine/git.py": {
         "Popen": "the git choke point: every command through _run_bytes, behind guarded_argv/guarded_env, a session of its own and a whole-group kill on timeout (the conductor's model-chosen reads are bounded), pinned by tests/test_git.py and tests/test_sandbox_read_only_git.py",
@@ -200,6 +200,10 @@ DIRECT_OS_SPAWN_CALLS = {
 SPAWN_SITE_COUNTS: dict[tuple[str, str], int] = {
     # Two unpackers, one per package format: `dpkg-deb -x` and the AppImage's own `--appimage-extract`.
     ("scripts/smoke_bundle.py", "run"): 2,
+    # The command and the bwrap usability probe. Both are guarded and session-led; the
+    # probe is fixed argv and cached per binary, and tests/test_sandbox_jail.py pins its
+    # auto/required behavior against a bwrap that cannot create a namespace.
+    ("engine/sandbox.py", "Popen"): 2,
 }
 
 

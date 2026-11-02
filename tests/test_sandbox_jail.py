@@ -26,7 +26,7 @@ from engine import home
 from engine.app import _clean_engine_string
 from engine.db import connect
 from engine.models import GoalCreate, WorkspaceCreate
-from engine.sandbox import CommandNotAllowed, SandboxService
+from engine.sandbox import CommandNotAllowed, SandboxService, bwrap_can_jail
 from engine.services import GoalService, WorkspaceService
 
 
@@ -219,6 +219,39 @@ class SandboxJailTests(unittest.TestCase):
         self.assertEqual(0, result["exit_code"], result)
         self.assertEqual("off", result["isolation"])
         self.assertIn("ran unjailed", str(result["isolation_warning"]))
+
+    def test_auto_falls_back_when_bwrap_installed_cannot_build_a_jail(self) -> None:
+        """Installed is not usable: a bwrap that cannot make a namespace must not turn
+        every harmless command into a failure, and `auto` must say it ran unjailed."""
+        stub = self.root / "bwrap"
+        stub.write_text(
+            "#!/bin/sh\n"
+            "echo 'bwrap: No permissions to create new namespace' >&2\n"
+            "exit 1\n",
+            encoding="utf-8",
+        )
+        stub.chmod(0o755)
+        bwrap_can_jail.cache_clear()
+        self.addCleanup(bwrap_can_jail.cache_clear)
+        real_which = __import__("shutil").which
+
+        def stub_which(name: str, *args: object, **kwargs: object) -> str | None:
+            return str(stub) if name == "bwrap" else real_which(name, *args, **kwargs)
+
+        with mock.patch("engine.sandbox.shutil.which", side_effect=stub_which):
+            result = SandboxService(settings=_Settings(isolation="auto")).run_command(
+                str(self.root), ["python3", "probe.py"], timeout_s=30
+            )
+            self.assertEqual(0, result["exit_code"], result)
+            self.assertEqual("off", result["isolation"])
+            self.assertIn("cannot build a jail", str(result["isolation_warning"]))
+
+            with self.assertRaises(CommandNotAllowed) as caught:
+                SandboxService(settings=_Settings(isolation="required")).run_command(
+                    str(self.root), ["python3", "probe.py"], timeout_s=30
+                )
+
+        self.assertIn("cannot build a jail", str(caught.exception))
 
     def test_off_is_the_deliberate_unjailed_mode(self) -> None:
         sandbox = SandboxService(settings=_Settings(isolation="off"))

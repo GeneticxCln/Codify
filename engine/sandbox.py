@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import functools
 import os
 import re
 import shutil
@@ -141,6 +142,40 @@ CANCEL_POLL_S = 0.2
 # What a command stopped by a Cancel reports: 128 + SIGINT, the shell's code for "interrupted", so it is told apart
 # from a timeout (124) and from anything the command could have exited with on its own.
 CANCELLED_EXIT_CODE = 130
+
+
+@functools.cache
+def bwrap_can_jail(bwrap: str) -> bool:
+    """Whether this bwrap can make a namespace, not merely whether it exists.
+
+    `which` answers the wrong question on a host with user namespaces disabled or
+    AppArmor-restricted: every command then exits before the program starts, and
+    `auto` used to report `isolation: bwrap` while failing the command. The probe
+    is the smallest real jail (the same bind/dev/proc setup the command jail uses)
+    and is cached per binary: a host capability does not change between commands.
+    """
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — a fixed probe argv, guarded and session-led below
+            guarded_argv([
+                bwrap, "--die-with-parent", "--ro-bind", "/", "/",
+                "--dev", "/dev", "--proc", "/proc", "--", "/bin/true",
+            ]),
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            shell=False,
+            start_new_session=True,
+            env=guarded_env({}),
+        )
+    except OSError:
+        return False
+    try:
+        proc.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+        proc.wait()
+        return False
+    return proc.returncode == 0
 
 
 def _cap_output(text: str, truncated: bool = False) -> str:
@@ -420,6 +455,16 @@ class SandboxService:
                 )
             return None, (
                 "sandbox isolation is auto, but bubblewrap (bwrap) is not installed — this command ran unjailed"
+            )
+        if not bwrap_can_jail(bwrap):
+            if mode == "required":
+                raise CommandNotAllowed(
+                    "sandbox isolation is required, but bubblewrap (bwrap) cannot build a jail "
+                    "(user namespaces are unavailable or refused)"
+                )
+            return None, (
+                "sandbox isolation is auto, but bubblewrap (bwrap) is installed and cannot build a jail — "
+                "this command ran unjailed"
             )
         args = [
             # No `--new-session`: the spawn guard already puts the command in its own process group, and a
