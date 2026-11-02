@@ -19,6 +19,7 @@ import socket
 import threading
 import time
 import unittest
+from typing import Any
 
 import uvicorn
 import websockets
@@ -45,11 +46,31 @@ def close_code(exc: websockets.ConnectionClosed) -> int | None:
 
 
 class _Watch:
+    """Just enough of a catalogue watch to subscribe and be waited on."""
+
+    def __init__(self) -> None:
+        self.subscribers = 0
+
     def subscribe(self) -> None:
-        return None
+        self.subscribers += 1
 
     def unsubscribe(self) -> None:
-        return None
+        self.subscribers = max(0, self.subscribers - 1)
+
+
+def _leave(ws: Any, app: Any) -> None:
+    """Close, then wait until the endpoint has finished before the client's `with` exits.
+
+    Starlette's test client sends the disconnect and immediately cancels the app's scope. An
+    endpoint that needs a few loop turns to notice is cancelled mid-teardown whenever the machine
+    is busy, and the context then ends in `CancelledError` instead of an assertion. `subscribers`
+    reaching zero is the endpoint's last act, so waiting on it lets the cancel land on a handler
+    that has already returned. This is the same reason `test_catalog_watch.py` waits to leave.
+    """
+    ws.close(1000)
+    deadline = time.monotonic() + 10
+    while app.state.catalog_watch.subscribers and time.monotonic() < deadline:
+        time.sleep(0.005)
 
 
 class TestTheHandshake(unittest.TestCase):
@@ -71,6 +92,7 @@ class TestTheHandshake(unittest.TestCase):
                     with client.websocket_connect("/ws/engine", headers={**AUTH, **extra}) as ws:
                         # The handshake is the assertion. No frame is owed before the catalogue changes.
                         ws.send_text("ignored")
+                        _leave(ws, app)
 
 
 class ServerCase(unittest.IsolatedAsyncioTestCase):
