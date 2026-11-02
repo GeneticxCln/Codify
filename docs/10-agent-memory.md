@@ -276,3 +276,25 @@ half-life) is exact.
   clipped — and updates `docs/03` §1.8 in the same change.
 - **An absence is not a proof.** Every memory result is bounded and therefore
   partial; the wording must keep saying so.
+
+## 8. Standing notes: the one memory that crosses a workspace
+
+Everything above is scoped by `workspace_id` in SQL, so one project's failures are never read into another's turns, and
+that wall is the point of it. Standing notes are the deliberate, narrow exception, and the rules are what keep them from
+being a hole in it (`engine/notes.py`):
+
+* **A person writes them.** The settings routes (`GET`, `POST`, `DELETE /settings/notes`) and a profile a person imported
+  are the only ways in. Nothing the engine observes becomes a note, and no model or skill can write one.
+* **Their own table, their own tool.** `global_notes`, read by `read_notes`. `recall` reads events and observations and
+  cannot return a note; `read_notes` reads notes and cannot return an observation. `tests/test_profile.py` writes a
+  distinctive string into each and asserts neither tool ever returns the other's.
+* **Off by default.** `cross_workspace_notes` is 0 on a fresh install, and with it off the tool is not offered at all; if
+  it is turned off mid-run the handler refuses. A profile cannot turn it on.
+* **Preferences, not commands.** The tool's text and the prompt say so, and the request and the engine's rules come first.
+  A note imported from a profile is marked, so a note from somewhere else is never mistaken for the person's own.
+* **Short on purpose.** At most 50 notes of 500 characters, refused rather than cut.
+
+What this does not do: it does not move what *a workspace learned* anywhere. Exporting a workspace's observations in a
+profile is a separate, opt-in act by a person, lands in a workspace the person names, and arrives as proof 1 with no
+evidence (`docs/09` §10.24).
+

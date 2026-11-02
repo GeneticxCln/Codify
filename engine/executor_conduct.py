@@ -28,6 +28,7 @@ from engine.conductor import (
     FETCH_PAGE,
     MACHINE_TOOLS,
     MCP_TOOLS,
+    NOTES_TOOLS,
     PAGE_TOOLS,
     STEP_TOOLS,
     without_browser_actions,
@@ -758,6 +759,11 @@ class _Conduct(_Plan):
             mcp = getattr(self, "mcp", None)
             if mcp is not None and mcp.has_admitted_tools(goal.status == "RUNNING"):
                 offered.extend(MCP_TOOLS)
+            # The person's standing notes, only while they switched them on and wrote at least one.
+            notes = getattr(self, "notes", None)
+            settings = getattr(self, "settings", None)
+            if notes is not None and settings is not None and settings.get_int("cross_workspace_notes") and notes.count():
+                offered.extend(NOTES_TOOLS)
             # A question needs somebody to answer it, and a place to be seen. An approved plan that is
             # running has nobody sitting at it (a step ends finished, or paused with a reason, never parked
             # on a question), and once a plan exists the plan is what the person is looking at: they

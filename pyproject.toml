@@ -24,6 +24,11 @@ dependencies = [
     "keyring>=25.0,<26",
 ]
 
+# A client for a running engine over its own HTTP API (engine/cli.py). Named `codify-cli` because `scripts/codify` is
+# the launcher for the desktop app and must keep its name.
+[project.scripts]
+codify-cli = "engine.cli:main"
+
 [project.optional-dependencies]
 # The in-process System-1 gate (`engine/laya.py`, docs/05). Not in `dependencies` and not
 # installed by `make setup`: the SDK brings torch and its checkpoints are hundreds of

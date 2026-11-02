@@ -106,7 +106,7 @@ the monthly pass is and what the first `reviewed` date does and does not attest.
 
 **P6 — Parked, with gates.** A deferred tool tier (only if tools exceed 25% of prompt tokens after P3; reordering tools
 is forbidden because it invalidates the prefix), a skill A/B (needs benchmark variants), and a reference corpus (a new
-trust boundary; only with the `benchmarks/vendor.py` pattern). Cross-platform and subscription OAuth are out of scope.
+trust boundary; only with the `benchmarks/vendor.py` pattern). Subscription OAuth is out of scope. Cross-platform was out of scope until the spike in `docs/18` §7, which lists the Linux-only parts and decides to stay Linux-only for now.
 
 ## 4. What reopens a row
 

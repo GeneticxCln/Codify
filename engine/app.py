@@ -53,6 +53,9 @@ from engine.stats_history import StatsSnapshotService
 from engine.stats_import import StatsImportInvalid, StatsImportService
 from engine.model_catalog import ModelCatalogService
 from engine.catalog_watch import CatalogWatch
+from engine.suggestions import SuggestionWatch
+from engine.notes import MAX_NOTES, NotesService
+from engine.profile import ProfileImport, ProfileTools
 from engine.models import (
     BUILTIN_PROVIDERS,
     scrub_surrogates,
@@ -84,7 +87,12 @@ from engine.models import (
     SkillCreated,
     SkillImport,
     ROLES,
+    NoteCreate,
     SpeakRequest,
+    Suggestion,
+    SuggestionAccept,
+    SuggestionList,
+    SuggestionSnooze,
     TurnCreate,
     VersionedAction,
     TraceToggle,
@@ -307,6 +315,9 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     app.state.executor.settings = app.state.settings
     app.state.executor.compactions = app.state.compactions
     app.state.executor.mcp = app.state.mcp
+    # The notes a person keeps for every project, offered to the conductor only while `cross_workspace_notes` is on.
+    app.state.notes = NotesService(conn)
+    app.state.executor.notes = app.state.notes
     app.state.token = BOOT_TOKEN
 
     # Engine-level WebSocket connections, each with a queue the watcher can hand a
@@ -394,6 +405,11 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # (`engine/catalog_watch.py`), so a quiet engine spends nothing on it.
     watch_task = asyncio.create_task(app.state.catalog_watch.run())
     app.state.catalog_watch_task = watch_task
+    # The inbox's detectors (`engine/suggestions.py`, docs/09 §10.22). Built from the store, the settings and the
+    # workspace list and from nothing else: it is handed no provider, registry or executor, so a sweep has nothing
+    # to call a model with and nothing to start a turn with. It only fills the inbox.
+    app.state.suggestions = SuggestionWatch(conn, app.state.settings, app.state.workspaces)
+    suggestions_task = asyncio.create_task(app.state.suggestions.run())
     # One recorder for the engine's life (engine/speech.py): a microphone left open by a closed
     # window is closed here, and its file deleted, rather than left to the two-minute cap.
     app.state.recorder = speech.Recorder()
@@ -404,6 +420,13 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
         # Stopped before the database closes, and before the socket does: a task
         # that outlived the state directory it was watching for is an orphan with a
         # publish callback into a store that is being closed underneath it.
+        suggestions_task.cancel()
+        try:
+            await suggestions_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:
+            print(f"suggestions watcher had already stopped: {type(exc).__name__}: {exc}", file=sys.stderr)
         watch_task.cancel()
         try:
             await watch_task
@@ -1503,6 +1526,12 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     "tts_auto_read": (0, 1),
     # Whether model-proposed browser navigation, clicks and typing are allowed. Off by default.
     "browser_actions": (0, 1),
+    # The inbox's detectors (engine/suggestions.py): on by default because they only read and only offer; the CI
+    # one contacts GitHub on its own and is off until a person turns it on; hours before a paused goal is raised.
+    "cross_workspace_notes": (0, 1),
+    "suggestions": (0, 1),
+    "suggest_ci": (0, 1),
+    "suggest_paused_hours": (1, 168),
     # Whether the conductor may fetch web pages: 0 never, 1 only the sites in `web_fetch_hosts`, 2 any
     # public site. Off on a fresh install (engine/services.py says why). Three states, so not a switch: a
     # checkbox's `true` is refused here like any other number a person is choosing.
@@ -1520,7 +1549,8 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
-    "sandbox_network", "laya_required", "review_deep",
+    "sandbox_network", "laya_required", "review_deep", "suggestions", "suggest_ci",
+    "cross_workspace_notes",
 })
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
@@ -2300,6 +2330,128 @@ async def rename_conversation(
     """
     conversations: ConversationService = request.app.state.conversations
     return conversations.rename(conversation_id, body)
+
+
+# ── the suggestions inbox (engine/suggestions.py, docs/09 §10.22) ─────────────────────────────────────────────────
+#
+# Four routes, and none of them starts work. Reading the inbox, snoozing and dismissing change one row; `accept`
+# records which turn a person already made from an offer (the turn itself came through `POST /conversations/{id}/
+# turns`, the one door, with the offer's `prompt` as the person's own words). `scan` is the "look now" button: the
+# same read-only sweep the watcher runs, with no model in it.
+
+
+def _suggestion_service(request: Request) -> Any:
+    service = request.app.state.suggestions.service
+    return service
+
+
+@app.get("/suggestions", response_model=SuggestionList)
+async def list_suggestions(request: Request, workspace_id: str | None = Query(None, max_length=200)) -> SuggestionList:
+    if workspace_id is not None:
+        request.app.state.workspaces.get(workspace_id)
+    result: SuggestionList = await asyncio.to_thread(_suggestion_service(request).inbox, time.time(), workspace_id)
+    return result
+
+
+@app.post("/suggestions/scan")
+async def scan_suggestions(request: Request) -> dict[str, int]:
+    """Look now. Respects the `suggestions` setting like the watcher does, and every rate limit the watcher has."""
+    return {"created": await request.app.state.suggestions.sweep()}
+
+
+@app.post("/suggestions/{suggestion_id}/snooze", response_model=Suggestion)
+async def snooze_suggestion(suggestion_id: str, body: SuggestionSnooze, request: Request) -> Suggestion:
+    result: Suggestion = await asyncio.to_thread(
+        _suggestion_service(request).snooze, suggestion_id, body.hours, time.time()
+    )
+    return result
+
+
+@app.post("/suggestions/{suggestion_id}/dismiss", response_model=Suggestion)
+async def dismiss_suggestion(suggestion_id: str, request: Request) -> Suggestion:
+    result: Suggestion = await asyncio.to_thread(_suggestion_service(request).dismiss, suggestion_id, time.time())
+    return result
+
+
+@app.post("/suggestions/{suggestion_id}/accept", response_model=Suggestion)
+async def accept_suggestion(suggestion_id: str, body: SuggestionAccept, request: Request) -> Suggestion:
+    """Record the turn a person made from this offer. It creates nothing: the goal must already exist."""
+    result: Suggestion = await asyncio.to_thread(
+        _suggestion_service(request).accept, suggestion_id, body.goal_id, time.time()
+    )
+    return result
+
+
+# ── standing notes and the profile file (engine/notes.py, engine/profile.py, docs/10 §8, docs/02 §3.0c) ───────────
+#
+# Both are a person's: the boot token reaches them and no skill, conductor tool or workspace file can. The notes are
+# the only memory that crosses a workspace, and only while `cross_workspace_notes` is on; the profile is the one file
+# that moves a setup between machines, and carries no key and no authority (the module says exactly what it leaves out).
+
+
+@app.get("/settings/notes")
+async def list_notes(request: Request) -> dict[str, Any]:
+    notes: NotesService = request.app.state.notes
+    settings: SettingsService = request.app.state.settings
+    return {
+        "notes": await asyncio.to_thread(notes.list),
+        "enabled": bool(settings.get_int("cross_workspace_notes")),
+        "max_notes": MAX_NOTES,
+    }
+
+
+@app.post("/settings/notes", status_code=201)
+async def add_note(body: NoteCreate, request: Request) -> dict[str, Any]:
+    notes: NotesService = request.app.state.notes
+    return await asyncio.to_thread(notes.add, body.text)
+
+
+@app.delete("/settings/notes/{note_id}", status_code=204)
+async def delete_note(note_id: str, request: Request) -> Response:
+    notes: NotesService = request.app.state.notes
+    await asyncio.to_thread(notes.delete, note_id)
+    return Response(status_code=204)
+
+
+def _profile_tools(request: Request) -> ProfileTools:
+    state = request.app.state
+    return ProfileTools(
+        state.conn, state.settings, state.registry, state.workspaces, state.notes, state.keychain,
+        ConductorTools.NAMES,
+    )
+
+
+@app.get("/profile/export")
+async def export_profile(
+    request: Request,
+    workspace_id: str | None = Query(None, max_length=200),
+    memory: bool = Query(False),
+    notes: bool = Query(False),
+) -> dict[str, Any]:
+    """The profile document. Skills and memory come from the named workspace; memory and notes only if asked for."""
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(workspace_id) if workspace_id else None
+    if memory and workspace is None:
+        raise ApiError(422, "workspace_required", "memory belongs to a workspace; name one with workspace_id")
+    tools = _profile_tools(request)
+    return await asyncio.to_thread(
+        lambda: tools.export(workspace=workspace, include_memory=memory, include_notes=notes)
+    )
+
+
+@app.post("/profile/import")
+async def import_profile(body: ProfileImport, request: Request) -> dict[str, Any]:
+    """Apply the parts of a profile the person chose. Never widens authority, never overwrites a skill, note or memory."""
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspace = workspaces.get(body.workspace_id) if body.workspace_id else None
+    tools = _profile_tools(request)
+
+    def make_skill(target: Workspace, skill: SkillCreate) -> SkillCreated:
+        # The creator's own door, named here and nowhere else: one new file under `.codify/skills/`, never a
+        # replacement (`ApiError(409, "skill_exists")` is how an existing one is left alone).
+        return workspaces.create_skill(target, skill, ConductorTools.NAMES)
+
+    return await asyncio.to_thread(tools.apply, body, workspace, make_skill)
 
 
 @app.post("/conversations/{conversation_id}/archive", response_model=Conversation)

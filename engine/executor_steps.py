@@ -1047,7 +1047,7 @@ class _Steps(_Design):
             try:
                 # The sandbox is shared: under a parallel goal another step's
                 # test must not run in the tree this command is measuring.
-                async with self._sandbox_lock:
+                async with self.sandbox_lock(ws.root_path):
                     result = await asyncio.to_thread(
                         self.sandbox.run_command, ws.root_path, proposed, timeout_s=timeout_s,
                         cancel=self.cancel_signal(goal_id),
@@ -1263,7 +1263,7 @@ class _Steps(_Design):
                 try:
                     # Same shared-sandbox rule as the verifier: serialized so a
                     # concurrent step's writes cannot move under a read-only probe.
-                    async with self._sandbox_lock:
+                    async with self.sandbox_lock(ws_root):
                         result = await asyncio.to_thread(
                             self.sandbox.run_command,
                             ws_root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",

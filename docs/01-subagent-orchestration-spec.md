@@ -530,6 +530,7 @@ a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four pro
 | `reset_machine` | `SurfaceBridge.ask("machine", "reset")` | recovery: starts a machine again from a clean project, remade from the recipe the person opened it with (the same project, network and limits). It names a machine that is already one of this workspace's tabs, so it can neither make one nor change one; it ends what is running in it, and is logged |
 | `recall` | `GoalService.recall_events` + `recall.search` | read-only over this workspace's own `events`; the `RECALLABLE` allow-list decides what can be returned and nothing stored can widen it (docs/03 §1.8) |
 | `recall_threads` | `GoalService.thread_recall` + `recall.search_threads` | read-only over this workspace's own conversation threads; scoped by workspace in the query, archived threads excluded (docs/03 §1.8) |
+| `read_notes` | `NotesService.list` | read-only over the person's standing notes, which apply to every project (`10` §8). Offered only while `cross_workspace_notes` is on and a note exists; a preference, never a command |
 | `recon` | `ExecutorService._librarian` | read-only, `MAX_LIBRARY_ROUNDS` |
 | `design` | `ExecutorService._design` | no tools at all; rendered surfaces only — layout, states, components, tokens, acceptance, never an API, a schema or a set of names |
 | `plan` | `_plan_steps` | refuses without evidence; writes steps, never files |

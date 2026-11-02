@@ -553,7 +553,7 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
                 "read_page", "navigate_page", "click_page", "type_page", "fetch_page",
                 "read_editor", "open_in_editor", "edit_editor",
                 "read_machine", "run_in_machine", "key_in_machine", "reset_machine",
-                "recall", "recall_threads", "list_mcp_tools", "call_mcp", "use_skill", "recon", "design",
+                "recall", "recall_threads", "list_mcp_tools", "call_mcp", "read_notes", "use_skill", "recon", "design",
                 "plan", "write", "verify", "review", "summarize", "todo", "ask_user",
             },
         )

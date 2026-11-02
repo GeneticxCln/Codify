@@ -2625,6 +2625,7 @@ the pipeline already makes, through the same service:
 | `summarize` | `ExecutorService._scribe` | commits, and only after `review` approved |
 | `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |
 | `ask_user` | `engine/ask.py` | none — ends the run with one question for the person (a few options at most), and the answer is their next message, an ordinary turn (docs/00 §6.8). Offered on a turn before a plan exists, never after one and never while an approved plan is running |
+| `read_notes` | `engine/notes.py`, the `global_notes` table | read-only over the notes a person keeps for **every** project (`docs/10` §8). Offered only while `cross_workspace_notes` is on **and** at least one note exists; the handler re-checks the switch on every call. It cannot return an observation, and `recall` cannot return a note |
 | `use_skill` | `engine/skills.py` | none — a skill is data, never a capability |
 
 **The prompt names every tool, and says what the engine does with a call.** `CONDUCTOR_SYSTEM_PROMPT`
@@ -2691,6 +2692,23 @@ next request anyway, so a model that kept asking kept the loop running forever �
 
 A turn that was cut off says so. One that trails off mid-thought reads as a bug
 rather than as the bound it is.
+
+**Reads in one reply overlap; nothing else does.** When a reply asks for several of `read_file`,
+`search_code`, `git_history` and `recall` in a row, the loop runs that run of calls together, at most four at a time
+(`MAX_CONCURRENT_READS`), so three slow reads cost about one read's time. Each is confined to the workspace and none
+takes the sandbox or git lock. Everything else is a barrier and runs alone, in the order the model asked: a
+`run_command`, a stage move, `ask_user`, a browser or editor action. What the serial loop promised still holds, and
+`tests/test_conductor_concurrent_reads.py` pins it. The results are handed back in the order the model asked, whichever
+finished first; a cancel is looked at again as each call is about to start, so a read not yet started when it came
+never runs; `ask_user` ends the run only after the reads before it have finished and drops everything after it; and an
+identical call right after another is still refused rather than run twice. This does not widen what a tool may read:
+the set is a constant, and a tool joins it by being read-only, not by being asked for twice.
+
+The sandbox lock that keeps one command from running in a tree another is measuring is **per workspace tree**
+(`ExecutorService.sandbox_lock(root)`, keyed by resolved path), not one for the engine. Inside a workspace nothing
+changed: a verifier's test, the critic's probe and the conductor's `run_command` still take turns, so a write never
+moves under a read-only probe. A long test in one workspace no longer holds up another workspace's commands
+(`tests/test_sandbox_lock_per_workspace.py`). The git lock is still engine-wide.
 
 ### 10.8 Failure is a sentence, not a crash
 
@@ -3382,6 +3400,113 @@ Proven by `tests/test_compaction.py` (the plan boundary, kept turns after a summ
 bounded stored summary, the auto batch floor, prompt injection, and the GET/POST/DELETE routes) and
 `ui/tests/turnTranscript.test.ts` (the marker's wording, automatic vs manual, and that it does not
 copy the summary). Not proven: the drawer against a real long thread from a live provider.
+
+### 10.22 The suggestions inbox: the engine notices, a person decides
+
+The engine now looks for things worth a person's attention and puts them in an inbox. This is the one place it acts
+without being asked, so the rule is that it **offers and never acts**: a detector's whole output is a row in
+`suggestions` (`docs/04` §2), and nothing reads that row except the inbox.
+
+| Kind | Fires when | Reads |
+|---|---|---|
+| `failing_command` | a command the verifier ran failed three or more times in the last day and its newest run has not passed | `test_result` events |
+| `paused_goal` | a goal has waited for a person's Start longer than `suggest_paused_hours` (default 6) | goal rows and the pause reason on the last `goal_status` event |
+| `stale_health_review` | a project that has been worked in this week, and is at least two weeks old, has had no health review for two weeks | the `conductor loaded the health-review skill` log line (a review records nothing else, by design) |
+| `red_ci` | **only if `suggest_ci` is on:** GitHub reports the workspace's current commit failing | `read_checks` (`docs/04` §3.0.9) |
+
+**What a detector cannot do.** It is handed a connection, the settings and the workspace list, and nothing else: no
+provider, no registry, no executor. It makes no model call and starts no turn or goal. A turn is created only by
+`POST /conversations/{id}/turns` (`docs/00` §6.8) and only the fixer writes (§6.9); neither is reachable from an
+offer.
+
+**What accepting is.** The window sends the offer's `prompt` as the person's own turn through that one door, exactly
+as if they had typed it, and then calls `POST /suggestions/{id}/accept {goal_id}`. That route creates nothing: it checks
+that the goal exists, is in the offer's workspace and is newer than the offer, and records the link. Every prompt ends
+"Do not change anything until I approve", and an approved plan is still the only way anything is written, so an accepted
+offer is a *plan-only* turn in the sense that matters: it can read and propose, and it cannot write until the person
+presses Start. `TurnCreate` carries no pipeline flags, so "plan-only" is the prompt and the write gate, not a field.
+
+**What keeps it small.** One row per (workspace, kind, key) however often it is seen; at most five open per workspace;
+at most one new offer of a kind per hour per workspace; a dismissed or accepted one is not raised again for a week.
+Snooze hides one for 1 to 168 hours. An open offer is *removed* when its reason goes away (the goal was resumed, the
+command passes again, the commit is green); a dismissal is kept, because that is what the cooldown remembers. A
+sweep runs every ten minutes, starting a minute after boot, and `POST /suggestions/scan` runs one now. The
+`suggestions` setting (default on) turns the whole thing off.
+
+**The CI detector contacts GitHub on its own**, which nothing else in the engine does without a button, so it is off
+by default and Settings → Engine says what it does when it is on: the request names the workspace's own `origin` and
+HEAD commit, carries no credential, goes to `api.github.com` only, and is made at most every thirty minutes for a
+workspace that did something that day. An idle workspace is never asked about.
+
+**Quoted text.** A command line or a goal title is text from a repository or a model. It is collapsed to one line,
+stripped of backticks and capped before it goes into a title or a prompt, and a check's name from GitHub appears only in
+`evidence`, never in the prompt.
+
+**What is not detected.** A command typed in a terminal tab. The terminal belongs to the desktop shell, which does not
+see exit codes: reporting them needs shell integration (OSC 133) in the user's shell and a route to carry the result.
+`failing_command` reads the commands the engine itself ran. That is the honest scope until a terminal source exists.
+
+Proven by `tests/test_suggestions.py`: each detector's finding and its non-findings, the rules above against a clock,
+the CI opt-in and interval, the routes, and a month of ten-minute sweeps with every detector eligible and nobody
+clicking, which asserts no goal, event or conversation changed, no model was reached, and the inbox stayed at five.
+In the window, `ui/tests/suggestionsApp.test.ts` mounts the App against the recording fake engine and asserts the same
+from the other side: with nothing pressed, no turn, goal or acceptance is sent; **Send to chat** sends exactly the
+offer's words through `POST /conversations/{id}/turns` with none of the pipeline flags and then records the goal it made;
+an offer about another project cannot be sent from this one; Snooze and Dismiss start nothing; and an answer that is not a
+list is an empty inbox. `suggestionsInbox.test.ts` covers the drawer section and the Settings card, and
+`suggestionsApi.test.ts` the five calls. The bell adds the inbox to what is unread (`bellCount`).
+
+### 10.23 A second surface: `codify-cli`
+
+`codify-cli` (`engine/cli.py`, installed as a console script; the desktop launcher `scripts/codify` keeps its name) is a
+client of a **running** engine over the HTTP API the window uses. It starts no engine, reads no database, imports none of
+the engine's services (a test pins that `engine.home` is the only engine module it imports) and spawns no process. What
+the window can do through a route it can do; what a route refuses it is refused, in the engine's own words.
+
+* **Finding the engine.** `--port` or `CODIFY_ENGINE_PORT`, else the first port in 7430-7440 that answers like an engine.
+  A port is asked *without* the token and trusted only if it answers `401 unauthorized`, so the boot token is never offered
+  to whatever else is listening in that range.
+* **The token.** `--token`, `CODIFY_BOOT_TOKEN`, or the engine's own `boot_token` file (`docs/04` §6, mode `0600`). The file
+  is read and never created, and `engine.app` is never imported, because importing it creates the file.
+* **Commands.** `status`, `workspaces`, `goals`, `ask`, `suggestions` (list, scan, snooze, dismiss), `notes` (list, add,
+  delete) and `profile` (export, import); `--json` prints the engine's answer as it came.
+* **`ask` makes a turn the way the composer does** (`POST /conversations`, then `POST /conversations/{id}/turns` with the
+  words and no flag). With `--wait` it polls the goal until it settles and prints the reply (the last `log` event flagged
+  `turn`). **It does not approve a plan.** A plan comes back as `PENDING` and the client says it is waiting for the
+  window; there is no `start`, `apply` or `retry` command, so the second surface cannot be the way a write is authorised.
+* **Exit codes.** 0 done, 1 the engine refused (its message is printed), 2 usage, 3 the engine could not be reached.
+
+Proven by `tests/test_cli.py`, which runs the real commands against the real app over ASGI and the turn command against a
+stand-in engine (the real route would start a real model).
+
+### 10.24 The profile file
+
+`GET /profile/export` and `POST /profile/import` (`engine/profile.py`, `docs/04` §3) move a person's setup between
+machines as one JSON document: portable tuning settings, how each of the eight roles is configured, a workspace's skills,
+and, only when asked for, what that workspace has learned and the standing notes. Both are settings-class routes: the boot
+token reaches them and no skill, conductor tool or workspace file can.
+
+**It carries no credential.** Keys are not read. Every text field is passed through the engine's one scrubber
+(`providers.redact_secrets`) with every stored key as a known secret, so a key a prompt, skill, lesson or note quoted is
+removed from the file.
+
+**Opening one never widens what the engine may do.** The numeric settings it carries are an allowlist
+(`PORTABLE_INT_SETTINGS`), not a denylist, so a setting added later is left out until someone decides it belongs. Not
+carried, and ignored if a file has them: `sandbox_network`, `sandbox_isolation`, `browser_actions`, `web_fetch` and its
+hosts, `suggest_ci`, `cross_workspace_notes`, `laya_required`, `laya_checkpoint`, every audio setting, and any role's
+`base_url`, protocol or key. A role on a provider that is not built in is skipped (it would need an address, and an
+address decides where code is sent). The body is `extra=forbid` all the way down, so a file naming an address is a 422 and
+nothing is applied. `left_out` in the file says which and why, and the import report lists every refusal.
+
+**It overwrites nothing it did not ask about.** A skill that exists, a memory subject that exists and a note already kept
+are left alone and reported. Skills go through the creator's door, handed to the profile by the route (the route module is
+the only one that may name it, `docs/00` §6.9, held by `tests/test_invariants_at_their_boundary.py`). Settings and role
+configs are replaced, and only if the person chose to apply them. **Memory and notes are opt-in** on both sides of the file.
+Imported memory arrives as proof 1 with no evidence, flattened to one line, as a claim a person brought and not one this
+machine saw; imported notes are marked `imported` and `read_notes` says so.
+
+Proven by `tests/test_profile.py`, including three mutations a reviewer can repeat: disable the scrubber and the key test
+fails; let an authority setting be portable and the import test fails; make notes always offered and the default test fails.
 
 ## 11. The clipboard history (built)
 
