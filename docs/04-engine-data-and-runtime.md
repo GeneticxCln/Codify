@@ -1935,7 +1935,10 @@ allowlist validated: the same resolved program and tokens are placed after `bwra
 ### The jail
 
 `engine/sandbox.py` wraps the child in bubblewrap when the engine-wide `sandbox_isolation` setting is `required` or
-`auto` (the default). The jail binds `/` read-only, then binds the workspace read-write at the same absolute path and
+`auto` (the default). Where no jail can be built, `required` refuses every command and `auto` refuses one that runs the
+project's own code (anything but `read_only` mode and `git`) unless the engine switch `sandbox_unjailed_ok` is 1, a
+person-only setting (`PUT /settings/engine`) that a profile never carries; with it on, the command runs unjailed and
+the result's `isolation_warning` says so. The jail binds `/` read-only, then binds the workspace read-write at the same absolute path and
 binds the workspace's `.git` back read-only before it `chdir`s there **when `.git` already exists**. A workspace test
 may edit the working tree; it cannot install a post-commit hook or name a `core.fsmonitor` that the engine's own
 commit would later run outside the jail with the person's real home. A fresh workspace has no metadata to bind, so a
@@ -2097,6 +2100,8 @@ CODIFY_ENGINE token=<hex> port=<int>
 ```
 
 The line is printed **only once the engine can serve**: `serve()` opens the SQLite file — running its migrations — *before* it announces, so an unopenable or corrupt database ends the process with a message on stderr naming the file (and the `sqlite3` error, re-raised) instead of a `CODIFY_ENGINE` line the shell would then trust for the rest of a boot that could never finish (`tests/test_boot_announces_ready_late.py`). `lifespan` closes that connection on every road out — shutdown, a failed startup, and a migration that raises inside `db.connect` — so a boot that fails leaves no descriptor behind (`tests/test_connections_are_closed.py`).
+
+**The store carries a schema version** (`engine/db.py` `SCHEMA_VERSION`, in SQLite's `PRAGMA user_version`; `tests/test_db_and_services.py` `TestTheSchemaVersionIsStamped`). `_prepare` reads it before touching the file: a store stamped *higher* than the build knows is refused with a message naming the file and changing nothing in it, and a store at 0 (every install made before the stamp) or below is migrated and stamped. The number does **not** move for the additive migrations the engine has always made (`ADD COLUMN`, `CREATE ... IF NOT EXISTS`): an older engine sharing the same `~/.codify` (a checkout beside the installed app) reads those without harm, and refusing it would lock one of the two out for no reason. It moves by one, in the same commit, when a migration is added that an older build could misread: a dropped or retyped column, a rewritten table, a changed meaning.
 
 `token` = 32 bytes CSPRNG hex (64 chars), created once and kept at `<state dir>/boot_token` (`0600`). Desktop reads this line, then attaches `Authorization: Bearer <token>` to HTTP and `?token=` is **forbidden** (query leakage). WS: first text frame from client `{"type":"auth","token":"<hex>"}` or HTTP header on the Upgrade.
 

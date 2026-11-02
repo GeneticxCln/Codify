@@ -3492,10 +3492,14 @@ removed from the file.
 
 **Opening one never widens what the engine may do.** The numeric settings it carries are an allowlist
 (`PORTABLE_INT_SETTINGS`), not a denylist, so a setting added later is left out until someone decides it belongs. Not
-carried, and ignored if a file has them: `sandbox_network`, `sandbox_isolation`, `browser_actions`, `web_fetch` and its
+carried, and ignored if a file has them: `sandbox_network`, `sandbox_isolation`, `sandbox_unjailed_ok`, `browser_actions`, `web_fetch` and its
 hosts, `suggest_ci`, `cross_workspace_notes`, `laya_required`, `laya_checkpoint`, every audio setting, and any role's
-`base_url`, protocol or key. A role on a provider that is not built in is skipped (it would need an address, and an
-address decides where code is sent). The body is `extra=forbid` all the way down, so a file naming an address is a 422 and
+`base_url`, protocol or key. Nor does an import change **which provider** a role or the conductor sends its text to, or
+replace a role's system prompt: a provider name is an address with the person's stored key behind it, and a prompt is
+instructions from a file that may have come from anyone. A role takes the file's tuning (`temperature`, `max_tokens`,
+`thinking_effort`, `num_ctx`, `keep_alive`) and its `model_name` only while the provider stays the one it already has;
+everything else is reported as skipped with the reason. The export still carries the provider and prompt, so a file
+reads as a record of the setup. The body is `extra=forbid` all the way down, so a file naming an address is a 422 and
 nothing is applied. `left_out` in the file says which and why, and the import report lists every refusal.
 
 **It overwrites nothing it did not ask about.** A skill that exists, a memory subject that exists and a note already kept

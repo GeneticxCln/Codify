@@ -509,10 +509,28 @@ class SandboxService:
         except Exception:
             return False
 
+    def _unjailed_acknowledged(self) -> bool:
+        """Whether a person has said `auto` may run a workspace's code with no jail (`sandbox_unjailed_ok`).
+
+        Fails closed: a settings object that cannot answer, or one that predates the switch, reads as "no".
+        """
+        if self.settings is None:
+            return False
+        try:
+            return bool(self.settings.get_int("sandbox_unjailed_ok"))
+        except Exception:
+            return False
+
     def _jail_argv(
-        self, argv: list[str], root: Path, network: bool,
+        self, argv: list[str], root: Path, network: bool, *, runs_project_code: bool = True,
     ) -> tuple[list[str] | None, str | None]:
         """`(bwrap argv, warning)` for one command; `(None, warning)` when it runs unjailed.
+
+        `auto` without a jail that works runs a command unjailed only when `runs_project_code` is false (a
+        read-only `ls`, `wc` or the hardened `git`, none of which executes anything the workspace supplies) or
+        when a person has turned on `sandbox_unjailed_ok`. Otherwise it refuses: `pytest`, `npm run`, `make` and
+        `cargo test` execute the repository's own code, and "run it anyway and say so" was approving a cloned
+        repository's test suite as the person with nothing between them.
 
         The root is read-only, the workspace is the one writable bind, and the real home is a fresh tmpfs so
         `~/.ssh`, `~/.codify` and the files beside them are absent rather than merely unreadable. `--unshare-net`
@@ -528,6 +546,7 @@ class SandboxService:
                 raise CommandNotAllowed(
                     "sandbox isolation is required, but bubblewrap (bwrap) is not installed"
                 )
+            self._refuse_unjailed("bubblewrap (bwrap) is not installed", runs_project_code)
             return None, (
                 "sandbox isolation is auto, but bubblewrap (bwrap) is not installed — this command ran unjailed"
             )
@@ -537,6 +556,7 @@ class SandboxService:
                     "sandbox isolation is required, but bubblewrap (bwrap) cannot build a jail "
                     "(user, pid or network namespaces are unavailable or refused)"
                 )
+            self._refuse_unjailed("bubblewrap (bwrap) is installed and cannot build a jail", runs_project_code)
             return None, (
                 "sandbox isolation is auto, but bubblewrap (bwrap) is installed and cannot build a jail — "
                 "this command ran unjailed"
@@ -573,6 +593,16 @@ class SandboxService:
         if not network:
             args += ["--unshare-net"]
         return [*args, "--", *argv], None
+
+    def _refuse_unjailed(self, why: str, runs_project_code: bool) -> None:
+        """Raise unless an `auto` command may run without a jail (see `_jail_argv`)."""
+        if not runs_project_code or self._unjailed_acknowledged():
+            return
+        raise CommandNotAllowed(
+            f"sandbox isolation is auto, but {why}, and this command runs the project's own code. "
+            "Nothing was run. Settings → Workspace command jail lets a person allow unjailed runs on this machine "
+            "(sandbox_unjailed_ok); it cannot be changed from here."
+        )
 
     @staticmethod
     def _tool_binds(executable: Path, real_home: Path) -> list[str]:
@@ -667,6 +697,8 @@ class SandboxService:
             env = guarded_env(_workspace_env(), COMMAND_LIMITS)
         jail_argv, isolation_warning = self._jail_argv(
             child_argv, Path(root_path).resolve(), self._network_allowed(network),
+            # A read-only command, and the hardened git of either mode, run nothing the workspace supplies.
+            runs_project_code=mode != "read_only" and argv[0] != "git",
         )
         isolation = "bwrap" if jail_argv is not None else "off"
         if jail_argv is not None:

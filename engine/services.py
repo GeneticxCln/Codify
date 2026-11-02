@@ -143,6 +143,11 @@ class SettingsService:
         # talks to the internet is a supply-chain and data-leak surface, and a goal's own `allow_network`
         # opts that one run in.
         "sandbox_network": (0, lambda v: 1 if v else 0),
+        # Whether `sandbox_isolation=auto` may run a workspace's own code (`pytest`, `npm run`, `make`, `cargo test`)
+        # when this machine cannot build a jail. Off: without it `auto` refuses such a command and says where this
+        # switch is, because running a cloned repository's tests unjailed is approving that repository's code as
+        # the person. Only a person writes it (`PUT /settings/engine`, docs/00 §6.2); a profile never carries it.
+        "sandbox_unjailed_ok": (0, lambda v: 1 if v else 0),
         # Fail closed when the pre-flight gate cannot answer. Off by default: the gate is an optional
         # accelerator, and refusing every request on an install without a working gate would make the
         # engine unusable. A person who wants the guarantee turns it on.
@@ -233,8 +238,9 @@ class SettingsService:
         # covering its subdomains. Normalised on the way in (engine/web_fetch.py `parse_hosts`), so what
         # is stored is what the fetch reads.
         "web_fetch_hosts": "",
-        # How a workspace command is contained: `required` (refuse without bwrap), `auto` (run unjailed and say
-        # so), `off` (the deliberate opt-out). The default is auto so an install without bubblewrap keeps working.
+        # How a workspace command is contained: `required` (refuse without bwrap), `auto` (jail it when a jail can
+        # be built; otherwise refuse a command that runs the project's own code unless `sandbox_unjailed_ok` is on),
+        # `off` (the deliberate opt-out). The default is auto so a machine with a jail is jailed without a choice.
         "sandbox_isolation": "auto",
     }
 

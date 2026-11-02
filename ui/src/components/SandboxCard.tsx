@@ -23,6 +23,9 @@ const MODES = [
 export const SandboxCard: React.FC = () => {
   const [mode, setMode] = useState<string | null>(null);
   const [network, setNetwork] = useState<boolean | null>(null);
+  // Whether `auto` may run the project's own code when this host cannot build a jail. Absent on an engine
+  // that predates the switch, which reads as off.
+  const [unjailedOk, setUnjailedOk] = useState(false);
   const [jail, setJail] = useState<NonNullable<EngineRuntime["sandbox"]> | null>(null);
   const [runtimeFailed, setRuntimeFailed] = useState(false);
   const [saving, setSaving] = useState(false);
@@ -35,6 +38,7 @@ export const SandboxCard: React.FC = () => {
         if (cancelled || !settings?.sandbox_isolation) return;
         setMode(settings.sandbox_isolation.value);
         setNetwork(settings.sandbox_network ? settings.sandbox_network.value === 1 : false);
+        setUnjailedOk(settings.sandbox_unjailed_ok ? settings.sandbox_unjailed_ok.value === 1 : false);
       })
       .catch(() => {
         // A card whose save would be refused is worse than no card; it stays absent.
@@ -55,7 +59,7 @@ export const SandboxCard: React.FC = () => {
   if (mode === null || network === null) return null;
 
   const save = async (
-    patch: { sandbox_isolation?: string; sandbox_network?: boolean },
+    patch: { sandbox_isolation?: string; sandbox_network?: boolean; sandbox_unjailed_ok?: boolean },
     previous: () => void,
   ) => {
     setSaving(true);
@@ -67,6 +71,9 @@ export const SandboxCard: React.FC = () => {
       }
       if (patch.sandbox_network !== undefined) {
         setNetwork(Number(result.saved.sandbox_network) === 1);
+      }
+      if (patch.sandbox_unjailed_ok !== undefined) {
+        setUnjailedOk(Number(result.saved.sandbox_unjailed_ok) === 1);
       }
       setMessage({ ok: true, text: "Saved — this applies to the next workspace command." });
     } catch (error: unknown) {
@@ -87,6 +94,12 @@ export const SandboxCard: React.FC = () => {
     const previous = network;
     setNetwork(next);
     void save({ sandbox_network: next }, () => setNetwork(previous));
+  };
+
+  const changeUnjailedOk = (next: boolean) => {
+    const previous = unjailedOk;
+    setUnjailedOk(next);
+    void save({ sandbox_unjailed_ok: next }, () => setUnjailedOk(previous));
   };
 
   const missingJail = jail !== null && !jail.available;
@@ -130,9 +143,16 @@ export const SandboxCard: React.FC = () => {
           <span>
             {mode === "required"
               ? "Bubblewrap is not installed on this host, so required mode refuses every workspace command."
-              : "Bubblewrap is not installed on this host. Auto mode runs workspace commands unjailed; choose Required to refuse them instead."}
+              : unjailedOk
+                ? "Bubblewrap is not installed on this host. Auto mode runs the project's own code (tests, scripts) unjailed because you allowed it below; choose Required to refuse it instead."
+                : "Bubblewrap is not installed on this host. Auto mode refuses to run the project's own code (tests, scripts) until you allow unjailed runs below; choose Required to refuse it for good."}
           </span>
         </p>
+      )}
+      {missingJail && mode === "auto" && (
+        <Checkbox checked={unjailedOk} disabled={saving} onChange={changeUnjailedOk}>
+          Allow the project&apos;s own code to run on this machine without a jail
+        </Checkbox>
       )}
       {jail?.available && (
         <p className="text-xs text-codify-muted">

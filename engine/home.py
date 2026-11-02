@@ -105,6 +105,26 @@ def _stored_token(path: Path) -> str:
         return ""
 
 
+#: The shortest `CODIFY_BOOT_TOKEN` the engine accepts without comment. The token it makes for itself is 64 hex
+#: characters; 32 is 128 bits of hex, past anything a local process can guess before the engine is gone.
+MIN_TOKEN_CHARS = 32
+
+
+def weak_token_notice(override: str | None) -> str | None:
+    """A sentence for the engine's stderr when `CODIFY_BOOT_TOKEN` replaces the random token with a short one.
+
+    A notice and not a refusal: the command-line client, scripts and the suite itself pass short tokens on
+    purpose, and the engine only listens on `127.0.0.1`. But the token is the whole of the engine's
+    authentication, and a typed one is easier to guess than the one it makes. Never contains the token.
+    """
+    if not override or len(override) >= MIN_TOKEN_CHARS:
+        return None
+    return (
+        f"engine: {ENV_BOOT_TOKEN} is shorter than {MIN_TOKEN_CHARS} characters. It is the only thing that "
+        "authenticates a request to this engine; unset it to use the random token kept beside the database."
+    )
+
+
 def boot_token() -> str:
     """The loopback bearer token, stable across restarts of this state dir.
 

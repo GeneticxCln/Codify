@@ -11,8 +11,12 @@ do:
 * **Importing never widens what the engine may do.** Settings that open a door (browser actions, web access, network
   for commands, the sandbox's isolation, the CI check, cross-project notes) are not exported and are ignored if a file
   carries them: a profile from somewhere else must not be able to turn on the network by being opened. The same goes
-  for anything that decides *where* text is sent: no `base_url`, no audio server, no checkpoint repository. A role on a
-  provider that needs an address of its own is skipped, and the report says which.
+  for anything that decides *where* text is sent: no `base_url`, no audio server, no checkpoint repository, and no
+  provider. A provider name is an address too, with the person's stored key behind it, so a file that says `openai` on
+  a role running a local model would move every prompt of that role to a hosted vendor. Neither does it replace a
+  role's system prompt, which is instructions for the role from a file that may have come from anyone. A role takes the
+  file's tuning (temperature, token and context limits, thinking effort, keep-alive) and its model name only while the
+  provider stays the one it already has; the report says what was left.
 * **Importing never overwrites.** A skill whose name exists is left alone, a memory subject that exists is left alone,
   a note already kept is left alone. Settings and role configs are the only things replaced, and only the person's
   explicit choice to apply them (`apply`) does that.
@@ -69,6 +73,7 @@ PORTABLE_STRING_SETTINGS = (
 LEFT_OUT = {
     "sandbox_network": "lets workspace commands reach the network",
     "sandbox_isolation": "decides whether workspace commands are jailed",
+    "sandbox_unjailed_ok": "lets workspace code run when no jail can be built",
     "browser_actions": "lets the assistant click and type in your browser tabs",
     "web_fetch": "lets the assistant read web pages",
     "web_fetch_hosts": "names the sites it may read",
@@ -79,12 +84,24 @@ LEFT_OUT = {
     "audio": "voice settings name servers audio is sent to",
     "api keys": "never leave the keychain",
     "role addresses": "a role's base_url decides where your code is sent",
+    "role providers": "a provider decides where your code is sent, and which stored key goes with it",
+    "role prompts": "a prompt override is instructions for a role, taken from a file",
+    "conductor providers": "the conductor's provider decides where your code is sent",
 }
-#: The role fields a profile carries. `api_key`, `base_url` and the protocol are not among them.
+#: The role fields a profile exports. `api_key`, `base_url` and the protocol are not among them. Export carries the
+#: provider and the prompt so a file reads as a record of the setup; import applies only `ROLE_TUNING_FIELDS` and a
+#: model name that stays on the role's own provider.
 ROLE_FIELDS = (
     "provider", "model_name", "temperature", "max_tokens", "thinking_effort", "num_ctx", "keep_alive",
     "system_prompt_override", "fallback_provider", "fallback_model_name",
 )
+#: What an import writes to a role without conditions: numbers and flags about how it runs, not where it runs.
+ROLE_TUNING_FIELDS = ("temperature", "max_tokens", "thinking_effort", "num_ctx", "keep_alive")
+#: The conductor's routing settings. Export carries them; import leaves them as the person has them.
+ROUTING_STRING_SETTINGS = {
+    "conductor_provider": "conductor_model",
+    "conductor_fallback_provider": "conductor_fallback_model",
+}
 
 
 class ProfileRole(BaseModel):
@@ -285,7 +302,7 @@ class ProfileTools:
         if choice.settings:
             self._apply_settings(profile.settings, applied, skip)
         if choice.roles:
-            self._apply_roles(profile.roles, secrets, applied, skip)
+            self._apply_roles(profile.roles, applied, skip)
         if choice.skills and profile.skills:
             if workspace is None:
                 skip("skills", "no workspace was named to receive them")
@@ -310,37 +327,63 @@ class ProfileTools:
                 continue
             applied["settings"].append(key)
             self.settings.set_int(key, value)
+        pair_of = {model: provider for provider, model in ROUTING_STRING_SETTINGS.items()}
         for key, text in settings.strings.items():
             if key not in PORTABLE_STRING_SETTINGS:
                 skip(f"setting {key}", LEFT_OUT.get(key, "not a setting a profile carries"))
                 continue
+            if key in ROUTING_STRING_SETTINGS:
+                if text.strip() != self.settings.get_str(key):
+                    skip(f"setting {key}", LEFT_OUT["conductor providers"])
+                continue
+            provider_key = pair_of.get(key)
+            if provider_key is not None:
+                # A model name belongs to a provider. The file's name is kept only while the file and the person
+                # agree on which provider that is.
+                asked = settings.strings.get(provider_key)
+                if asked is not None and asked.strip() != self.settings.get_str(provider_key):
+                    skip(f"setting {key}", "it belongs to a different provider than the one set here")
+                    continue
             try:
                 self.settings.set_str(key, text)
                 applied["settings"].append(key)
             except ApiError as exc:
                 skip(f"setting {key}", exc.message)
 
-    def _apply_roles(
-        self, roles: dict[str, ProfileRole], secrets: tuple[str, ...], applied: dict[str, Any], skip: Any,
-    ) -> None:
+    def _apply_roles(self, roles: dict[str, ProfileRole], applied: dict[str, Any], skip: Any) -> None:
         for role, spec in roles.items():
             if role not in ROLES:
                 skip(f"role {role}", "not one of the eight roles")
                 continue
             fields = spec.model_dump(exclude_unset=True)
-            # A provider that is not built in needs an address of its own, and an address decides where your code is
-            # sent. A profile never supplies one, so a role on such a provider is left as it is.
-            custom = [
-                p for p in (fields.get("provider"), fields.get("fallback_provider"))
-                if p and p not in BUILTIN_PROVIDERS
-            ]
-            if custom:
-                skip(f"role {role}", f"uses {custom[0]!r}, which needs an address; set it up in Settings")
+            current = self.registry.get_config(role)
+            update: dict[str, Any] = {name: fields[name] for name in ROLE_TUNING_FIELDS if fields.get(name) is not None}
+
+            # Where a role's text goes, and what it is told, stay as the person set them. Naming the same value the
+            # role already has changes nothing and is not reported.
+            for name, reason in (
+                ("provider", LEFT_OUT["role providers"]),
+                ("fallback_provider", LEFT_OUT["role providers"]),
+                ("fallback_model_name", "it belongs to the fallback provider, which a file does not choose"),
+                ("system_prompt_override", LEFT_OUT["role prompts"]),
+            ):
+                asked = fields.get(name)
+                if asked and asked != (getattr(current, name, None) or ""):
+                    skip(f"role {role} {name}", reason)
+            model = fields.get("model_name")
+            if model is not None:
+                asked_provider = fields.get("provider")
+                if asked_provider in (None, current.provider):
+                    update["model_name"] = model
+                else:
+                    skip(
+                        f"role {role} model_name",
+                        f"it is for {asked_provider!r}, and this role stays on {current.provider!r}",
+                    )
+            if not update:
                 continue
-            if fields.get("system_prompt_override"):
-                fields["system_prompt_override"] = redact_secrets(fields["system_prompt_override"], secrets)
             try:
-                self.registry.set_config(role, AgentConfigUpdate(**fields))
+                self.registry.set_config(role, AgentConfigUpdate(**update))
                 applied["roles"].append(role)
             except (ApiError, ValueError) as exc:
                 skip(f"role {role}", getattr(exc, "message", None) or str(exc).splitlines()[0])

@@ -43,14 +43,17 @@ from engine.services import GoalService, WorkspaceService
 class _Settings:
     """The two settings the sandbox reads, without a database behind them."""
 
-    def __init__(self, isolation: str = "auto", network: int = 0) -> None:
+    def __init__(self, isolation: str = "auto", network: int = 0, unjailed_ok: int = 0) -> None:
         self.isolation = isolation
         self.network = network
+        self.unjailed_ok = unjailed_ok
 
     def get_str(self, key: str) -> str:
         return self.isolation if key == "sandbox_isolation" else ""
 
     def get_int(self, key: str) -> int:
+        if key == "sandbox_unjailed_ok":
+            return self.unjailed_ok
         return self.network if key == "sandbox_network" else 0
 
 
@@ -295,7 +298,9 @@ class SandboxJailTests(unittest.TestCase):
         def no_bwrap(name: str, *args: object, **kwargs: object) -> str | None:
             return None if name == "bwrap" else real_which(name, *args, **kwargs)
 
-        sandbox = SandboxService(settings=_Settings(isolation="auto"))
+        # The acknowledgement is what makes `auto` run the project's code with no jail
+        # (tests/test_sandbox_unjailed_ack.py holds the refusal without it).
+        sandbox = SandboxService(settings=_Settings(isolation="auto", unjailed_ok=1))
         with mock.patch("engine.sandbox.shutil.which", side_effect=no_bwrap):
             result = sandbox.run_command(str(self.root), ["python3", "probe.py"], timeout_s=30)
 
@@ -322,7 +327,7 @@ class SandboxJailTests(unittest.TestCase):
             return str(stub) if name == "bwrap" else real_which(name, *args, **kwargs)
 
         with mock.patch("engine.sandbox.shutil.which", side_effect=stub_which):
-            result = SandboxService(settings=_Settings(isolation="auto")).run_command(
+            result = SandboxService(settings=_Settings(isolation="auto", unjailed_ok=1)).run_command(
                 str(self.root), ["python3", "probe.py"], timeout_s=30
             )
             self.assertEqual(0, result["exit_code"], result)

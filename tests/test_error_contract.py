@@ -349,6 +349,18 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("root_path", located)
 
+    async def test_a_body_that_is_not_json_says_so_instead_of_naming_a_field(self) -> None:
+        """A JSON syntax error has no field. It used to read "1 field(s) rejected by validation: 1" (the offset)."""
+        r = await self.client.post(
+            "/workspaces", content=b"{bad", headers={**self.headers, "content-type": "application/json"},
+        )
+        self.assertEqual(r.status_code, 422)
+        body = r.json()
+        self._assert_declared_shape(422, body, "POST /workspaces (body is not JSON)")
+        self.assertEqual(body["code"], "invalid_request")
+        self.assertEqual("the request body is not valid JSON", body["message"])
+        self.assertTrue(any(e.get("type") == "json_invalid" for e in body["detail"]), "the parser's report is kept")
+
     async def test_a_rejection_does_not_repeat_what_was_sent(self) -> None:
         """The 422 names the fields that were wrong and the reason, never the values.
 

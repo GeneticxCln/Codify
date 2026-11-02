@@ -2620,6 +2620,32 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
 
+    async def test_unjailed_runs_are_a_person_s_engine_switch_with_the_token_and_nothing_else(self) -> None:
+        """`sandbox_unjailed_ok` lets `auto` run a workspace's code without a jail; only a person writes it.
+
+        Off on a fresh install, a checkbox's `true` is a 1, it is refused without the boot token, and a goal that
+        tried to carry it is refused as an unknown field (docs/00 §6.2).
+        """
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual({"value": 0, "min": 0, "max": 1}, r.json()["sandbox_unjailed_ok"])
+
+        r = await self.client.put("/settings/engine", json={"sandbox_unjailed_ok": 1})
+        self.assertEqual(401, r.status_code, "no token, no change")
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual(0, r.json()["sandbox_unjailed_ok"]["value"])
+
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"sandbox_unjailed_ok": True})
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertEqual(1, r.json()["saved"]["sandbox_unjailed_ok"])
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"sandbox_unjailed_ok": 0})
+        self.assertEqual(0, r.json()["saved"]["sandbox_unjailed_ok"])
+
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": "x", "title": "t", "description": "d", "sandbox_unjailed_ok": 1},
+        )
+        self.assertEqual(422, r.status_code, "a goal cannot choose its own containment")
+
     async def test_review_deep_is_a_person_s_engine_switch_and_a_goal_cannot_carry_it(self) -> None:
         """Deep review costs extra model calls on every reviewed step, so only `PUT /settings/engine` turns it on.
 

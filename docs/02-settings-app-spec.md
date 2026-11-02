@@ -138,10 +138,12 @@ about the host, not the selected mode; the sandbox card below combines the two.
 `SandboxCard.tsx` shows `sandbox_isolation` (`auto` / `required` / `off`), the network permission
 (`sandbox_network`), and the host's bwrap availability from `GET /settings/runtime` together,
 because the mode alone is not the guarantee. **`auto` on a host without bubblewrap is the one
-combination that must be said out loud:** the card says commands run unjailed, and `required`
-says they will be refused instead. The same sentence appears in the goal's event stream when a
+combination that must be said out loud:** the card says the project's own code is refused until a
+person ticks *Allow the project's own code to run on this machine without a jail*
+(`sandbox_unjailed_ok`, shown only for `auto` on a host that cannot jail), and `required` says every
+command will be refused instead. The same sentence appears in the goal's event stream when a
 command actually runs, but a person should not have to start a run to discover which mode they are
-in. Both switches write only through `PUT /settings/engine`; an engine that predates the keys
+in. All of its settings write only through `PUT /settings/engine`; an engine that predates the keys
 shows no card, never one whose save would be refused.
 
 The copy keeps the limit: the jail bounds what a command can reach outside the workspace, but the
@@ -175,7 +177,8 @@ Two person-only features with an API and a command line, and **no Settings scree
 `codify-cli notes` and `codify-cli profile`, `docs/09` §10.23). **`cross_workspace_notes`** (default off) is the switch
 that lets the standing notes (`docs/10` §8) reach a run; it is not written by a profile and `PUT /settings/engine` is its
 only door. The profile (`docs/09` §10.24) is exported and imported through `GET /profile/export` and
-`POST /profile/import`. A screen for either would be a thin card over these routes, in the style of §3.0a; it is not built.
+`POST /profile/import`. An import applies a role's tuning and its model name only while the provider stays the same; it never
+changes a provider, the conductor's routing or a system prompt, and the report lists each one it left. A screen for either would be a thin card over these routes, in the style of §3.0a; it is not built.
 
 ### 3.0b The fail-closed gate switch
 

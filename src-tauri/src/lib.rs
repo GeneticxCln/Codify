@@ -1633,7 +1633,7 @@ async fn launch_with_retries(shared: &SharedEngineState, keep_log: bool) -> bool
 /// whether to make another.
 async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> LaunchOutcome {
     use std::process::Stdio;
-    use tokio::io::{AsyncBufReadExt, AsyncReadExt, BufReader};
+    use tokio::io::{AsyncReadExt, BufReader};
 
     let bundle_dir = shared.lock().await.bundle_dir.clone();
     let launch = engine_protocol::resolve_engine(
@@ -1818,12 +1818,24 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
     }
     {
         let mut s = shared.lock().await;
+        // A handle still parked here belongs to an engine this launch is replacing. Dropping a tokio `Child`
+        // does not stop the process, so overwriting it would leave that engine running with nothing holding it;
+        // asking it to die first means a restart can never end with two engines. For one that has already
+        // exited the signal is a no-op.
+        if let Some(mut previous) = s.child.take() {
+            let _ = previous.start_kill();
+        }
         s.child = Some(child);
     }
-    let mut lines = BufReader::new(stdout).lines();
+    // Read to the end of the stream: a line that is not UTF-8 is read lossily and the loop goes on, because
+    // only the end of the pipe means the engine is gone (`engine_protocol::next_stdout_line`).
+    let mut stdout_reader = BufReader::new(stdout);
+    let mut stdout_line = Vec::new();
 
     let mut handshake_done = false;
-    while let Ok(Some(line)) = lines.next_line().await {
+    while let Some(line) =
+        engine_protocol::next_stdout_line(&mut stdout_reader, &mut stdout_line).await
+    {
         if !handshake_done {
             if let Some(handshake) = engine_protocol::parse_handshake(&line) {
                 let mut s = shared.lock().await;

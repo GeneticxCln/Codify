@@ -773,11 +773,15 @@ async def request_validation_error(
     shown = ", ".join(fields[:5])
     if len(fields) > 5:
         shown += f" (+{len(fields) - 5} more)"
+    # A syntax error has no field: its `loc` is the offset in the text, which read as "1 field(s) rejected: 1".
+    not_json = bool(errors) and all(err.get("type") == "json_invalid" for err in errors)
     return JSONResponse(
         {
             "code": "invalid_request",
             "message": (
-                f"{len(errors)} field(s) rejected by validation: {shown}"
+                "the request body is not valid JSON"
+                if not_json
+                else f"{len(errors)} field(s) rejected by validation: {shown}"
                 if fields
                 else "the request body was rejected by validation"
             ),
@@ -1538,6 +1542,9 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     "web_fetch": (0, 2),
     # Workspace commands may reach the network only when a person asks; a goal can opt in with `allow_network`.
     "sandbox_network": (0, 1),
+    # Lets `sandbox_isolation=auto` run a workspace's own code when this machine cannot build a jail. Off by
+    # default, and a profile never carries it (engine/profile.py LEFT_OUT).
+    "sandbox_unjailed_ok": (0, 1),
     # Fail closed when the pre-flight gate cannot answer (docs/05 §3). Off by default: an install with
     # no gate model still runs, exactly as it did before the setting existed.
     "laya_required": (0, 1),
@@ -1549,7 +1556,7 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
-    "sandbox_network", "laya_required", "review_deep", "suggestions", "suggest_ci",
+    "sandbox_network", "sandbox_unjailed_ok", "laya_required", "review_deep", "suggestions", "suggest_ci",
     "cross_workspace_notes",
 })
 
@@ -3961,6 +3968,9 @@ def serve() -> None:
     # being discovered later by finding a smoke-test key in a real keychain.
     # stderr, because the Tauri shell parses stdout for the boot handshake.
     print(home.startup_notice(), file=sys.stderr, flush=True)
+    weak_token = home.weak_token_notice(os.environ.get(home.ENV_BOOT_TOKEN))
+    if weak_token is not None:
+        print(weak_token, file=sys.stderr, flush=True)
     # Which interpreter this actually is, and whether the gate's SDK is importable
     # *by it*. A capability installed into a different environment than the one the
     # shell spawned fails silently otherwise — see engine/capabilities.py.

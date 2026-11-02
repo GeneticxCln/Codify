@@ -690,6 +690,8 @@ export interface EngineSettings {
   sandbox_isolation?: EngineStringSettingValue;
   /** 1 = workspace commands may reach the network. Off by default; a goal can opt in too. */
   sandbox_network?: EngineSettingValue;
+  /** 1 = `auto` may run the project's own code when this host cannot build a jail. Off by default; only a person sets it. */
+  sandbox_unjailed_ok?: EngineSettingValue;
   /** 1 = an unavailable pre-flight gate refuses the turn instead of warning (docs/05 §3). */
   laya_required?: EngineSettingValue;
   /** 1 = two fresh-context review lenses read each step before the critic decides (docs/21 P1). Off by default. */

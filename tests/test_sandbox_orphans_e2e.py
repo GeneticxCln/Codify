@@ -675,6 +675,11 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         # (docs/09 §10.14). The recipe is the documented driver when the conductor is switched off.
         response = client.put("/settings/engine", json={"conductor_drives_execution": 0})
         self.assertEqual(200, response.status_code, f"switching the conductor off: {response.text}")
+        # `auto` refuses the project's own code on a host that cannot build a jail until a person says otherwise
+        # (docs/00 §6.6). The mode stays `auto`, so a host with bubblewrap still runs this jailed; the switch only
+        # keeps the test about process trees from depending on whether the machine running it has one.
+        response = client.put("/settings/engine", json={"sandbox_unjailed_ok": 1})
+        self.assertEqual(200, response.status_code, f"acknowledging unjailed runs: {response.text}")
 
     def _create_workspace(self, client: httpx.Client, workspace: Path) -> str:
         response = client.post("/workspaces", json={"name": "ws", "root_path": str(workspace)})

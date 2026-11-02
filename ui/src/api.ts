@@ -661,6 +661,7 @@ export async function saveEngineSettings(
     laya_checkpoint?: string;
     sandbox_isolation?: string;
     sandbox_network?: boolean;
+    sandbox_unjailed_ok?: boolean;
     laya_required?: boolean;
     review_deep?: boolean;
     suggestions?: boolean;

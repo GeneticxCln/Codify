@@ -28,9 +28,10 @@ interface Call {
 
 type Route = (body: unknown) => Response;
 
-const settings = (mode = "auto", network = 0) => ({
+const settings = (mode = "auto", network = 0, unjailedOk = 0) => ({
   sandbox_isolation: { value: mode, max: 8 },
   sandbox_network: { value: network, min: 0, max: 1 },
+  sandbox_unjailed_ok: { value: unjailedOk, min: 0, max: 1 },
 });
 
 const runtime = (available: boolean) =>
@@ -110,7 +111,7 @@ test("auto on a host with bwrap names it, and choosing required saves the engine
   );
 });
 
-test("auto without bwrap says it is unjailed before a command runs", async () => {
+test("auto without bwrap says the project's code is refused until a person allows it", async () => {
   await withCard(
     {
       "GET /settings/engine": () => json(settings()),
@@ -118,7 +119,65 @@ test("auto without bwrap says it is unjailed before a command runs", async () =>
     },
     async (dom) => {
       assert.match(dom.text(), /Bubblewrap is not installed on this host/);
-      assert.match(dom.text(), /runs workspace commands unjailed/);
+      assert.match(dom.text(), /refuses to run the project's own code/);
+      assert.equal(
+        dom.byButton("Allow the project's own code to run on this machine without a jail").getAttribute("aria-checked"),
+        "false",
+      );
+    },
+  );
+});
+
+test("allowing unjailed runs saves its own key and the warning then says they run", async () => {
+  await withCard(
+    {
+      "GET /settings/engine": () => json(settings()),
+      "GET /settings/runtime": () => runtime(false),
+      "PUT /settings/engine": (body) => json({ saved: body }),
+    },
+    async (dom, calls) => {
+      const toggle = dom.byButton("Allow the project's own code to run on this machine without a jail");
+      await dom.click(toggle);
+      await dom.settle();
+
+      assert.deepEqual(
+        puts(calls).map((call) => call.body),
+        [{ sandbox_unjailed_ok: true }],
+      );
+      assert.equal(toggle.getAttribute("aria-checked"), "true");
+      assert.match(dom.text(), /runs the project's own code \(tests, scripts\) unjailed because you allowed it/);
+    },
+  );
+});
+
+test("the unjailed switch is offered only where it means something", async () => {
+  const buttonLabel = "Allow the project's own code to run on this machine without a jail";
+  for (const [name, mode, available] of [
+    ["a host with a jail", "auto", true],
+    ["required mode", "required", false],
+    ["off mode", "off", false],
+  ] as const) {
+    await withCard(
+      {
+        "GET /settings/engine": () => json(settings(mode)),
+        "GET /settings/runtime": () => runtime(available),
+      },
+      async (dom) => {
+        assert.doesNotMatch(dom.text(), new RegExp(buttonLabel), `${name} offered the switch`);
+      },
+    );
+  }
+});
+
+test("an engine that predates the switch reads as off", async () => {
+  await withCard(
+    {
+      "GET /settings/engine": () =>
+        json({ sandbox_isolation: { value: "auto", max: 8 }, sandbox_network: { value: 0, min: 0, max: 1 } }),
+      "GET /settings/runtime": () => runtime(false),
+    },
+    async (dom) => {
+      assert.match(dom.text(), /refuses to run the project's own code/);
     },
   );
 });

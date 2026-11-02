@@ -361,6 +361,47 @@ pub(crate) fn parse_handshake(line: &str) -> Option<Handshake> {
     })
 }
 
+/// The longest stretch of engine stdout read as one line. The handshake is a few dozen bytes; a stream
+/// with no newline in it is cut here rather than parked in memory until it ends.
+pub(crate) const MAX_STDOUT_LINE_BYTES: usize = 64 * 1024;
+
+/// The next line of the engine's stdout, or `None` when the stream has ended or failed.
+///
+/// Bytes are decoded lossily, once a line is complete. `BufReader::lines()` answered a byte that was not UTF-8
+/// with an error, and the loop reading it ended on any error, so the shell took the first bad byte for the
+/// engine's exit: it cleared the connection info of an engine that was still running and started a second one.
+/// The engine writes only the handshake to stdout today, but a child it spawns, or a print added later, can
+/// say anything, and what a reader of the engine's stdout may not do is stop listening because of what it
+/// heard. `None` therefore means the stream is over (end of file) or broken (a real I/O error, named on
+/// stderr), never that a line was unreadable.
+///
+/// `buffer` is the caller's, reused across lines. A trailing `\n` or `\r\n` is removed.
+pub(crate) async fn next_stdout_line<R>(reader: &mut R, buffer: &mut Vec<u8>) -> Option<String>
+where
+    R: tokio::io::AsyncBufRead + Unpin,
+{
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+
+    buffer.clear();
+    match (&mut *reader)
+        .take(MAX_STDOUT_LINE_BYTES as u64)
+        .read_until(b'\n', buffer)
+        .await
+    {
+        Ok(0) => None,
+        Ok(_) => {
+            while matches!(buffer.last(), Some(b'\n' | b'\r')) {
+                buffer.pop();
+            }
+            Some(String::from_utf8_lossy(buffer).into_owned())
+        }
+        Err(error) => {
+            eprintln!("[Codify] engine stdout reader stopped: {error}");
+            None
+        }
+    }
+}
+
 /// Why `python3 -m engine` cannot deliver a handshake from `root`, when it cannot.
 ///
 /// The launcher runs a bare `python3` in the directory it guessed, so the commonest
@@ -593,6 +634,69 @@ mod tests {
         ] {
             assert_eq!(None, parse_handshake(line), "must not parse: {line:?}");
         }
+    }
+
+    /// Every line `next_stdout_line` yields from `bytes`, to the end of the stream.
+    fn stdout_lines(bytes: &[u8]) -> Vec<String> {
+        tauri::async_runtime::block_on(async {
+            let mut reader = tokio::io::BufReader::new(bytes);
+            let mut buffer = Vec::new();
+            let mut lines = Vec::new();
+            while let Some(line) = next_stdout_line(&mut reader, &mut buffer).await {
+                lines.push(line);
+            }
+            lines
+        })
+    }
+
+    #[test]
+    fn bytes_that_are_not_utf8_do_not_end_the_stdout_reader() {
+        // `BufReader::lines()` answers invalid UTF-8 with an error, and the loop that
+        // read it with `while let Ok(Some(..))` took that for the engine's exit: the
+        // shell then cleared the token and port of an engine that was still running and
+        // started a second one. A bad byte is a replacement character, not an ending.
+        let lines = stdout_lines(b"\xff\xfe junk\nCODIFY_ENGINE token=ab port=7430\nmore\n");
+        assert_eq!(
+            3,
+            lines.len(),
+            "every line is read, the bad one included: {lines:?}"
+        );
+        assert!(
+            lines[0].contains('\u{fffd}'),
+            "the bad bytes are replaced: {:?}",
+            lines[0]
+        );
+        assert_eq!(Some(7430), parse_handshake(&lines[1]).map(|h| h.port));
+        assert_eq!("more", lines[2]);
+    }
+
+    #[test]
+    fn invalid_bytes_after_the_handshake_do_not_stop_the_drain() {
+        // The reader keeps draining for the whole life of the engine, so the bytes that
+        // matter are the ones that come after the handshake.
+        let lines = stdout_lines(b"CODIFY_ENGINE token=ab port=7430\n\xc3\x28\nlater\n");
+        assert_eq!(
+            vec!["CODIFY_ENGINE token=ab port=7430", "\u{fffd}(", "later"],
+            lines
+        );
+    }
+
+    #[test]
+    fn a_final_line_without_a_newline_is_still_a_line() {
+        assert_eq!(vec!["a", "b"], stdout_lines(b"a\r\nb"));
+    }
+
+    #[test]
+    fn a_line_with_no_end_is_cut_at_the_bound_not_buffered_without_limit() {
+        let long = vec![b'x'; MAX_STDOUT_LINE_BYTES * 2 + 10];
+        let lines = stdout_lines(&long);
+        assert!(
+            lines.len() >= 3,
+            "the stream is read to its end in pieces: {}",
+            lines.len()
+        );
+        assert!(lines.iter().all(|line| line.len() <= MAX_STDOUT_LINE_BYTES));
+        assert_eq!(long.len(), lines.iter().map(String::len).sum::<usize>());
     }
 
     #[test]
