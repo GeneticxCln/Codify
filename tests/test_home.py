@@ -14,6 +14,7 @@ import contextlib
 import io
 import json
 import os
+import secrets
 import socket
 import subprocess
 import sys
@@ -370,6 +371,47 @@ class TestTheBootTokenOutlivesTheProcess(_EnvCase):
         self.assertEqual(result.stdout.strip(), "from-the-environment")
         # The persisted token is still untouched by being overridden.
         self.assertEqual((self.scratch / "boot_token").read_text(), "from-the-file")
+
+
+class TestAWeakTokenOverrideIsSaidOutLoud(_EnvCase):
+    """`CODIFY_BOOT_TOKEN` replaces a 256-bit random token with whatever the caller typed.
+
+    Warned about, not refused: the CLI, scripts and the suite itself pass short tokens on purpose. The notice never
+    contains the token, and it goes to stderr, because stdout carries only the handshake the desktop shell parses.
+    """
+
+    def test_a_short_override_gets_a_notice_and_a_long_one_or_none_does_not(self) -> None:
+        notice = home.weak_token_notice("t2")
+        assert notice is not None
+        self.assertIn(home.ENV_BOOT_TOKEN, notice)
+        self.assertIn(str(home.MIN_TOKEN_CHARS), notice)
+        self.assertNotIn("t2", notice.replace(home.ENV_BOOT_TOKEN, ""), "the notice must not echo the token")
+        self.assertIsNone(home.weak_token_notice("a" * home.MIN_TOKEN_CHARS))
+        self.assertIsNone(home.weak_token_notice(secrets.token_hex(32)))
+        self.assertIsNone(home.weak_token_notice(None), "no override is the persisted random token")
+        self.assertIsNone(home.weak_token_notice(""))
+
+    def test_the_engine_says_so_on_stderr_and_only_there(self) -> None:
+        engine_dir = Path(__file__).resolve().parent.parent
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            port = probe.getsockname()[1]
+        proc = subprocess.Popen(  # noqa: S603 — this interpreter, running the engine under test
+            [sys.executable, "-m", "engine"],
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, cwd=str(engine_dir),
+            env={**os.environ, home.ENV_HOME: str(self.scratch), home.ENV_BOOT_TOKEN: "weakweak",
+                 "CODIFY_PORT": str(port)},
+        )
+        try:
+            assert proc.stdout is not None
+            first_line = proc.stdout.readline()  # the handshake: the engine is up and has printed its notices
+        finally:
+            proc.terminate()
+            out_rest, err = proc.communicate(timeout=30)
+        self.assertTrue(first_line.startswith("CODIFY_ENGINE token=weakweak "), first_line)
+        self.assertNotIn(home.ENV_BOOT_TOKEN, first_line + out_rest, "stdout carries only the handshake")
+        self.assertIn(f"{home.ENV_BOOT_TOKEN} is shorter than {home.MIN_TOKEN_CHARS}", err)
+        self.assertNotIn("weakweak", err, "the token is never written to a log")
 
 
 class TestTheSuiteItselfIsHermetic(unittest.TestCase):

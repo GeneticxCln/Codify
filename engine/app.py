@@ -3964,6 +3964,9 @@ def serve() -> None:
     # being discovered later by finding a smoke-test key in a real keychain.
     # stderr, because the Tauri shell parses stdout for the boot handshake.
     print(home.startup_notice(), file=sys.stderr, flush=True)
+    weak_token = home.weak_token_notice(os.environ.get(home.ENV_BOOT_TOKEN))
+    if weak_token is not None:
+        print(weak_token, file=sys.stderr, flush=True)
     # Which interpreter this actually is, and whether the gate's SDK is importable
     # *by it*. A capability installed into a different environment than the one the
     # shell spawned fails silently otherwise — see engine/capabilities.py.
