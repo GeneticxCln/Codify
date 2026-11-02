@@ -1,5 +1,6 @@
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 import os
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -16,18 +17,15 @@ from tests.process_probe import file_text, pids_matching, sigkill_matching, wait
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# The marker in the grandchild's command line: the survivor the probes below hunt for.
+# Prefixes for the three markers the probe hunts for. Each test run appends a fresh
+# token: a process left by an earlier failed or interrupted run must not be mistaken for
+# this run's survivor, or one red gate poisons every later one.
 GIT_ORPHAN_PROBE = "codify-git-orphan-probe"
-# The commit message names the git process itself (`git commit … -m <message>` keeps it
-# in argv) and the guard in front of it, which carries the whole guarded argv.
 COMMIT_MARKER = "feat: codify-git-guard-marker"
-# "The guard, with that commit as its argument": the ERE can only match the guard's own
-# command line, because nothing else has spawn_guard.py before the message.
-GUARDED_COMMIT = f"spawn_guard\\.py.*{COMMIT_MARKER}"
 # Git runs a hook as `.git/hooks/post-commit` from the worktree root — a *relative*
 # path, so the hook's command line does not name the repository. The hook therefore execs
 # this file, whose unique name is the hook's marker (`python3 ./<name>`).
-HOOK_BODY = "codify_git_hook_body.py"
+HOOK_BODY = "codify_git_hook_body"
 # A hook that never returns: it writes a heartbeat and leaves a sleeping grandchild,
 # the two things a stray hook was ever caught doing.
 HOOK_BODY_SOURCE = (
@@ -317,12 +315,17 @@ class TestGuardedGitCommands(unittest.TestCase):
         self.temp_dir.cleanup()
 
     def test_a_hanging_commit_hook_dies_with_the_engine_that_started_the_commit(self) -> None:
+        token = secrets.token_hex(6)
+        probe = f"{GIT_ORPHAN_PROBE}-{token}"
+        hook_body = f"{HOOK_BODY}_{token}.py"
+        commit_marker = f"{COMMIT_MARKER}-{token}"
+        guarded_commit = f"spawn_guard\\.py.*{commit_marker}"
         heartbeat = self.root / "hook-heartbeat.txt"
         hook = self.root / ".git" / "hooks" / "post-commit"
-        hook.write_text(f"#!/bin/sh\nexec python3 ./{HOOK_BODY}\n", encoding="utf-8")
+        hook.write_text(f"#!/bin/sh\nexec python3 ./{hook_body}\n", encoding="utf-8")
         hook.chmod(0o755)
-        (self.root / HOOK_BODY).write_text(
-            HOOK_BODY_SOURCE.format(heartbeat=str(heartbeat), probe=GIT_ORPHAN_PROBE),
+        (self.root / hook_body).write_text(
+            HOOK_BODY_SOURCE.format(heartbeat=str(heartbeat), probe=probe),
             encoding="utf-8",
         )
         (self.root / "hooked.py").write_text("x = 1\n", encoding="utf-8")
@@ -331,7 +334,7 @@ class TestGuardedGitCommands(unittest.TestCase):
         # git waiting for the hook, exactly as the real engine's scribe stage does.
         driver = (
             "from engine.git import GitService\n"
-            f"GitService().commit({str(self.root)!r}, {COMMIT_MARKER!r}, ['hooked.py'])\n"
+            f"GitService().commit({str(self.root)!r}, {commit_marker!r}, ['hooked.py'])\n"
         )
         engine = subprocess.Popen(
             [sys.executable, "-c", driver],
@@ -341,16 +344,16 @@ class TestGuardedGitCommands(unittest.TestCase):
         )
         try:
             self.assertTrue(
-                wait_until(GIT_ORPHAN_PROBE, matches=True, timeout=15),
+                wait_until(probe, matches=True, timeout=15),
                 "the commit never reached its post-commit hook",
             )
             # The hook, git and the guard are all live *now* — the patterns below must
             # mean something before the kill, or "gone afterwards" proves nothing.
             before = wait_for_text(heartbeat)
             self.assertNotEqual("", before, "the hook never wrote its heartbeat")
-            self.assertNotEqual([], pids_matching(HOOK_BODY), "the hook body was not running")
+            self.assertNotEqual([], pids_matching(hook_body), "the hook body was not running")
             self.assertNotEqual(
-                [], pids_matching(GUARDED_COMMIT),
+                [], pids_matching(guarded_commit),
                 "the engine ran git with no guard in front of it",
             )
 
@@ -358,15 +361,15 @@ class TestGuardedGitCommands(unittest.TestCase):
             engine.wait(timeout=10)
 
             self.assertTrue(
-                wait_until(GIT_ORPHAN_PROBE, matches=False, timeout=15),
+                wait_until(probe, matches=False, timeout=15),
                 "the hook's grandchild outlived the engine that started the commit",
             )
             self.assertTrue(
-                wait_until(HOOK_BODY, matches=False, timeout=15),
+                wait_until(hook_body, matches=False, timeout=15),
                 "the commit hook itself outlived the engine that started the commit",
             )
             self.assertTrue(
-                wait_until(COMMIT_MARKER, matches=False, timeout=15),
+                wait_until(commit_marker, matches=False, timeout=15),
                 "git, or the guard in front of it, outlived the engine",
             )
             frozen = file_text(heartbeat)
@@ -377,7 +380,7 @@ class TestGuardedGitCommands(unittest.TestCase):
             )
         finally:
             engine.kill()
-            for pattern in (GIT_ORPHAN_PROBE, HOOK_BODY, COMMIT_MARKER, str(self.root)):
+            for pattern in (probe, hook_body, commit_marker, str(self.root)):
                 sigkill_matching(pattern)
 
 
