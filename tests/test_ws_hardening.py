@@ -21,6 +21,7 @@ import threading
 import time
 import unittest
 from typing import Any
+from unittest import mock
 
 import uvicorn
 import websockets
@@ -35,6 +36,7 @@ from engine.app import (
     WS_MAX_PENDING,
     WS_ORIGIN_REFUSED,
     WS_TOO_MANY_PENDING,
+    WS_WAIT_SHED,
     app,
 )
 
@@ -195,6 +197,41 @@ class TestTheFrameAndSocketBounds(ServerCase):
             self.assertEqual(WS_TOO_MANY_PENDING, close_code(closed))
         finally:
             app.state.ws_pending = 0
+
+
+class TestSilentSocketsAreBounded(ServerCase):
+    """A silent socket takes no pending slot, so the descriptors it holds are bounded another way."""
+
+    async def test_the_longest_waiting_silent_socket_is_shed_and_the_newest_is_never_refused(self) -> None:
+        with mock.patch("engine.app.WS_MAX_WAITING", 4):
+            held = []
+            for _ in range(4):
+                held.append(await websockets.connect(self.url))
+                await asyncio.sleep(0.03)
+            # One more than the bound: the OLDEST is closed, the new one is admitted and can still authenticate.
+            newest = await websockets.connect(self.url)
+            await newest.send(json.dumps({"type": "auth", "token": BOOT_TOKEN}))
+            with self.assertRaises(websockets.ConnectionClosed) as shed:
+                await asyncio.wait_for(held[0].recv(), 5)
+            closed = shed.exception
+            assert isinstance(closed, websockets.ConnectionClosed)
+            self.assertEqual(WS_WAIT_SHED, close_code(closed))
+            await asyncio.sleep(0.1)
+            self.assertIsNone(newest.close_code, "the newest socket was refused instead of the oldest shed")
+            for wire in (*held[1:], newest):
+                await wire.close()
+
+    async def test_a_socket_that_has_sent_its_frame_is_no_longer_waiting(self) -> None:
+        with mock.patch("engine.app.WS_MAX_WAITING", 2):
+            ui = await websockets.connect(self.url)
+            await ui.send(json.dumps({"type": "auth", "token": BOOT_TOKEN}))
+            await asyncio.sleep(0.1)
+            flood = [await websockets.connect(self.url) for _ in range(6)]
+            await asyncio.sleep(0.2)
+            self.assertIsNone(ui.close_code, "a flood shed a socket that had already authenticated")
+            for wire in flood:
+                await wire.close()
+            await ui.close()
 
 
 if __name__ == "__main__":
