@@ -9,7 +9,7 @@ import threading
 import time
 from pathlib import Path
 
-from engine import git_readonly
+from engine import git_readonly, home
 from engine.fs import FileSystemService, PathEscapeError
 # The guard that makes "this command dies with the engine" true (see
 # engine/spawn_guard.py), including how it is launched: the argv shape and the pid
@@ -124,6 +124,13 @@ CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 # large: a core dump (none), and one file written by one process (2 GiB), so a runaway writer ends at the cap and not at
 # the disk. The wall-clock timeout stays the bound on time.
 COMMAND_LIMITS = Limits(core_bytes=0, file_bytes=2 * 1024**3)
+
+# How a workspace command is contained. `required` refuses to run at all without bubblewrap; `auto` runs
+# unjailed and says so in the result (and the goal's event stream); `off` is the deliberate opt-out.
+ISOLATION_MODES = ("required", "auto", "off")
+# Inside the jail the person's home is a fresh tmpfs at the same path. That hides `~/.ssh`, `~/.codify` and
+# everything else under it, while leaving the absolute paths a build tool may print unchanged.
+JAIL_HOME = str(Path.home().resolve())
 
 MAX_KEPT_BYTES = MAX_COMMAND_OUTPUT_CHARS * 4
 _READ_CHUNK = 65536
@@ -366,9 +373,138 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
 
 
 class SandboxService:
+    def __init__(self, settings: Any | None = None) -> None:
+        # The engine passes its SettingsService; a bare `SandboxService()` (a test harness, the read-only
+        # librarian path) has no settings and therefore no jail, which is the only honest default for a class
+        # that cannot see the person's `sandbox_isolation` choice.
+        self.settings = settings
+
+    def _isolation_mode(self) -> str:
+        if self.settings is None:
+            return "off"
+        try:
+            mode = self.settings.get_str("sandbox_isolation")
+        except Exception:
+            return "auto"
+        return mode if mode in ISOLATION_MODES else "auto"
+
+    def _network_allowed(self, network: bool | None) -> bool:
+        """The command's network authority: the goal's opt-in, else the engine setting, else off."""
+        if network is not None:
+            return network
+        if self.settings is None:
+            return False
+        try:
+            return bool(self.settings.get_int("sandbox_network"))
+        except Exception:
+            return False
+
+    def _jail_argv(
+        self, argv: list[str], root: Path, network: bool,
+    ) -> tuple[list[str] | None, str | None]:
+        """`(bwrap argv, warning)` for one command; `(None, warning)` when it runs unjailed.
+
+        The root is read-only, the workspace is the one writable bind, and the real home is a fresh tmpfs so
+        `~/.ssh`, `~/.codify` and the files beside them are absent rather than merely unreadable. `--unshare-net`
+        is omitted only when the goal (or the engine setting) opted in. Nothing here widens the argv allowlist:
+        it is the same resolved, validated program and arguments, with bwrap in front of them.
+        """
+        mode = self._isolation_mode()
+        bwrap = shutil.which("bwrap")
+        if mode == "off":
+            return None, None
+        if bwrap is None:
+            if mode == "required":
+                raise CommandNotAllowed(
+                    "sandbox isolation is required, but bubblewrap (bwrap) is not installed"
+                )
+            return None, (
+                "sandbox isolation is auto, but bubblewrap (bwrap) is not installed — this command ran unjailed"
+            )
+        args = [
+            # No `--new-session`: the spawn guard already puts the command in its own process group, and a
+            # session of bwrap's own would put the jail outside that group, so killing the guard's group
+            # would leave the command's grandchildren running. `--die-with-parent` still ties bwrap to the
+            # guard.
+            bwrap, "--die-with-parent",
+            "--ro-bind", "/", "/",
+            "--dev", "/dev", "--proc", "/proc",
+            "--tmpfs", JAIL_HOME, "--setenv", "HOME", JAIL_HOME,
+        ]
+        state = home.codify_home().resolve()
+        real_home = Path.home().resolve()
+        # `~/.codify` is already covered by the home tmpfs; a redirected CODIFY_HOME elsewhere is not.
+        if state != real_home and state != real_home / home.DEFAULT_DIR and state.exists():
+            args += ["--tmpfs", str(state)]
+        root_text = str(root)
+        if root.is_relative_to(real_home):
+            # The home tmpfs is empty, so the workspace's own directory has to exist before it can be bound.
+            args += ["--dir", root_text]
+        # A fresh home is empty, including the venv or toolchain the command is about to exec. Rebind only
+        # the directories that tool needs, read-only: the executable's own directory, a virtualenv root
+        # (`pyvenv.cfg` beside `bin/`), and every PATH entry under the home. Nothing else of the home is
+        # visible, and none of these are writable.
+        args += self._tool_binds(Path(argv[0]), real_home)
+        args += ["--bind", root_text, root_text, "--chdir", root_text]
+        if not network:
+            args += ["--unshare-net"]
+        return [*args, "--", *argv], None
+
+    @staticmethod
+    def _tool_binds(executable: Path, real_home: Path) -> list[str]:
+        """The read-only home paths that make an executable under `$HOME` runnable inside the fresh home."""
+        candidates: set[Path] = set()
+
+        def add(path: Path) -> None:
+            try:
+                resolved = path.resolve()
+            except OSError:
+                return
+            if resolved != real_home and resolved.is_relative_to(real_home) and resolved.exists():
+                candidates.add(resolved)
+
+        add(executable.parent)
+        # A provisioned interpreter is often a symlink chain into another cache directory (`venv/bin/python3
+        # -> python -> ~/.cache/uv-python/.../bin/python3.10`). The link's directory is not enough: bind the
+        # real executable's directory and the prefix beside it as well.
+        try:
+            real = executable.resolve()
+        except OSError:
+            real = executable
+        add(real.parent)
+        if (real.parent.parent / "lib").is_dir():
+            add(real.parent.parent)
+        # uv's provisioning chain is `venv/bin/python -> cpython-3.10-linux.../bin/python3.10`, and that
+        # intermediate name is itself a symlink to `cpython-3.10.22...`. Binding only the resolved directory
+        # leaves the intermediate link missing, so bind the directory that holds both names.
+        if real.parent.parent.name.startswith("cpython-"):
+            add(real.parent.parent.parent)
+        # A virtualenv keeps its `pyvenv.cfg` one level above `bin/`; binding only `bin/` would run the
+        # interpreter but lose the packages installed beside it.
+        if (executable.parent.parent / "pyvenv.cfg").exists():
+            add(executable.parent.parent)
+        for entry in os.environ.get("PATH", "").split(os.pathsep):
+            if entry:
+                add(Path(entry))
+        for name in ("VIRTUAL_ENV", "PYTHONHOME"):
+            if os.environ.get(name):
+                add(Path(os.environ[name]))
+
+        # Keep only the outermost candidates: a bind at `.venv` already carries `.venv/bin`.
+        roots: list[Path] = []
+        for path in sorted(candidates, key=lambda item: len(item.parts)):
+            if not any(path.is_relative_to(root) for root in roots):
+                roots.append(path)
+        out: list[str] = []
+        for root in roots:
+            out += ["--dir", str(root)]
+        for root in roots:
+            out += ["--ro-bind", str(root), str(root)]
+        return out
+
     def run_command(
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
-        cancel: threading.Event | None = None,
+        cancel: threading.Event | None = None, network: bool | None = None,
     ) -> dict[str, Any]:
         """Run one allowlisted command. `mode="read_only"` narrows the allowlist
         to commands that cannot change the workspace (used by the librarian).
@@ -405,6 +541,12 @@ class SandboxService:
         else:
             child_argv = [resolved, *hardened_args(argv)]
             env = guarded_env(_workspace_env(), COMMAND_LIMITS)
+        jail_argv, isolation_warning = self._jail_argv(
+            child_argv, Path(root_path).resolve(), self._network_allowed(network),
+        )
+        isolation = "bwrap" if jail_argv is not None else "off"
+        if jail_argv is not None:
+            child_argv = jail_argv
         try:
             proc = subprocess.Popen(  # noqa: S603 — the argv passed `validate_argv` above; guarded, own session, no shell
                 # One process deeper than the command itself: the guard leads the new
@@ -472,6 +614,8 @@ class SandboxService:
             "exit_code": 124 if timed_out else CANCELLED_EXIT_CODE if cancelled else proc.returncode,
             "stdout": stdout,
             "stderr": stderr,
+            "isolation": isolation,
+            "isolation_warning": isolation_warning,
         }
 
     @staticmethod

@@ -304,6 +304,15 @@ class _ExecutorCore:
             },
         ))
 
+    def _sandbox_network(self) -> bool:
+        """The engine-wide network opt-in; a goal's own `allow_network` is OR-ed with it by the caller."""
+        if self.settings is None:
+            return False
+        try:
+            return bool(self.settings.get_int("sandbox_network"))
+        except Exception:
+            return False
+
     def _parallel_width(self) -> int:
         """The configured parallel width: env override, then persisted setting,
         then the built-in default. Read per batch, so a settings change lands

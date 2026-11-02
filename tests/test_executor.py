@@ -743,7 +743,7 @@ class _ExitSandbox(SandboxService):
 
     def run_command(
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
-        cancel: threading.Event | None = None,
+        cancel: threading.Event | None = None, network: bool | None = None,
     ) -> dict[str, Any]:
         return {"argv": argv, "exit_code": self.exit_code, "stdout": "", "stderr": "ModuleNotFoundError: pytest"}
 
@@ -894,7 +894,7 @@ class _HangingSandbox(SandboxService):
 
     def run_command(
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
-        cancel: threading.Event | None = None,
+        cancel: threading.Event | None = None, network: bool | None = None,
     ) -> dict[str, Any]:
         self.calls = getattr(self, "calls", 0) + 1
         self.last_timeout = timeout_s

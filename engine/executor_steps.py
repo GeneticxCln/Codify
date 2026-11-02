@@ -1048,7 +1048,10 @@ class _Steps(_Design):
                     result = await asyncio.to_thread(
                         self.sandbox.run_command, ws.root_path, proposed, timeout_s=timeout_s,
                         cancel=self.cancel_signal(goal_id),
+                        network=self.goals.get(goal_id).allow_network or self._sandbox_network(),
                     )
+                if result.get("isolation_warning"):
+                    self._log(goal_id, step.id, "warn", str(result["isolation_warning"]))
             except subprocess.TimeoutExpired:
                 # A hang is not a refusal (nothing was proposed wrongly, so it is
                 # not the verifier's fault) and not a pass — the command may still
@@ -1257,8 +1260,10 @@ class _Steps(_Design):
                         result = await asyncio.to_thread(
                             self.sandbox.run_command,
                             ws_root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
-                            cancel=self.cancel_signal(goal_id),
+                            cancel=self.cancel_signal(goal_id), network=False,
                         )
+                    if result.get("isolation_warning"):
+                        self._log(goal_id, step.id, "warn", str(result["isolation_warning"]))
                     output = (
                         f"Command output (exit {result['exit_code']}):\n"
                         f"stdout:\n{(result['stdout'] or '')[:4000]}\n"

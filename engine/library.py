@@ -936,7 +936,7 @@ class LibraryService:
         # Raises CommandNotAllowed; the caller records the refusal and moves on
         # rather than failing the goal, exactly like the verifier's refusals.
         return SandboxService().run_command(
-            self.root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
+            self.root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only", network=False,
         )
 
 

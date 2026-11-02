@@ -81,6 +81,9 @@ CREATE TABLE IF NOT EXISTS goals (
   dry_run INTEGER NOT NULL DEFAULT 0,
   plan_only INTEGER NOT NULL DEFAULT 0,
   parallel INTEGER NOT NULL DEFAULT 0,
+  -- This goal's test commands may reach the network; off unless the person opted in (`sandbox_network`
+  -- is the engine-wide half of the same switch).
+  allow_network INTEGER NOT NULL DEFAULT 0,
   -- What the goal is for: 'normal' pipeline or 'design' (the brand contract
   -- itself is the deliverable). One row, one mode; see docs/04 §4.0a.2.
   mode TEXT NOT NULL DEFAULT 'normal',
@@ -535,6 +538,8 @@ def _prepare(conn: sqlite3.Connection, db_path: Path, on_role_migrated: Any | No
     _add_column(conn, "goals", "model", "TEXT")
     _add_column(conn, "goals", "plan_only", "INTEGER NOT NULL DEFAULT 0")
     _add_column(conn, "goals", "parallel", "INTEGER NOT NULL DEFAULT 0")
+    # Networking is off unless a goal opts in; an existing install gains the column defaulted.
+    _add_column(conn, "goals", "allow_network", "INTEGER NOT NULL DEFAULT 0")
     # A workspace's brand contract is a column on the workspace row, not a second
     # table: one row, one pin. An existing install gains it unset, so nothing is
     # requoted and no workspace loses its name or root.

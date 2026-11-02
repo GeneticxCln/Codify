@@ -135,7 +135,12 @@ step. Those are the invariants this diagram is a picture of (`00` §6).
    only for an approved goal (stored status `RUNNING`, not plan-only) — until then the conductor's
    `run_command` is `read_only`. The librarian's requests use `read_only` mode and cannot change
    the workspace or run its code. The conductor proposes argv through either move, it does not
-   widen the allowlist — see `docs/01` §5. The machine tab is the one other place an assistant's
+   widen the allowlist — see `docs/01` §5. The engine may run that argv inside a bubblewrap jail: the
+   filesystem read-only except the workspace, the person's home and this run's state directory absent
+   (bar the read-only tool directories the command needs), and
+   no network unless the goal's stored `allow_network` or the engine's `sandbox_network` setting opted in;
+   `sandbox_isolation` says whether the jail is `required`, attempted (`auto`, which reports when it cannot)
+   or `off`, and the jail never widens what `validate_argv` admits. The machine tab is the one other place an assistant's
    keystrokes run commands, and only inside a jail that a person alone can open: the person's
    files are never written (the machine edits its own copy of the project, or sees it read-only
    where a copy cannot be made), no credentials, no network unless the person opened it with

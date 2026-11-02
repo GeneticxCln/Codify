@@ -98,7 +98,7 @@ class _RecordingSandbox(SandboxService):
 
     def run_command(
         self, root_path: str, argv: list[str], timeout_s: int = 120, mode: str = "test",
-        cancel: threading.Event | None = None,
+        cancel: threading.Event | None = None, network: bool | None = None,
     ) -> dict[str, Any]:
         self.signals.append(cancel)
         return {"argv": argv, "exit_code": 0, "stdout": "", "stderr": ""}

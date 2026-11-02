@@ -139,6 +139,10 @@ class SettingsService:
         # touch files. Counting them together would let eight cheap file reads
         # starve the change the user actually asked for.
         "conductor_max_moves": (12, lambda v: max(0, min(v, 60))),
+        # Whether workspace test commands may reach the network. Off unless a person asks: a test run that
+        # talks to the internet is a supply-chain and data-leak surface, and a goal's own `allow_network`
+        # opts that one run in.
+        "sandbox_network": (0, lambda v: 1 if v else 0),
         # Whether an approved plan is executed by the conductor or by the
         # engine's own sequence. 1 leaves the conductor driving, which is the
         # point of having one; 0 is the escape hatch for a model that is not yet
@@ -204,6 +208,9 @@ class SettingsService:
         # covering its subdomains. Normalised on the way in (engine/web_fetch.py `parse_hosts`), so what
         # is stored is what the fetch reads.
         "web_fetch_hosts": "",
+        # How a workspace command is contained: `required` (refuse without bwrap), `auto` (run unjailed and say
+        # so), `off` (the deliberate opt-out). The default is auto so an install without bubblewrap keeps working.
+        "sandbox_isolation": "auto",
     }
 
     # The longest value each string key holds, and the one place that says so: `PUT /settings/engine` validates
@@ -233,6 +240,7 @@ class SettingsService:
         "tts_base_url": 500,
         # The sites `fetch_page` may read when `web_fetch` is 1.
         "web_fetch_hosts": MAX_HOSTS_CHARS,
+        "sandbox_isolation": 8,
     }
 
     def get_str(self, key: str) -> str:
@@ -1473,6 +1481,7 @@ class GoalService:
             dry_run=body.dry_run,
             plan_only=body.plan_only,
             parallel=body.parallel,
+            allow_network=body.allow_network,
             mode=body.mode,
             trace=body.trace,
             version=0,
@@ -1482,9 +1491,9 @@ class GoalService:
             model=body.model,
         )
         self._db.execute(
-            """INSERT INTO goals (id, workspace_id, conversation_id, title, description, status, dry_run, plan_only, parallel, mode, trace, version, event_seq, created_at, updated_at, provider, model)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
-            (goal.id, goal.workspace_id, goal.conversation_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), goal.mode, int(goal.trace), now, now, goal.provider, goal.model),
+            """INSERT INTO goals (id, workspace_id, conversation_id, title, description, status, dry_run, plan_only, parallel, allow_network, mode, trace, version, event_seq, created_at, updated_at, provider, model)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, 0, ?, ?, ?, ?)""",
+            (goal.id, goal.workspace_id, goal.conversation_id, goal.title, goal.description, goal.status, int(goal.dry_run), int(goal.plan_only), int(goal.parallel), int(goal.allow_network), goal.mode, int(goal.trace), now, now, goal.provider, goal.model),
         )
         if goal.conversation_id is not None:
             # The thread is what a tab orders by, so a new turn has to move it.
@@ -1559,6 +1568,7 @@ class GoalService:
         data["dry_run"] = bool(row["dry_run"])
         data["plan_only"] = bool(row["plan_only"])
         data["parallel"] = bool(row["parallel"])
+        data["allow_network"] = bool(row["allow_network"])
         data["trace"] = bool(row["trace"])
         return Goal.model_validate(data)
 

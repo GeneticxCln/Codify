@@ -383,6 +383,8 @@ CREATE TABLE goals (
   dry_run INTEGER NOT NULL DEFAULT 0,
   plan_only INTEGER NOT NULL DEFAULT 0,
   parallel INTEGER NOT NULL DEFAULT 0,
+  -- This goal's test commands may reach the network (the engine-wide `sandbox_network` is the other half).
+  allow_network INTEGER NOT NULL DEFAULT 0,
   -- What the goal is for: 'normal' pipeline or 'design' (the brand contract
   -- itself is the deliverable, §4.0a.2; 'knowledge' makes CODIFY.md the
   -- deliverable instead, §4.9). Added by ALTER TABLE for an existing
@@ -589,7 +591,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
 | `PUT` | `/workspaces/{id}/file` | `{path, content, base_version}` extra=forbid | `{path, version, size}` — **a person's Save, the one writer besides the fixer** (`00` §6.9). Replaces a file that exists; never creates or deletes one. 409 `file_changed` (carries `current_version`) when the file is not the version that was opened; the same 400/404/422 refusals as the read. Refused means untouched. Commits nothing |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING **or a live driver holds it** — a turn's `plan` move leaves the goal PENDING while its conductor still runs, so the status column alone was not enough |
-| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
+| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, allow_network?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
 | `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
@@ -1850,9 +1852,9 @@ both cards share one vocabulary of body labels.
 
 ## 5. Sandbox argv allowlist
 
-`SandboxService.run_command(workspace, argv: list[str], timeout_s: int = 120, mode="test")`.
+`SandboxService.run_command(workspace, argv: list[str], timeout_s: int = 120, mode="test", cancel=None, network=None)`.
 
-It returns `{argv, exit_code, stdout, stderr}` and reads the command's output as **bytes, capped while it is read**
+It returns `{argv, exit_code, stdout, stderr, isolation, isolation_warning}` and reads the command's output as **bytes, capped while it is read**
 (`engine/sandbox.py`, `_Drain`): each stream keeps at most `MAX_COMMAND_OUTPUT_CHARS * 4` bytes (the cap is 200,000
 characters and a UTF-8 character is at most four bytes), is still read to its end so a chatty command is never
 blocked on a full pipe, and ends in `… (output truncated)` when anything was dropped. Decoding is lenient: a byte
@@ -1880,7 +1882,28 @@ test that calls `input()`, would wait out its whole timeout.
 
 `argv[0]` basename only (no `/`). Resolved as `shutil.which` then executed with `cwd=workspace.root_path`, `env` stripped to `PATH`,
 `HOME`, `LANG`, `TERM`, `VIRTUAL_ENV`, `PYTHONPATH`, `PYTHONHOME`, and `shell=False`, in a new session so a timeout can kill the
-whole process group. A command that times out reports exit `124` (`timeout(1)`'s code); one stopped because its goal
+whole process group. Before `Popen` it may be wrapped in `bwrap` (see "The jail" below), which does not change the argv the
+allowlist validated: the same resolved program and tokens are placed after `bwrap --`.
+
+### The jail
+
+`engine/sandbox.py` wraps the child in bubblewrap when the engine-wide `sandbox_isolation` setting is `required` or
+`auto` (the default). The jail binds `/` read-only, then binds the workspace read-write at the same absolute path and
+`chdir`s there; a fresh tmpfs is mounted over the person's real home at that same path, so `~/.ssh`, `~/.codify` and
+everything beside them are absent rather than unreadable, while an absolute path a build tool prints still reads the
+same. The executable's own directory, a virtualenv root and the `PATH` entries under the home are rebound read-only,
+because a fresh home would otherwise hide the venv the command was started from; nothing else of the home is visible. A
+redirected `CODIFY_HOME` outside the home gets its own tmpfs, so this run's database, secrets and boot token are absent too. `--unshare-net` is added unless the command has network authority: the goal's stored `allow_network`, or the
+engine's `sandbox_network` switch, default off. `HOME` is the tmpfs path, so a build's cache writes are discarded with
+the jail.
+
+`required` refuses with `command_not_allowed` when `bwrap` is not installed; `auto` runs the same command unjailed and
+reports `isolation: "off"` with an `isolation_warning` that the executor writes to the goal's event stream; `off` is the
+deliberate opt-out. `isolation` is `"bwrap"` when the jail ran. A `SandboxService()` constructed without settings (a bare
+test harness, the read-only librarian path) has no jail, because it cannot see the person's setting; the engine always
+passes `SettingsService` (`app.state.sandbox`). The jail does not replace `validate_argv` and does not admit a program the
+table refuses. Proven by `tests/test_sandbox_jail.py`, which runs real bwrap and checks a state-directory secret, a write
+outside the workspace, a home write, and loopback reachability with and without the opt-in. A command that times out reports exit `124` (`timeout(1)`'s code); one stopped because its goal
 was cancelled reports `130` and says so in its stderr, so the two are never confused with each other or with an exit the
 command chose.
 
@@ -1968,21 +1991,24 @@ Proven by `tests/test_sandbox_read_only_git.py`, which runs real git against a r
 asserts on the repository afterwards; its property tests are the ones that would have caught the class
 (no abbreviation of any listed option is accepted).
 
-**What this is, plainly, because the name oversells it: an argv-shape allowlist and nothing more.** It is
-not a sandbox in the containment sense, and the table above is not a boundary around the code that runs
-inside it. An allowlisted command is *the repository's own code* — `npm test` runs whatever `package.json`
-says, `python3 script.py` runs the workspace's script, `pytest` imports every `conftest.py` in the path — and
-it runs as the user, with the user's `HOME` in the environment, able to read and write anything the user can.
-The properties this service does provide, each asserted in `tests/test_sandbox.py`: credentials are stripped
-from the environment (`GitService._workspace_env` and the list above, so a checked-in test script cannot read
-a provider key out of `os.environ`), no shell is involved, the argv cannot name a path outside the workspace,
-and the command's whole process tree dies with its timeout or with the engine.
+**What this is, plainly, because the name oversells it: an argv-shape allowlist first, with a jail around it.** The
+table above is not a boundary around the code that runs inside it. An allowlisted command is *the repository's
+own code* — `npm test` runs whatever `package.json` says, `python3 script.py` runs the workspace's script,
+`pytest` imports every `conftest.py` in the path — and it runs as the user. The jail (above) bounds what that code
+can reach: the workspace is the only writable bind, the person's home and this run's state are absent, and the
+network is off unless a goal or the engine opted in. It does not make the repository's code trustworthy: the
+command still reads and writes the workspace and runs with the user's uid. The properties this service does
+provide, each asserted in `tests/test_sandbox.py` and `tests/test_sandbox_jail.py`: credentials are stripped from
+the environment (`GitService._workspace_env` and the list above, so a checked-in test script cannot read a
+provider key out of `os.environ`), no shell is involved, the argv cannot name a path outside the workspace, the
+command's whole process tree dies with its timeout or with the engine, and a real bwrap jail cannot read this
+run's state directory, write outside the workspace, or reach loopback without the opt-in.
 
 So the honest reading of `mode="test"` is that it admits the repo's own code, whoever proposed the argv — the
 verifier's proposal or the conductor's `run_command` / `verify` moves (invariant 6, `docs/00` §6.6), which
 share this allowlist rather than a wider one. Running a repository's tests means running the repository's code.
-Containment, if it is ever wanted, is a container/namespace decision that belongs above this function
-(`03` §1), not a longer argv table here.
+Containment is a namespace decision made above this function, at the one `Popen`
+site (`03` §1.4), not a longer argv table here.
 
 A refusal is **not** a step failure: the command never executed, and the verifier is the agent that can pick
 another one, so the rejection goes back to it as feedback (`04` §4.3). The step only fails if the verifier

@@ -696,6 +696,9 @@ class Goal(BaseModel):
     plan_only: bool = False
     # parallel: independent steps of this goal may run concurrently.
     parallel: bool = False
+    # allow_network: this goal's test commands may reach the network. Off by default; the engine-wide
+    # `sandbox_network` setting is the other half of the same opt-in.
+    allow_network: bool = False
     # mode: what this goal is *for*. "normal" is the default pipeline; "design"
     # makes the workspace's own brand contract the deliverable — the design
     # agent proposes/revises DESIGN.md, a step writes it for real, and the
@@ -907,6 +910,8 @@ class GoalCreate(BaseModel):
     dry_run: bool = False
     plan_only: bool = False
     parallel: bool = False
+    # The per-goal network opt-in: a package install or a remote test may need it, and nothing else does.
+    allow_network: bool = False
     # Which pipeline this goal runs. "normal", "design" and "knowledge" exist; a
     # client sending anything else gets a 422 from the model itself, not a goal
     # that quietly runs the default.

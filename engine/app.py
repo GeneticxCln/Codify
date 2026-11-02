@@ -101,7 +101,7 @@ from engine.models import (
     loads_payload,
 )
 from engine.providers import Keychain, ProviderError, ProviderFactory
-from engine.sandbox import SandboxService
+from engine.sandbox import ISOLATION_MODES, SandboxService
 from engine.skills import NAME_RE, load_skills
 from engine.services import (
     AgentRegistryService,
@@ -263,8 +263,8 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # reads the same goal rows the transcript does, so a summary can never
     # disagree with the turns it replaces.
     app.state.compactions = CompactionService(conn, app.state.goals)
-    app.state.sandbox = SandboxService()
     app.state.settings = SettingsService(conn)
+    app.state.sandbox = SandboxService(app.state.settings)
     # The MCP admission list, its probe, and the read-only call path a person's
     # per-tool authority unlocks (`engine/mcp.py`, docs/20).
     app.state.mcp = McpService(conn, keychain)
@@ -1488,12 +1488,15 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     # public site. Off on a fresh install (engine/services.py says why). Three states, so not a switch: a
     # checkbox's `true` is refused here like any other number a person is choosing.
     "web_fetch": (0, 2),
+    # Workspace commands may reach the network only when a person asks; a goal can opt in with `allow_network`.
+    "sandbox_network": (0, 1),
 }
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
 # rather than the truthiness trap it would be for a number someone chooses.
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
+    "sandbox_network",
 })
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
@@ -1823,6 +1826,11 @@ def _clean_engine_string(key: str, value: Any) -> str:
                 f"{key} is {len(written)} characters once written out ({limit} allowed); list fewer sites",
             )
         return written
+    if key == "sandbox_isolation" and text not in ISOLATION_MODES:
+        raise ApiError(
+            422, "invalid_value",
+            "sandbox_isolation must be required, auto or off",
+        )
     if key in CHECKPOINT_SETTINGS and text:
         problem = checkpoint_problem(text)
         if problem is not None:

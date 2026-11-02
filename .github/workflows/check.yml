@@ -89,6 +89,15 @@ jobs:
           # second copy of the extra, free to drift from it (tests/test_dependency_parity.py pins the rest).
           python -m pip install -e ".[dev]"
 
+      # `tests/test_sandbox_jail.py` runs a real jail and fails, rather than skips, when bubblewrap or
+      # unprivileged user namespaces are missing. Ubuntu 24.04 restricts the latter through AppArmor;
+      # the rust job lifts the same sysctl for the machine tab's jail.
+      - name: Install bubblewrap for the real-jail tests
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends bubblewrap
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+
       # Rules and target-version are pinned in pyproject.toml, so this checks the
       # same thing on every machine — including the syntax ruff only rejects for
       # the declared 3.10 target.

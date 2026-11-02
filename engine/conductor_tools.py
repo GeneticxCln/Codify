@@ -639,8 +639,10 @@ class ConductorTools:
                 self.service.sandbox.run_command, self.root, argv,
                 mode="test" if approved else "read_only",
                 cancel=self.service.cancel_signal(self.goal_id),
+                network=self.service.goals.get(self.goal_id).allow_network or self.service._sandbox_network(),
             )
-        return format_command(result) + (f"\n(reason given: {reason})" if reason else "")
+        warning = result.get("isolation_warning")
+        return format_command(result) + (f"\n(isolation: {warning})" if warning else "") + (f"\n(reason given: {reason})" if reason else "")
 
     async def read_page(self, args: dict[str, Any]) -> str:
         """What the browser tab the user is looking at is showing.
