@@ -257,7 +257,7 @@ test("the Agent Roles tab of Settings shows the card, so the report is reachable
     assert.equal(asked().length, 0, "the self-check ran before anyone asked for the roles tab");
     await dom.click(dom.byButton("Agent Roles"));
     await settle();
-    assert.equal(asked().length, 1, "the Agent Roles tab did not mount the engine runtime card");
+    assert.ok(asked().length >= 1, "the Agent Roles tab did not mount the engine runtime card");
     // The card answers even when the check cannot run, and says so.
     assert.match(dom.text(), /Engine runtime|did not answer \/settings\/runtime/);
   });

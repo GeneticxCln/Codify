@@ -589,6 +589,12 @@ export interface EngineRuntime {
     version?: string | null;
     disabled_by_env: boolean;
   };
+  /** The workspace-command jail this host can build. Optional: an engine that predates
+   * the report answers without it, and the sandbox card hides the status line. */
+  sandbox?: {
+    bwrap: string | null;
+    available: boolean;
+  };
   /** Empty on a healthy install. A warning that is always present is not read. */
   warnings: string[];
 }
@@ -671,6 +677,12 @@ export interface EngineSettings {
   web_fetch_hosts?: EngineStringSettingValue;
   /** A fine-tuned Laya checkpoint's Hub repo id; empty uses the built-in Router (docs/05). */
   laya_checkpoint?: EngineStringSettingValue;
+  /** How workspace commands are contained: required, auto or off (docs/03 §1.4). */
+  sandbox_isolation?: EngineStringSettingValue;
+  /** 1 = workspace commands may reach the network. Off by default; a goal can opt in too. */
+  sandbox_network?: EngineSettingValue;
+  /** 1 = an unavailable pre-flight gate refuses the turn instead of warning (docs/05 §3). */
+  laya_required?: EngineSettingValue;
   /** 1 = summarise older thread turns automatically before answering. */
   session_compact_auto?: EngineSettingValue;
   /** How many recent turns stay verbatim beside the summary. */

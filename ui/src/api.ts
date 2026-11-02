@@ -657,6 +657,9 @@ export async function saveEngineSettings(
     web_fetch?: number;
     web_fetch_hosts?: string;
     laya_checkpoint?: string;
+    sandbox_isolation?: string;
+    sandbox_network?: boolean;
+    laya_required?: boolean;
     session_compact_auto?: boolean;
     session_compact_keep_turns?: number;
   }

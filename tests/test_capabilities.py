@@ -169,6 +169,23 @@ class MismatchWarningTests(unittest.TestCase):
         self.assertIn("3.9.18", warnings[0])
 
 
+class SandboxReportTests(unittest.TestCase):
+    def test_bwrap_is_reported_by_its_path(self) -> None:
+        with patch("shutil.which", return_value="/usr/bin/bwrap"):
+            report = capabilities.sandbox_report()
+        self.assertEqual(report, {"bwrap": "/usr/bin/bwrap", "available": True})
+
+    def test_missing_bwrap_is_unavailable_not_unknown(self) -> None:
+        with patch("shutil.which", return_value=None):
+            report = capabilities.sandbox_report()
+        self.assertEqual(report, {"bwrap": None, "available": False})
+
+    def test_the_capability_report_carries_the_sandbox_fact(self) -> None:
+        with patch("shutil.which", return_value=None):
+            report = capabilities.capability_report()
+        self.assertFalse(report["sandbox"]["available"])
+
+
 class StartupLinesTests(unittest.TestCase):
     def test_the_boot_log_names_the_interpreter_and_the_sdk_state(self) -> None:
         lines = capabilities.startup_lines()
@@ -185,12 +202,14 @@ class StartupLinesTests(unittest.TestCase):
             "project_root": "/tmp/x", "checkout_interpreter": "/tmp/x/.venv/bin/python3",
             "laya_sdk": {"importable": False, "import_error": "ModuleNotFoundError",
                          "version": None, "disabled_by_env": False},
+            "sandbox": {"bwrap": None, "available": False},
             "warnings": ["something is wrong"],
         }
         with patch.object(capabilities, "capability_report", return_value=fake):
             lines = capabilities.startup_lines()
         self.assertIn("warning: something is wrong", lines)
         self.assertIn("laya SDK not importable — ModuleNotFoundError", lines)
+        self.assertIn("sandbox jail unavailable — auto mode runs commands unjailed", lines)
 
 
 class RuntimeRouteTests(unittest.IsolatedAsyncioTestCase):
@@ -217,6 +236,7 @@ class RuntimeRouteTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(report["interpreter"]["executable"], sys.executable)
         self.assertIn("importable", report["laya_sdk"])
         self.assertIn("version", report["laya_sdk"])
+        self.assertIn("available", report["sandbox"])
         self.assertIsInstance(report["warnings"], list)
         self.assertIn("checkout_interpreter", report)
 

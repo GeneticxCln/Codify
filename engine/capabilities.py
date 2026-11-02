@@ -35,6 +35,7 @@ import importlib
 import importlib.metadata
 import os
 import platform
+import shutil
 import sys
 from pathlib import Path
 from typing import Any
@@ -125,6 +126,16 @@ def laya_sdk_report() -> dict[str, Any]:
     }
 
 
+def sandbox_report() -> dict[str, Any]:
+    """Whether this host can build the workspace-command jail, and where bwrap is.
+
+    A fact about the host, not the chosen mode: the mode is a setting, and `auto` on a host
+    without bubblewrap is the one combination a person needs to see before a command runs.
+    """
+    bwrap = shutil.which("bwrap")
+    return {"bwrap": bwrap, "available": bwrap is not None}
+
+
 def _warnings(
     interpreter: dict[str, Any], sdk: dict[str, Any], root: Path,
 ) -> list[str]:
@@ -170,6 +181,7 @@ def capability_report(root: Path | None = None) -> dict[str, Any]:
         "project_root": str(resolved),
         "checkout_interpreter": str(venv_interpreter(resolved)),
         "laya_sdk": sdk,
+        "sandbox": sandbox_report(),
         "warnings": _warnings(interpreter, sdk, resolved),
     }
 
@@ -196,5 +208,10 @@ def startup_lines() -> list[str]:
         lines.append(f"laya SDK not importable — {sdk['import_error']}")
     if sdk["disabled_by_env"]:
         lines.append(f"laya SDK disabled by {SDK_DISABLE_ENV}")
+    sandbox = report["sandbox"]
+    if sandbox["available"]:
+        lines.append(f"sandbox jail bwrap at {sandbox['bwrap']}")
+    else:
+        lines.append("sandbox jail unavailable — auto mode runs commands unjailed")
     lines.extend(f"warning: {warning}" for warning in report["warnings"])
     return lines

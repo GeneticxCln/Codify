@@ -26,6 +26,8 @@ ui/src/
     TestConnectionButton.tsx
     PromptOverrideEditor.tsx
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
+    SandboxCard.tsx            # Workspace command jail: mode, network, host bwrap availability
+    LayaRequiredToggle.tsx     # Fail closed when the pre-flight gate cannot answer
     AgentSkillsPane.tsx        # Agent skills: one on/off switch per skill in this workspace's menu
     SessionSettingsPane.tsx    # Sessions: auto-compaction and how many recent turns stay verbatim
     McpPane.tsx                # MCP: remote HTTPS servers admitted and probed; no call path
@@ -127,6 +129,34 @@ paths get shown — inside a venv `sys.executable` is `…/.venv/bin/python` whi
 is `…/.venv/bin/python3`, so the card compares *prefixes* and shows the "checkout's interpreter"
 line only when it is genuinely a different environment. A card that reports a difference which
 is not there trains people to skim past the one that is.
+
+The same report carries `sandbox`: whether this host has `bwrap`, and the path. It is a fact
+about the host, not the selected mode; the sandbox card below combines the two.
+
+### 3.0a The sandbox card
+
+`SandboxCard.tsx` shows `sandbox_isolation` (`auto` / `required` / `off`), the network permission
+(`sandbox_network`), and the host's bwrap availability from `GET /settings/runtime` together,
+because the mode alone is not the guarantee. **`auto` on a host without bubblewrap is the one
+combination that must be said out loud:** the card says commands run unjailed, and `required`
+says they will be refused instead. The same sentence appears in the goal's event stream when a
+command actually runs, but a person should not have to start a run to discover which mode they are
+in. Both switches write only through `PUT /settings/engine`; an engine that predates the keys
+shows no card, never one whose save would be refused.
+
+The copy keeps the limit: the jail bounds what a command can reach outside the workspace, but the
+command still runs the repository's own code. It is not a permission to trust a repository.
+
+The engine-wide network permission is separate from a goal's per-run `allow_network`: the setting
+says commands may use the network at all, the goal says this run may.
+
+### 3.0b The fail-closed gate switch
+
+`LayaRequiredToggle.tsx` sits in the gate card and writes `laya_required`. Off by default, because
+a fresh install with no gate model is a deliberate skip and must keep working; on, an `unavailable`
+gate refuses the turn or goal (`docs/05` §3). A gate nobody configured remains a skip, so the
+setting cannot lock a fresh install out. The card says that distinction rather than presenting a
+single "require the gate" switch that would be false for an unconfigured install.
 
 ### 3.1 The Conductor card
 

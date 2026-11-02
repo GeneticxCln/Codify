@@ -17,7 +17,7 @@ Each row names the doc that owns a subject and the change that invalidates it.
 
 | Subject | Owner | Invalidated by |
 |---|---|---|
-| Architecture, components, the 7 invariants | `docs/00` | A new subsystem, a new tier, an invariant's scope or wording |
+| Architecture, components, the ten invariants | `docs/00` | A new subsystem, a new tier, an invariant's scope or wording |
 | Roles, `AgentConfig`, provider registry, orchestrator | `docs/01` | A role's abilities, timing, or what it may return; a provider protocol |
 | Settings screen, Tauri, the only mutator | `docs/02` | A new setting, a changed screen, a new mutation path |
 | Keyring, SSRF, boot token, persistence | `docs/03` | Credential storage, request validation, token lifetime |
