@@ -17,12 +17,13 @@ from engine.executor_design import DELIVERABLE_ROLE, DELIVERABLE_SUBJECT, MAX_DE
 from engine.executor_support import (
     AgentOutputInvalid,
     CriticRejection,
+    FixerFileMoved,
     PathRefused,
     TestsFailed,
     WriteWithdrawn,
     _verifier_outcome,
 )
-from engine.fs import FileSystemService, PathEscapeError, ProtectedRootError
+from engine.fs import FileMovedUnderProposalError, FileSystemService, PathEscapeError, ProtectedRootError
 from engine.library import READ_ONLY_TIMEOUT_S, command_tail
 from engine.models import Goal, PlanStep
 from engine.providers import ProviderError
@@ -676,7 +677,11 @@ class _Steps(_Design):
         without the user seeing a new plan. Guidance narrows; it does not
         replace.
         """
-        ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths)
+        # The version of each suggested path as the fixer is about to see it. The apply at the end of this call
+        # checks these, so an edit made while the model is answering is refused rather than overwritten. Per
+        # `_fixer` call, and so per step: a parallel batch never shares one baseline across its siblings.
+        versions: dict[str, str | None] = {}
+        ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths, versions=versions)
 
         # On a retry, the failed run's evidence is the most important part of
         # the prompt: what the model wrote did not work, and here is exactly
@@ -786,7 +791,12 @@ class _Steps(_Design):
                 # ("replace this exact text") until the engine resolves it against
                 # the file as it exists, and only the resolved full content is a
                 # proposal "Apply" can replay deterministically later.
-                summaries = fs.apply(files, dry_run=dry_run)
+                summaries = fs.apply(files, dry_run=dry_run, expected_versions=versions)
+            except FileMovedUnderProposalError as exc:
+                # A file the fixer was shown moved while it was answering. Nothing has been written (apply
+                # resolves everything before it touches the disk), and the caller asks once more with the
+                # bytes that are on disk now rather than failing a step over an edit somebody else made.
+                raise FixerFileMoved(exc.path) from exc
             except ProtectedRootError:
                 # About where the workspace *is*, not about anything the model wrote: asking again
                 # cannot change it, so it is not put to the model.
@@ -814,16 +824,49 @@ class _Steps(_Design):
                 raise AgentOutputInvalid(message, role="fixer") from exc
             applied.update(files=files, summaries=summaries, wants_pass=wants_pass)
 
-        await self.orchestrator.run_agent(
-            "fixer", goal_id, step.id,
-            f"Step: {step.title}\n{step.description}\n\n"
-            f"{feedback_text}"
-            f"{guidance_section}"
-            f"What the librarian found:\n{self._evidence_text(evidence or {})}\n"
-            f"Suggested paths (current contents):\n{ctx}{unreadable}"
-            f"{design_section}",
-            accept=accept,
-        )
+        def prompt(moved_note: str) -> str:
+            return (
+                f"Step: {step.title}\n{step.description}\n\n"
+                f"{feedback_text}"
+                f"{moved_note}"
+                f"{guidance_section}"
+                f"What the librarian found:\n{self._evidence_text(evidence or {})}\n"
+                f"Suggested paths (current contents):\n{ctx}{unreadable}"
+                f"{design_section}"
+            )
+
+        moved_note = ""
+        for attempt in range(2):
+            try:
+                await self.orchestrator.run_agent(
+                    "fixer", goal_id, step.id, prompt(moved_note), accept=accept,
+                )
+                break
+            except FixerFileMoved as moved:
+                if attempt == 1:
+                    # The file moved again between the re-read and this reply. Stop the step: a third call
+                    # would be a guess, and writing it could overwrite the very edit this guard protects.
+                    raise AgentOutputInvalid(
+                        f"{moved.path} changed again while the fixer was answering. The step stopped so "
+                        "that change is not overwritten, and nothing from that reply was written. Re-run "
+                        "the step once the file is stable.",
+                        role="fixer",
+                    ) from moved
+                # One fresh ask, with the current bytes: the same budget a path refusal gets. The prompt is
+                # rebuilt rather than patched, so the model sees what is on disk now, not the stale contents
+                # it was answering against.
+                versions.clear()
+                ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths, versions=versions)
+                moved_note = (
+                    "IMPORTANT — a file changed while you were answering, so the previous reply was "
+                    f"refused rather than overwrite that change: {moved.path}. The current contents are "
+                    "below; base this attempt on them.\n\n"
+                )
+                self._log(
+                    goal_id, step.id, "warn",
+                    f"{moved.path} changed while the fixer was answering — asking once more with the "
+                    "current contents",
+                )
         files = applied["files"]
         summaries = applied["summaries"]
         wants_pass = bool(applied["wants_pass"])

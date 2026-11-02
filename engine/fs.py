@@ -84,6 +84,23 @@ class FileNotTextError(Exception):
         self.reason = reason
 
 
+class FileMovedUnderProposalError(ValueError):
+    """A write was based on bytes the file no longer holds.
+
+    Raised by `apply` before anything is written, so the caller can tell this apart from a malformed
+    proposal: the fixer's reply was well formed, but the file moved while it was being written. A fresh run
+    uses it to ask the fixer once more with the current contents; a replay fails the step rather than
+    overwrite what changed after the review.
+    """
+
+    def __init__(self, path: str):
+        super().__init__(
+            f"{path} changed since the dry run reviewed it, so the write was refused rather than "
+            "overwrite that change."
+        )
+        self.path = path
+
+
 class FileChangedError(Exception):
     """The file on disk is not the version the caller read. Carries the version it is now."""
 
@@ -438,6 +455,52 @@ class FileSystemService:
             raise FileAccessError(exc.strerror or str(exc)) from exc
         return TextFile(rel, content, version_of(data), len(data))
 
+    def read_text_with_version_or_none(self, rel: str) -> tuple[str | None, str | None]:
+        """(text, version of the bytes that text came from), or (None, None) when there is no text.
+
+        This is the read the fixer's evidence context uses (`_suggested_paths_context`): the version is
+        `version_of` the *same* bytes the model was shown, so `apply` can refuse to replace a file that
+        moved while the model was answering. Three answers need their own spelling:
+
+        * `""` is the version of a path that did not exist — what a create proposal is based on;
+        * `None` means the bytes cannot be hashed whole (a file over `MAX_DIFF_BYTES`, a directory, a path
+          that escapes the workspace), so no version is claimed and `apply` cannot compare one;
+        * a text-less file (binary, not UTF-8) still gets a version when its bytes were read whole. The
+          fixer may propose to delete it, and a delete deserves the same guard an update gets.
+
+        A prompt must not be able to fail the step, so nothing here raises: an unreadable path is material
+        that was not available, and the caller says so.
+        """
+        try:
+            path = self.resolve(rel)
+        except (PathEscapeError, ValueError):
+            return None, None
+        try:
+            if not path.exists():
+                return None, ""
+            if not path.is_file():
+                return None, None
+            # Only the prefix the cap can use is read, not the whole file to slice it afterwards.
+            with path.open("rb") as fh:
+                raw = fh.read(MAX_DIFF_BYTES)
+                cut = bool(fh.read(1))
+        except OSError:
+            return None, None
+        # A cut file was not shown whole, and `apply` cannot hash its whole bytes either (
+        # `_read_for_diff` answers None for an over-cap file), so a guard would compare two absences.
+        version = None if cut else version_of(raw)
+        if looks_binary(raw):
+            return None, version
+        try:
+            if cut:
+                # The cap is in bytes, so it can fall inside a character. A decoder that is not told the
+                # input has ended holds a trailing partial character back and still raises on bytes that
+                # are not UTF-8 at all, so a cut is not mistaken for binary.
+                return codecs.getincrementaldecoder("utf-8")().decode(raw, final=False), version
+            return raw.decode("utf-8"), version
+        except UnicodeDecodeError:
+            return None, version
+
     def read_text_or_none(self, rel: str) -> str | None:
         """The file's text, or None when it is not text at all.
 
@@ -446,24 +509,7 @@ class FileSystemService:
         binary blob, or is simply unreadable is information ("there is nothing to
         read here"), not an exception for a goal to die of.
         """
-        try:
-            path = self.resolve(rel)
-            if not path.is_file():
-                return None
-            # Only the prefix the cap can use is read, not the whole file to slice it afterwards.
-            with path.open("rb") as fh:
-                raw = fh.read(MAX_DIFF_BYTES)
-                cut = bool(fh.read(1))
-            if looks_binary(raw):
-                return None
-            if cut:
-                # The cap is in bytes, so it can fall inside a character. A decoder that is not told the
-                # input has ended holds a trailing partial character back and still raises on bytes that
-                # are not UTF-8 at all, so a cut is not mistaken for binary.
-                return codecs.getincrementaldecoder("utf-8")().decode(raw, final=False)
-            return raw.decode("utf-8")
-        except (PathEscapeError, OSError, UnicodeDecodeError):
-            return None
+        return self.read_text_with_version_or_none(rel)[0]
 
     def _read_for_diff(self, path: Path) -> tuple[str, str | None, bytes | None]:
         """(text, reason there is no text, bytes read). Never raises.
@@ -662,10 +708,9 @@ class FileSystemService:
                 # `""` and None both mean "the path did not exist" (a create proposal stores `""`;
                 # an absent file's version is None). Normalising them keeps a create checkable.
                 if (bases.get(target) or "") != (expected_versions[rel] or ""):
-                    raise ValueError(
-                        f"{rel} changed since the dry run reviewed it, so Apply refused rather than overwrite "
-                        f"that change. Run the dry run again to review the current files."
-                    )
+                    # Its own class: a malformed proposal and a file that moved are different answers. A
+                    # fresh run asks the fixer once more with the current bytes; a replay fails the step.
+                    raise FileMovedUnderProposalError(rel)
             if action == "edit" and not item.get("edits"):
                 # An edit with no ops used to resolve to "the file unchanged" — except for a binary, non-UTF-8
                 # or over-the-limit file, where the unresolved `before` is "" and the result truncated it while

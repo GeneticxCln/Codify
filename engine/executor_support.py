@@ -38,6 +38,20 @@ class PathRefused(AgentOutputInvalid):
         self.code = "path_escape"
 
 
+class FixerFileMoved(Exception):
+    """A file the fixer was shown moved before its reply could be applied.
+
+    Deliberately not an `AgentOutputInvalid`: `run_agent` would spend its one same-model re-ask on it, and
+    that re-ask carries the original prompt — which still holds the stale contents. `_fixer` catches this
+    instead, re-reads the files the fixer was shown, and makes one fresh call whose prompt holds what is
+    on disk now. The second one is reported as a failure that names the file that keeps moving.
+    """
+
+    def __init__(self, path: str):
+        super().__init__(path)
+        self.path = path
+
+
 class WriteWithdrawn(Exception):
     """The goal stopped being writable while the fixer was answering, so its reply was not applied.
 

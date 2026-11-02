@@ -421,7 +421,8 @@ class _Evidence(_ExecutorCore):
         }
 
     def _suggested_paths_context(
-        self, fs: FileSystemService, paths: list[str], limit: int = 4000
+        self, fs: FileSystemService, paths: list[str], limit: int = 4000,
+        versions: dict[str, str | None] | None = None,
     ) -> tuple[str, str]:
         """(readable contents, note about the ones that could not be read).
 
@@ -430,6 +431,12 @@ class _Evidence(_ExecutorCore):
         before the fixer is ever called means the model never gets to correct
         itself, so the guess is reported as material that was not available rather
         than raised.
+
+        `versions`, when given, is filled with the version of the exact bytes each path showed (the
+        `version_of` the file held as it was read, `""` for a path that did not exist). The fixer's apply
+        passes these as `expected_versions`, so an edit made while the model was answering is refused
+        rather than overwritten. Paths with no readable bytes (a directory, an escape) record `None`,
+        which `apply` treats as "no version to compare" — not as "this path did not exist".
         """
         lines: list[str] = []
         skipped: list[str] = []
@@ -438,8 +445,12 @@ class _Evidence(_ExecutorCore):
                 target = fs.resolve(p)
             except PathEscapeError:
                 skipped.append(f"{p} (outside the workspace)")
+                if versions is not None:
+                    versions[p] = None
                 continue
-            text = fs.read_text_or_none(p)
+            text, version = fs.read_text_with_version_or_none(p)
+            if versions is not None:
+                versions[p] = version
             if text is None:
                 kind = "a directory" if target.is_dir() else "not readable as text"
                 skipped.append(f"{p} ({kind})")

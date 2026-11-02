@@ -2910,6 +2910,12 @@ permissions — because "Start" alone reads like resuming a paused display, and 
 is the moment those powers are actually granted (`ui/src/components/ChatTimeline.tsx`,
 `ui/tests/transcriptInteraction.test.ts`).
 
+**An edit made while the fixer is answering survives it.** The fixer's evidence read records the version of
+every suggested path it shows, and the write refuses a path whose bytes moved in the meantime. That is not
+a failed step: the fixer is asked once more with the current contents, and only a second move stops it,
+naming the file. So a person editing a file during a model call that takes minutes no longer loses that
+edit to a reply that was already on its way (`tests/test_fixer_file_moved.py`).
+
 **After Start the conductor owns every step it is given.** It is one conductor
 *run* per open step, each with its own budget and a prompt that names the plan in
 outline and gives one step in full (the critic's earlier notes ride along as

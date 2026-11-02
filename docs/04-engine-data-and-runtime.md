@@ -1456,6 +1456,18 @@ an empty `content` (that would blank the file), and never when `edits` is presen
 path outside the workspace, a file that exists but cannot be read, a path that would be both a file and a
 folder) is put to the model once, with the reason and, for an edit, the alternatives (`04` §4 "One re-ask").
 
+**A file edited while the fixer was answering is refused, not overwritten.** The suggested-path context the
+fixer is shown is read by `FileSystemService.read_text_with_version_or_none`, which also records
+`version_of` of the exact bytes it showed (and `""` for a path that did not exist yet). The `fs.apply` at the
+end of the same call passes that map as `expected_versions`, the guard Apply has used for reviewed
+dry-run proposals. A path whose bytes moved writes nothing (phase one refuses before phase two), and the
+refusal is `FileMovedUnderProposalError` rather than a malformed-reply `ValueError`: `_fixer` catches it,
+re-reads the suggested paths, and asks the fixer **once** more with the prompt rebuilt from the current
+contents — the same one-retry budget a path refusal gets. A second move fails the step with
+`agent_output_invalid` and names the file that moved; a third call would be a guess. The map is built per
+`_fixer` call, so each step in a parallel batch checks its own baseline and never a sibling's. The replay
+path already worked this way; the live path now matches it.
+
 **A batch is applied completely or not at all** (`FileSystemService.apply`; audit of 2026-09-29, M4).
 Phase one resolves and validates every operation before anything is written — containment, `.git`, the
 action name, a target that is a directory or any other path that is not a regular file (a pipe, a socket, a
