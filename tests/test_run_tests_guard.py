@@ -14,10 +14,13 @@ wrapper, which has to come back non-zero.
 """
 from __future__ import annotations
 
+import os
+import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
+import time
 import unittest
 from pathlib import Path
 
@@ -25,6 +28,16 @@ from scripts.run_tests import completed, escaped_exceptions, leaked_connections
 
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "scripts" / "run_tests.py"
+
+
+def _pid_alive(pid: int) -> bool:
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
 
 
 class RunnerSummaryTest(unittest.TestCase):
@@ -295,6 +308,60 @@ class RunnerRefusesALeakedConnectionTest(unittest.TestCase):
         )
         self.assertEqual(0, result.returncode, result.stdout + result.stderr)
         self.assertNotIn("FATAL", result.stderr)
+
+
+class RunnerKillsItsChildTest(unittest.TestCase):
+    """A SIGTERM to the wrapper must not leave unittest running behind it."""
+
+    @unittest.skipUnless(os.name == "posix", "SIGTERM and process groups are POSIX ideas")
+    def test_sigterm_takes_the_test_process_with_it(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            pid_file = Path(tmp) / "child.pid"
+            module = Path(tmp) / "test_slow.py"
+            module.write_text(
+                "import os\n"
+                "import time\n"
+                "import unittest\n\n\n"
+                "class Slow(unittest.TestCase):\n"
+                "    def test_slow(self):\n"
+                f"        open({str(pid_file)!r}, 'w').write(str(os.getpid()))\n"
+                "        time.sleep(60)\n"
+            )
+            wrapper = subprocess.Popen(
+                [sys.executable, str(WRAPPER), "discover", "-s", tmp, "-p", "test_*.py", "-v"],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                cwd=str(REPO),
+            )
+            child: int | None = None
+            try:
+                deadline = time.monotonic() + 30
+                while not pid_file.exists():
+                    self.assertIsNone(wrapper.poll(), "the wrapper exited before its test started")
+                    self.assertLess(time.monotonic(), deadline, "the test child never started")
+                    time.sleep(0.05)
+                child = int(pid_file.read_text())
+
+                wrapper.terminate()
+                wrapper.wait(timeout=10)
+
+                deadline = time.monotonic() + 10
+                while _pid_alive(child) and time.monotonic() < deadline:
+                    time.sleep(0.05)
+                self.assertFalse(
+                    _pid_alive(child),
+                    "SIGTERM killed the wrapper but left the unittest process running",
+                )
+            finally:
+                if wrapper.poll() is None:
+                    wrapper.kill()
+                    wrapper.wait(timeout=10)
+                if child is not None and _pid_alive(child):
+                    try:
+                        os.kill(child, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
 
 
 if __name__ == "__main__":

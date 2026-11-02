@@ -546,8 +546,12 @@ class RequestSizeLimitMiddleware:
 
     Registered *inside* auth (it is added before the auth middleware, so auth wraps it): a request with no
     token is a 401 without its body being read. The Content-Length fast path refuses an announced oversize
-    body before a byte is pulled; the counting path is what covers a chunked body, where no length is
-    announced and the only honest answer is to count as it arrives.
+    body before a byte is pulled; the counting path covers a chunked body, where no length is announced.
+
+    The body is buffered to the cap before the route is called, rather than streamed through and cut off
+    when it crosses the cap. A route that receives a truncated body can act on the prefix — a turn could be
+    created from half a request — and then its answer has to be replaced with a 413, which is a lie about
+    what happened. At 8 MiB the buffer is the same ceiling as before, and nothing legitimate is near it.
     """
 
     def __init__(self, app: ASGIApp, max_bytes: int = MAX_REQUEST_BODY_BYTES) -> None:
@@ -570,45 +574,35 @@ class RequestSizeLimitMiddleware:
                 return
             break
 
+        chunks: list[bytes] = []
         received = 0
-        too_large = False
-        response_started = False
-        rejected = False
-
-        async def counted_receive() -> Message:
-            nonlocal received, too_large
-            if too_large:
-                # The app has been told the body ended; it must not pull another chunk.
-                return {"type": "http.request", "body": b"", "more_body": False}
+        while True:
             message = await receive()
-            if message["type"] == "http.request":
-                received += len(message.get("body", b""))
-                if received > self.max_bytes:
-                    # Do not raise: FastAPI wraps every exception from a body read in its own 400
-                    # ("There was an error parsing the body"), which would answer an oversized body
-                    # as a malformed one. Stop feeding it and replace the answer below.
-                    too_large = True
-                    return {"type": "http.request", "body": b"", "more_body": False}
-            return message
-
-        async def tracked_send(message: Message) -> None:
-            nonlocal response_started, rejected
-            if not too_large:
-                if message["type"] == "http.response.start":
-                    response_started = True
-                await send(message)
+            if message["type"] == "http.disconnect":
+                # The client left before the body ended: there is no request to answer, and the
+                # route must not see a partial one.
                 return
-            if response_started:
-                # The route had already begun answering before the body crossed the cap; its
-                # response is what the client is reading, and a second start would be invalid.
-                return
-            if not rejected:
-                rejected = True
+            body = message.get("body", b"")
+            received += len(body)
+            if received > self.max_bytes:
                 await self._reject(send)
+                return
+            chunks.append(body)
+            if not message.get("more_body", False):
+                break
 
-        await self.app(scope, counted_receive, tracked_send)
-        if too_large and not response_started and not rejected:
-            await self._reject(send)
+        index = 0
+
+        async def replay() -> Message:
+            nonlocal index
+            if index < len(chunks):
+                body = chunks[index]
+                more_body = index < len(chunks) - 1
+                index += 1
+                return {"type": "http.request", "body": body, "more_body": more_body}
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        await self.app(scope, replay, send)
 
     async def _reject(self, send: Send) -> None:
         body = json.dumps({
@@ -668,10 +662,22 @@ UI_ORIGINS = [
     "https://tauri.localhost",
     "tauri://localhost",
 ]
+# The same loopback rule every browser origin is checked against: the named UI origins above, plus any
+# port on a loopback host (Vite drifts off 5173 when it is taken, and a second checkout is still the
+# user's own machine). HTTP CORS and the WebSocket handshake share this predicate; keeping two spellings
+# is how a UI served on :4173 gets HTTP but no live updates.
+UI_ORIGIN_RE = re.compile(r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$")
+
+
+def _origin_allowed(origin: str) -> bool:
+    """Whether a browser origin is one of the local UI's, for CORS and both WebSockets."""
+    return origin in UI_ORIGINS or bool(UI_ORIGIN_RE.fullmatch(origin))
+
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=UI_ORIGINS,
-    allow_origin_regex=r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$",
+    allow_origin_regex=UI_ORIGIN_RE.pattern,
     allow_credentials=False,
     allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
@@ -3514,9 +3520,9 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
     """One handshake for both WebSocket endpoints: Origin, token, and the pending-socket cap.
 
     Auth used to be copied into `ws_engine` and `ws_goal`, which is how the two drift. It is one
-    function because the guarantees are one set: a browser-chosen Origin is checked against
-    `UI_ORIGINS` when it is present (a native client that sends none is admitted by its token), the
-    boot token is accepted on the Upgrade or as the same first `{"type": "auth"}` frame, and the
+    function because the guarantees are one set: a browser-chosen Origin is checked against the
+    same loopback rule CORS uses when it is present (a native client that sends none is admitted by its
+    token), the boot token is accepted on the Upgrade or as the same first `{"type": "auth"}` frame, and the
     number of sockets waiting for that frame is capped so a flood cannot hold more than
     `WS_MAX_PENDING` of the engine's descriptors and auth waits. The counter is per app state and
     is decremented on every road out, including a disconnect during the wait.
@@ -3527,7 +3533,7 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
     state = websocket.app.state
     expected_token = getattr(state, "token", None) or BOOT_TOKEN
     origin = websocket.headers.get("origin")
-    if origin is not None and origin not in UI_ORIGINS:
+    if origin is not None and not _origin_allowed(origin):
         await websocket.accept()
         await _close_quietly(websocket, WS_ORIGIN_REFUSED)
         return False

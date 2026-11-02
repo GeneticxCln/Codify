@@ -52,7 +52,7 @@ export const LayaRequiredToggle: React.FC = () => {
   return (
     <div className="flex flex-col gap-1.5 border-t border-codify-border pt-2">
       <Checkbox checked={required} disabled={saving} onChange={(next) => void save(next)}>
-        Require the pre-flight gate — refuse a turn it cannot check
+        Require the configured pre-flight gate — refuse a turn it cannot check
       </Checkbox>
       <p className="text-xs text-codify-muted leading-relaxed">
         Off by default. When on, a gate that is configured but cannot answer refuses the turn or

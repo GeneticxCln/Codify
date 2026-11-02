@@ -49,13 +49,13 @@ async function withToggle(
 }
 
 const control = (dom: Dom): HTMLElement =>
-  dom.byButton("Require the pre-flight gate — refuse a turn it cannot check");
+  dom.byButton("Require the configured pre-flight gate — refuse a turn it cannot check");
 
 test("an engine without the setting shows no switch", async () => {
   await withToggle(
     { "GET /settings/engine": () => json({ parallel_width: { value: 4, min: 1, max: 16 } }) },
     async (dom) => {
-      assert.doesNotMatch(dom.text(), /Require the pre-flight gate/);
+      assert.doesNotMatch(dom.text(), /Require the configured pre-flight gate/);
     },
   );
 });

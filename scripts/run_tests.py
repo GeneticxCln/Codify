@@ -23,10 +23,14 @@ wrapper and not a runner with opinions:
 """
 from __future__ import annotations
 
+import os
 import re
+import signal
 import subprocess
 import sys
 import threading
+import time
+from types import FrameType
 from typing import IO, TextIO
 
 # unittest writes the summary to stderr. `Ran N tests` and the verdict are
@@ -86,16 +90,8 @@ def main(argv: list[str] | None = None) -> int:
     # Streamed, not merely captured: a full suite is minutes of silence otherwise, and a developer watching
     # the gate cannot tell a slow test from a hung one. Each pipe is drained on its own thread while the copy
     # is kept for the summary/leak/escape checks below, so the two behaviours do not trade off.
-    proc = subprocess.Popen(  # noqa: S603 — fixed `sys.executable -m unittest` prefix plus a developer's own arguments; no shell, nothing a model produced
-        [sys.executable, "-m", "unittest", *args],
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        bufsize=1,
-    )
-    if proc.stdout is None or proc.stderr is None:
-        raise RuntimeError("the test runner's output pipes were not created")
     captured: dict[str, list[str]] = {"stdout": [], "stderr": []}
+    proc: subprocess.Popen[str] | None = None
 
     def pump(pipe: IO[str], sink: TextIO, key: str) -> None:
         for line in pipe:
@@ -103,15 +99,71 @@ def main(argv: list[str] | None = None) -> int:
             sink.write(line)
             sink.flush()
 
-    pumps = [
-        threading.Thread(target=pump, args=(proc.stdout, sys.stdout, "stdout"), daemon=True),
-        threading.Thread(target=pump, args=(proc.stderr, sys.stderr, "stderr"), daemon=True),
-    ]
-    for thread in pumps:
-        thread.start()
-    proc.wait()
-    for thread in pumps:
-        thread.join()
+    def forwarded(signum: int, _frame: FrameType | None) -> None:
+        """Take the suite with the wrapper, so `kill <wrapper>` is not a silent orphan.
+
+        Installed before the child exists. A SIGTERM that lands between `Popen` and the handler
+        would otherwise be the default action: the wrapper dies and unittest — in its own session
+        now — keeps running.
+        """
+        if proc is not None:
+            # Do not call `proc.poll()` or `proc.wait()` here. The signal can arrive while the
+            # main thread is inside its own `proc.wait()`, which holds Popen's `_waitpid_lock`;
+            # re-entering that method from the handler deadlocks the wrapper. `os.waitpid` is the
+            # lock-free reap, and the child is already in its own process group.
+            if os.name == "posix":
+                try:
+                    os.killpg(proc.pid, signum)
+                except ProcessLookupError:
+                    pass
+                deadline = time.monotonic() + 5
+                while time.monotonic() < deadline:
+                    try:
+                        pid, _ = os.waitpid(proc.pid, os.WNOHANG)
+                    except ChildProcessError:
+                        break
+                    if pid == proc.pid:
+                        break
+                    time.sleep(0.02)
+                else:
+                    try:
+                        os.killpg(proc.pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+            else:
+                proc.terminate()
+        raise SystemExit(128 + signum)
+
+    previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
+    for sig in previous:
+        signal.signal(sig, forwarded)
+    try:
+        proc = subprocess.Popen(  # noqa: S603 — fixed `sys.executable -m unittest` prefix plus a developer's own arguments; no shell, nothing a model produced
+            [sys.executable, "-m", "unittest", *args],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            # The child gets its own process group so it does not receive the wrapper's terminal
+            # signal a second time; the handler above forwards the signal explicitly.
+            start_new_session=os.name == "posix",
+        )
+        if proc.stdout is None or proc.stderr is None:
+            raise RuntimeError("the test runner's output pipes were not created")
+        pumps = [
+            threading.Thread(target=pump, args=(proc.stdout, sys.stdout, "stdout"), daemon=True),
+            threading.Thread(target=pump, args=(proc.stderr, sys.stderr, "stderr"), daemon=True),
+        ]
+        for thread in pumps:
+            thread.start()
+        proc.wait()
+        for thread in pumps:
+            thread.join()
+    finally:
+        for sig, handler in previous.items():
+            signal.signal(sig, handler)
+    if proc is None:
+        raise RuntimeError("the test runner process was not started")
     output = "".join(captured["stdout"]) + "".join(captured["stderr"])
 
     if proc.returncode == 0 and not completed(output):

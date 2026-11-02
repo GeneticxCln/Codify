@@ -87,7 +87,14 @@ class TestTheHandshake(unittest.TestCase):
 
     def test_an_allowed_origin_and_a_client_with_no_origin_are_admitted(self) -> None:
         with TestClient(app) as client:
-            for extra in ({"origin": "http://tauri.localhost"}, {}):
+            # :4173 is the preview server's documented fallback. HTTP CORS already admits any
+            # loopback port; the WebSocket handshake has to agree, or a preview tab gets HTTP and
+            # no live updates.
+            for extra in (
+                {"origin": "http://tauri.localhost"},
+                {"origin": "http://localhost:4173"},
+                {},
+            ):
                 with self.subTest(origin=extra.get("origin")):
                     with client.websocket_connect("/ws/engine", headers={**AUTH, **extra}) as ws:
                         # The handshake is the assertion. No frame is owed before the catalogue changes.

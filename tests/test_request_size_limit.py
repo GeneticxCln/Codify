@@ -20,7 +20,7 @@ from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/herm
 
 from starlette.types import Message, Scope
 
-from engine.app import BOOT_TOKEN, MAX_REQUEST_BODY_BYTES, app
+from engine.app import BOOT_TOKEN, MAX_REQUEST_BODY_BYTES, RequestSizeLimitMiddleware, app
 
 MIB = 1024 * 1024
 
@@ -83,6 +83,31 @@ class RequestSizeLimitTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual("request_too_large", body["code"])
         self.assertIn(str(MAX_REQUEST_BODY_BYTES), body["message"])
         self.assertEqual(9, reads, "the middleware stopped reading before the body crossed the ceiling")
+
+    async def test_an_oversize_body_never_reaches_the_route_in_a_truncated_form(self) -> None:
+        # The audit found the old middleware handing the route the 8 MiB prefix and then replacing
+        # its answer with a 413. A route can act on that prefix (a turn created from half a request),
+        # so the test is that the route is never called at all.
+        called = False
+
+        async def route(scope: Scope, receive: Any, send: Any) -> None:
+            nonlocal called
+            called = True
+
+        sent: list[Message] = []
+
+        async def receive() -> Any:
+            return {"type": "http.request", "body": b"x" * (MAX_REQUEST_BODY_BYTES + 1), "more_body": False}
+
+        async def send(message: Any) -> None:
+            sent.append(cast(Message, message))
+
+        await RequestSizeLimitMiddleware(route)(scope([]), receive, send)
+
+        status, body = response(sent)
+        self.assertEqual(413, status)
+        self.assertEqual("request_too_large", body["code"])
+        self.assertFalse(called, "the route saw an over-cap body and could act on its prefix")
 
     async def test_an_announced_oversize_body_is_refused_without_reading_it(self) -> None:
         headers = [(b"content-length", str(MAX_REQUEST_BODY_BYTES + 1).encode())]

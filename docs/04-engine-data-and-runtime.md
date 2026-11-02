@@ -559,11 +559,11 @@ Bind `127.0.0.1`. Port: first free in `7430-7440`, printed on stdout (`04` §6).
 All routes: `Authorization: Bearer <boot_token>` or `401` `unauthorized`.
 
 **A request body over 8 MiB is refused with `413 request_too_large`** in the engine's `{code, message}`
-shape. The middleware counts `http.request` chunks as they arrive, so a chunked body with no
-`Content-Length` is covered as well as an announced one (which is refused without being read). It sits
-inside auth: a request with no token is a 401 and its body is never pulled. `fs.MAX_EDIT_BYTES` is still
-the authority for a file's content — this is a transport ceiling, not an editor limit
-(`tests/test_request_size_limit.py`).
+shape. The middleware buffers `http.request` chunks up to the cap before calling the route, so a chunked
+body with no `Content-Length` is covered as well as an announced one (which is refused without being
+read), and a route never sees a truncated request it could act on. It sits inside auth: a request with
+no token is a 401 and its body is never pulled. `fs.MAX_EDIT_BYTES` is still the authority for a file's
+content — this is a transport ceiling, not an editor limit (`tests/test_request_size_limit.py`).
 
 Error body: `{ "code": str, "message": str }` — `ErrorBody` in `engine/models.py`, the
 one place that shape is defined. Extra keys are part of the contract, not a
@@ -2139,9 +2139,9 @@ before it authenticates and replays the log from 0, so an open that dies right a
 otherwise reconnect at 1 Hz and re-deliver the whole log each time.
 
 **The handshake is bounded before either stream starts** (`_authenticate_ws`, shared by both endpoints so
-the two cannot drift). A browser-chosen `Origin`, when present, must be one of `UI_ORIGINS`; a client that
-sends none — the Tauri shell, a command-line test — is admitted by its token, and a foreign origin is closed
-`4403`. The auth wait is still five seconds, but at most `WS_MAX_PENDING` (16) sockets may be waiting for it
+the two cannot drift). A browser-chosen `Origin`, when present, must pass the same loopback predicate CORS
+uses — an entry in `UI_ORIGINS`, or any `localhost`/`127.0.0.1` port; a client that sends none — the Tauri
+shell, a command-line test — is admitted by its token, and a foreign origin is closed `4403`. The auth wait is still five seconds, but at most `WS_MAX_PENDING` (16) sockets may be waiting for it
 at once; the next one is accepted only long enough to be closed `4429`, and a departure during the wait
 releases its slot. A socket that presents the boot token on the Upgrade has already authenticated: it does not
 take a pending slot, so a local flood of silent sockets cannot lock out the UI's header-authenticated stream. uvicorn's `ws_max_size` is 64 KiB, so a frame larger than any auth message is closed
