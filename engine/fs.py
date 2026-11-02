@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import codecs
 import difflib
+import errno
 import hashlib
 import os
 import secrets
@@ -33,6 +34,8 @@ class PathEscapeError(Exception):
 # engine reads or writes through here: git's own subprocesses own this
 # directory, so refusing all of it costs no capability.
 GIT_DIRNAME = ".git"
+#: What `os.link` answers on a filesystem that has no hard links (or will not make one here).
+NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EXDEV})
 
 
 class GitMetadataError(PathEscapeError):
@@ -594,7 +597,18 @@ class FileSystemService:
             else:
                 # A link is the no-clobber form of the same atomic publication: unlike `os.replace`
                 # it cannot replace a file that appeared after the caller's check.
-                os.link(tmp, real_parent / target.name)
+                try:
+                    os.link(tmp, real_parent / target.name)
+                except FileExistsError:
+                    raise
+                except OSError as exc:
+                    if exc.errno not in NO_HARD_LINKS:
+                        raise
+                    # A filesystem with no hard links (FAT, exFAT, some network and FUSE mounts) cannot
+                    # publish this way. It can still refuse to replace: `O_EXCL` fails on a file that
+                    # exists, so the guarantee is the same and only the atomicity of the *content* is
+                    # given up, which `_create_exclusive` pays back by removing a file it half wrote.
+                    self._create_exclusive(real_parent / target.name, data)
         except BaseException:
             # A directory made for a write that then failed is not left standing — and it is
             # empty only once this call's own temp file is gone, so that goes first.
@@ -616,6 +630,25 @@ class FileSystemService:
             except OSError:
                 pass
         return created
+
+    @staticmethod
+    def _create_exclusive(path: Path, data: bytes) -> None:
+        """Create `path` and write `data`, refusing a file that exists and never following a link.
+
+        The no-clobber half of `_write_atomic` where `os.link` is unavailable. A write that fails part way
+        removes what it made, so a failure leaves nothing behind rather than a truncated file.
+        """
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(path, flags, 0o666)
+        try:
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(data)
+        except BaseException:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise
 
     def _version_key(self, path: str) -> Path:
         """The file a plan path names, so two spellings of one file share a guard.
