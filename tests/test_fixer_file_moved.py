@@ -145,6 +145,56 @@ class TestAFileThatMovedWhileTheFixerAnswered(FileMovedCase):
 
                 self.assertEqual(edited, (self.root / written).read_text(encoding="utf-8"))
 
+    async def test_the_version_guard_matches_an_absolute_spelling(self) -> None:
+        """A planner can name an in-workspace file by its absolute path.
+
+        The guard keyed it as `home/user/ws/a.py`, which never matched the fixer's
+        `a.py`, so the person's mid-call edit was overwritten.
+        """
+        self.build()
+        fs = FileSystemService(str(self.root))
+        absolute = str((self.root / "a.py").resolve())
+        edited = "value = 99\n# person's edit\n"
+        versions: dict[str, str | None] = {}
+
+        self.executor._suggested_paths_context(fs, [absolute], versions=versions)
+        self.assertEqual(version_of((self.root / "a.py").read_bytes()), versions[absolute])
+        (self.root / "a.py").write_text(edited, encoding="utf-8")
+
+        with self.assertRaises(FileMovedUnderProposalError):
+            fs.apply(
+                [{"path": "a.py", "action": "update", "content": "value = 2\n"}],
+                dry_run=False,
+                expected_versions=versions,
+            )
+
+        self.assertEqual(edited, (self.root / "a.py").read_text(encoding="utf-8"))
+
+    async def test_case_distinct_files_do_not_share_a_version_key(self) -> None:
+        """`A.py` and `a.py` are two files where the filesystem says so.
+
+        The keys used to be case-folded, so a version recorded for `A.py` guarded a
+        write to `a.py` and the write was refused as "moved" when nothing had moved.
+        """
+        self.build()
+        fs = FileSystemService(str(self.root))
+        upper = self.root / "A.py"
+        lower = self.root / "a.py"
+        upper.write_text("upper = 1\n", encoding="utf-8")
+        lower.write_text("lower = 1\n", encoding="utf-8")
+        if upper.read_text(encoding="utf-8") == lower.read_text(encoding="utf-8"):
+            self.skipTest("this filesystem is case-insensitive, so A.py and a.py are one file")
+        versions: dict[str, str | None] = {"A.py": version_of(upper.read_bytes())}
+
+        fs.apply(
+            [{"path": "a.py", "action": "update", "content": "lower = 2\n"}],
+            dry_run=False,
+            expected_versions=versions,
+        )
+
+        self.assertEqual("lower = 2\n", lower.read_text(encoding="utf-8"))
+        self.assertEqual("upper = 1\n", upper.read_text(encoding="utf-8"))
+
 
 if __name__ == "__main__":
     unittest.main()

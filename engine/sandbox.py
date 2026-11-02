@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import functools
 import os
 import re
 import shutil
@@ -144,22 +143,84 @@ CANCEL_POLL_S = 0.2
 CANCELLED_EXIT_CODE = 130
 
 
-@functools.cache
-def bwrap_can_jail(bwrap: str) -> bool:
-    """Whether this bwrap can make a namespace, not merely whether it exists.
+# The bwrap probe's answer, per binary and per network choice. Only a definite answer is kept:
+# a probe that timed out on a loaded host says nothing about the host, and caching that `False`
+# made every later command run unjailed (`auto`) or be refused (`required`) until the engine
+# restarted even after the host had recovered.
+_PROBE_ANSWERS: dict[tuple[str, bool], bool] = {}
+_PROBE_LOCK = threading.Lock()
+
+
+def clear_bwrap_probe_cache() -> None:
+    """Forget every probe answer. A host capability does not change; a test's stub does."""
+    with _PROBE_LOCK:
+        _PROBE_ANSWERS.clear()
+
+
+def _jail_base(bwrap: str, network: bool) -> list[str]:
+    """The mounts and namespaces every jail shares, for the probe and the command alike.
+
+    One builder, so the probe cannot pass on a host where the real jail then fails: it
+    asks for the same `/run`, `/tmp`, `/dev` and `/proc` mounts and the same namespaces,
+    with only the workspace and home binds left out.
+
+    No `--new-session`: the spawn guard already puts the command in its own process
+    group, and a session of bwrap's own would put the jail outside that group, so killing
+    the guard's group would leave the command's grandchildren running. `--die-with-parent`
+    still ties bwrap to the guard.
+    """
+    args = [
+        bwrap, "--die-with-parent",
+        "--ro-bind", "/", "/",
+        # `/run` is where the host's live sockets are: the session bus, gnupg, keyring,
+        # PipeWire and Wayland. `--unshare-net` does not hide pathname sockets, and a
+        # read-only bind still lets a process connect to one. A fresh tmpfs leaves the
+        # path present and empty; a command that needs a system socket has to be given
+        # it explicitly, which nothing here does.
+        "--tmpfs", "/run",
+        # `/tmp` was the other half of the same hole: X11's socket, a Chrome
+        # SingletonSocket, tmux and ssh-agent all live there, and a read-only bind still
+        # permits `connect`. A fresh tmpfs also gives a test suite a writable scratch
+        # directory instead of pushing `tempfile` into the workspace, the only writable
+        # bind.
+        "--tmpfs", "/tmp",  # noqa: S108 — a mount destination, not a temp file the engine makes:
+        # the host's /tmp is replaced by an empty tmpfs so its pathname sockets cannot be reached.
+        "--dev", "/dev", "--proc", "/proc",
+        # The host's PIDs and its SysV/POSIX IPC namespace are not the jail's: a command
+        # must not be able to signal, trace or kill the engine, the shell or the desktop.
+        # The fresh `/proc` above is the view that goes with the new pid namespace.
+        "--unshare-pid", "--unshare-ipc",
+    ]
+    if not network:
+        args.append("--unshare-net")
+    return args
+
+
+def bwrap_can_jail(bwrap: str, network: bool = False) -> bool:
+    """Whether this bwrap can build the jail the next command would get.
 
     `which` answers the wrong question on a host with user namespaces disabled or
     AppArmor-restricted: every command then exits before the program starts, and
-    `auto` used to report `isolation: bwrap` while failing the command. The probe
-    is the smallest real jail (the same bind/dev/proc setup the command jail uses)
-    and is cached per binary: a host capability does not change between commands.
+    `auto` used to report `isolation: bwrap` while failing the command. The probe is
+    the smallest real jail: the same mounts and namespaces as `_jail_base`, with a
+    binary from PATH in place of the command. `network` matches the jail the command
+    will get, because a host can allow namespaces and still refuse a network one.
+
+    A definite answer is cached per `(binary, network)`. A timeout is not: it is a fact
+    about how loaded this machine was, not about what bwrap can do.
     """
+    key = (bwrap, network)
+    with _PROBE_LOCK:
+        if key in _PROBE_ANSWERS:
+            return _PROBE_ANSWERS[key]
+    # A host without `/bin/true` (NixOS) still has `true` on PATH, and resolving it here
+    # means the probe runs the same kind of program the command will.
+    program = shutil.which("true")
+    if program is None:
+        return False
     try:
         proc = subprocess.Popen(  # noqa: S603 — a fixed probe argv, guarded and session-led below
-            guarded_argv([
-                bwrap, "--die-with-parent", "--ro-bind", "/", "/",
-                "--dev", "/dev", "--proc", "/proc", "--", "/bin/true",
-            ]),
+            guarded_argv([*_jail_base(bwrap, network), "--", program]),
             stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
@@ -173,9 +234,15 @@ def bwrap_can_jail(bwrap: str) -> bool:
         proc.wait(timeout=5)
     except subprocess.TimeoutExpired:
         SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
-        proc.wait()
+        try:
+            proc.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            pass
         return False
-    return proc.returncode == 0
+    answer = proc.returncode == 0
+    with _PROBE_LOCK:
+        _PROBE_ANSWERS[key] = answer
+    return answer
 
 
 def _cap_output(text: str, truncated: bool = False) -> str:
@@ -456,32 +523,18 @@ class SandboxService:
             return None, (
                 "sandbox isolation is auto, but bubblewrap (bwrap) is not installed — this command ran unjailed"
             )
-        if not bwrap_can_jail(bwrap):
+        if not bwrap_can_jail(bwrap, network):
             if mode == "required":
                 raise CommandNotAllowed(
                     "sandbox isolation is required, but bubblewrap (bwrap) cannot build a jail "
-                    "(user namespaces are unavailable or refused)"
+                    "(user, pid or network namespaces are unavailable or refused)"
                 )
             return None, (
                 "sandbox isolation is auto, but bubblewrap (bwrap) is installed and cannot build a jail — "
                 "this command ran unjailed"
             )
-        args = [
-            # No `--new-session`: the spawn guard already puts the command in its own process group, and a
-            # session of bwrap's own would put the jail outside that group, so killing the guard's group
-            # would leave the command's grandchildren running. `--die-with-parent` still ties bwrap to the
-            # guard.
-            bwrap, "--die-with-parent",
-            "--ro-bind", "/", "/",
-            # `/run` is where the host's live sockets are: the session bus, gnupg,
-            # keyring, PipeWire and Wayland. `--unshare-net` does not hide pathname
-            # sockets, and a read-only bind still lets a process connect to one. A
-            # fresh tmpfs leaves the path present and empty; a command that needs a
-            # system socket has to be given it explicitly, which nothing here does.
-            "--tmpfs", "/run",
-            "--dev", "/dev", "--proc", "/proc",
-            "--tmpfs", JAIL_HOME, "--setenv", "HOME", JAIL_HOME,
-        ]
+        args = _jail_base(bwrap, network)
+        args += ["--tmpfs", JAIL_HOME, "--setenv", "HOME", JAIL_HOME]
         state = home.codify_home().resolve()
         real_home = Path.home().resolve()
         # `~/.codify` is already covered by the home tmpfs; a redirected CODIFY_HOME elsewhere is not.

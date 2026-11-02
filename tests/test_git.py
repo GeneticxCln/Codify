@@ -154,26 +154,76 @@ class TestGitService(GitTestBase):
         self.assertFalse(fsmonitor_marker.exists(), "a configured fsmonitor ran during the commit")
 
     def test_a_hanging_clean_filter_is_stopped(self) -> None:
-        # A commit can still block on a clean filter, which is repository config.
+        # A commit can still block on a clean filter. A *repository* filter is refused
+        # now (`_untrusted_config_reason`), so this uses the person's global config,
+        # which is theirs and is the remaining way a filter runs.
         # Without the timeout, the step (and Cancel, which waits for it) could not
         # finish while the filter slept.
-        clean = self.root / "clean.sh"
+        home_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(home_dir.cleanup)
+        home = Path(home_dir.name)
+        clean = home / "clean.sh"
         clean.write_text("#!/bin/sh\nsleep 30\n", encoding="utf-8")
         clean.chmod(0o755)
-        subprocess.run(
-            ["git", "config", "filter.slow.clean", f"sh {clean}"],
-            cwd=self.root, check=True, capture_output=True,
+        (home / ".gitconfig").write_text(
+            f'[filter "slow"]\n\tclean = sh {clean}\n', encoding="utf-8",
         )
         self.write(".gitattributes", "slow.py filter=slow\n")
         self.write("slow.py", "x = 1\n")
         self.git.commit_timeout_s = 1.0
 
         started = time.monotonic()
-        rev = self.git.commit(str(self.root), "feat: slow filter", ["slow.py"])
+        with mock.patch.dict(os.environ, {"HOME": str(home)}):
+            rev = self.git.commit(str(self.root), "feat: slow filter", ["slow.py"])
         elapsed = time.monotonic() - started
 
         self.assertIsNone(rev, "a commit that timed out must not report a revision")
         self.assertLess(elapsed, 15.0, "the commit waited for its clean filter")
+
+    def test_a_repo_local_clean_filter_is_refused_not_run(self) -> None:
+        """A fresh workspace's `.git` was writable inside the jail, so its config is data.
+
+        A `filter.<name>.clean` runs during `git add`, outside the jail, with the
+        engine's environment. There is no switch that disables it the way
+        `core.hooksPath` disables hooks, so a repository that names one is refused.
+        """
+        marker = self.root / "filter-ran.txt"
+        clean = self.root / "clean.sh"
+        clean.write_text(f"#!/bin/sh\ntouch '{marker}'\ncat\n", encoding="utf-8")
+        clean.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "filter.evil.clean", f"sh {clean}"],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        self.write(".gitattributes", "*.txt filter=evil\n")
+        self.write("note.txt", "content\n")
+
+        commit_hash, reason = self.git.commit_with_reason(str(self.root), "feat: note", ["note.txt"])
+
+        self.assertIsNone(commit_hash)
+        assert reason is not None
+        self.assertIn("filter.evil.clean", reason)
+        self.assertFalse(marker.exists(), "the planted clean filter ran outside the jail")
+
+    def test_a_planted_signing_program_is_not_run(self) -> None:
+        marker = self.root / "gpg-ran.txt"
+        fake = self.root / "fake-gpg"
+        fake.write_text(f"#!/bin/sh\ntouch '{marker}'\nexit 0\n", encoding="utf-8")
+        fake.chmod(0o755)
+        subprocess.run(
+            ["git", "config", "commit.gpgsign", "true"],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        subprocess.run(
+            ["git", "config", "gpg.program", str(fake)],
+            cwd=self.root, check=True, capture_output=True,
+        )
+        self.write("signed.txt", "content\n")
+
+        commit_hash, reason = self.git.commit_with_reason(str(self.root), "feat: signed", ["signed.txt"])
+
+        assert commit_hash is not None, reason
+        self.assertFalse(marker.exists(), "a planted gpg.program ran during the commit")
 
     def test_commit_env_does_not_carry_credentials(self) -> None:
         """The commit subprocess env must not include provider key variables —
@@ -355,9 +405,13 @@ class TestGuardedGitCommands(unittest.TestCase):
         target = f"hooked-{token}.py"
         guarded_add = f"spawn_guard\\.py.*git.*{target}"
         heartbeat = self.root / "filter-heartbeat.txt"
-        subprocess.run(
-            ["git", "config", "filter.slow.clean", f"python3 ./{filter_body}"],
-            cwd=self.root, check=True, capture_output=True,
+        # A global filter: repository-local ones are refused now, and the guard this
+        # test proves is about the child, not about where its config lives.
+        home_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(home_dir.cleanup)
+        home = Path(home_dir.name)
+        (home / ".gitconfig").write_text(
+            f'[filter "slow"]\n\tclean = python3 ./{filter_body}\n', encoding="utf-8",
         )
         (self.root / ".gitattributes").write_text(
             f"{target} filter=slow\n", encoding="utf-8"
@@ -377,6 +431,7 @@ class TestGuardedGitCommands(unittest.TestCase):
         engine = subprocess.Popen(
             [sys.executable, "-c", driver],
             cwd=str(PROJECT_ROOT),
+            env={**os.environ, "HOME": str(home)},
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )

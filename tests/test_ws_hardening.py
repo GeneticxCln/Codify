@@ -15,6 +15,7 @@ with no Origin — the Tauri shell, a command-line test — is still admitted by
 from __future__ import annotations
 
 import asyncio
+import json
 import socket
 import threading
 import time
@@ -151,39 +152,49 @@ class TestTheFrameAndSocketBounds(ServerCase):
         assert isinstance(closed, websockets.ConnectionClosed)
         self.assertEqual(1009, close_code(closed), "uvicorn did not enforce ws_max_size")
 
-    async def test_the_pending_cap_refuses_and_releases_a_slot(self) -> None:
+    async def test_a_silent_flood_cannot_lock_out_a_first_frame_client(self) -> None:
+        """The UI authenticates with a frame, not a header: a browser cannot set one.
+
+        Sixteen silent sockets used to take every pending slot for the whole five-second wait,
+        so the UI's own first-frame client got 4429 while a local process reopened the flood.
+        A silent socket now takes no slot; only a delivered frame is counted.
+        """
         held = []
-        for _ in range(WS_MAX_PENDING):
+        for _ in range(WS_MAX_PENDING * 2):
             held.append(await websockets.connect(self.url))
-            # Let the handler take its slot before the next socket arrives; the cap is checked when
-            # the handler starts, not when the TCP connection is accepted.
             await asyncio.sleep(0.02)
         try:
-            extra = await websockets.connect(self.url)
-            with self.assertRaises(websockets.ConnectionClosed) as caught:
-                await extra.recv()
-            closed = caught.exception
-            assert isinstance(closed, websockets.ConnectionClosed)
-            self.assertEqual(WS_TOO_MANY_PENDING, close_code(closed))
-
-            # A client that proved its token on the Upgrade is not waiting for the
-            # auth frame's slot and must still get in while the flood holds them.
-            authed = await websockets.connect(self.url, additional_headers=AUTH)
+            ui = await websockets.connect(self.url)
+            await ui.send(json.dumps({"type": "auth", "token": BOOT_TOKEN}))
             await asyncio.sleep(0.1)
             self.assertIsNone(
-                authed.close_code,
-                "an unauthenticated flood locked out a header-authenticated client",
+                ui.close_code,
+                "a silent flood locked out the UI's first-frame authentication",
             )
-            await authed.close()
+            await ui.close()
         finally:
             for wire in held:
                 await wire.close()
         await asyncio.sleep(0.2)
 
-        good = await websockets.connect(self.url, additional_headers=AUTH)
+        good = await websockets.connect(self.url)
+        await good.send(json.dumps({"type": "auth", "token": BOOT_TOKEN}))
         await asyncio.sleep(0.1)
-        self.assertIsNone(good.close_code, "closing the flood did not release the pending slots")
+        self.assertIsNone(good.close_code, "closing the flood did not release the auth checks")
         await good.close()
+
+    async def test_the_cap_still_bounds_a_delivered_frame(self) -> None:
+        app.state.ws_pending = WS_MAX_PENDING
+        try:
+            extra = await websockets.connect(self.url)
+            await extra.send(json.dumps({"type": "auth", "token": BOOT_TOKEN}))
+            with self.assertRaises(websockets.ConnectionClosed) as caught:
+                await extra.recv()
+            closed = caught.exception
+            assert isinstance(closed, websockets.ConnectionClosed)
+            self.assertEqual(WS_TOO_MANY_PENDING, close_code(closed))
+        finally:
+            app.state.ws_pending = 0
 
 
 if __name__ == "__main__":

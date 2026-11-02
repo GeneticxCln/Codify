@@ -360,6 +360,11 @@ def runner_args(args: Sequence[str]) -> list[str]:
         # through git itself. Pointing the hook path at the null device disables
         # all of them, for the engine's own commits as well as a model's reads.
         "-c", f"core.hooksPath={os.devnull}",
+        # Signing starts the program a repository names in `gpg.program`. The engine never wants a
+        # signature, and a repository that set `commit.gpgsign = true` (or planted both keys) must
+        # not get to start one: the empty program makes git fail instead of exec'ing the named one.
+        "-c", "commit.gpgsign=false",
+        "-c", "gpg.program=",
         sub,
         *_NO_DRIVERS.get(sub, ()),
         *rest,

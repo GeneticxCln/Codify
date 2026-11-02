@@ -84,18 +84,7 @@ class FileNotTextError(Exception):
         self.reason = reason
 
 
-def _expected_version_key(path: str) -> str:
-    """The same path spelling `ExecutorService._norm_path` uses for plan paths.
 
-    A planner and a fixer can name one file differently (`./a.py`, `a.py`, `sub//b.py`).
-    `expected_versions` is keyed by the spelling the planner used, so an exact lookup
-    silently skips the guard when the fixer writes the canonical spelling.
-    """
-    text = (path or "").strip()
-    if text.startswith("/"):
-        text = text.lstrip("/")
-    normalized = os.path.normpath(text)
-    return "" if normalized == "." else normalized.casefold()
 
 
 class FileMovedUnderProposalError(ValueError):
@@ -628,6 +617,41 @@ class FileSystemService:
                 pass
         return created
 
+    def _version_key(self, path: str) -> Path:
+        """The file a plan path names, so two spellings of one file share a guard.
+
+        `expected_versions` is keyed by the spelling the planner used and looked up by the
+        fixer's spelling. Resolving both to the file itself closes `./a.py`, `sub//b.py` and
+        an absolute in-workspace path. Case is kept: `A.py` and `a.py` are two files on a
+        case-sensitive filesystem, and case-folding their keys made writing one look like the
+        other had moved.
+        """
+        text = (path or "").strip()
+        candidate = Path(text)
+        if candidate.is_absolute():
+            try:
+                candidate = candidate.resolve().relative_to(self.root)
+            except (OSError, ValueError):
+                raise ValueError(f"{path} is outside the workspace") from None
+        else:
+            candidate = Path(os.path.normpath(text))
+        return self.resolve(str(candidate))
+
+    def _version_keys(self, versions: dict[str, str | None]) -> dict[Path, str | None]:
+        """The recorded versions keyed by target, skipping a path that could never be written.
+
+        A plan's suggestion can point outside the workspace or into `.git`; `_suggested_paths_context`
+        records it as `None` so the attempt is reported, not raised. There is no file for it to guard,
+        so it contributes no key rather than failing the whole batch.
+        """
+        keys: dict[Path, str | None] = {}
+        for path, version in versions.items():
+            try:
+                keys[self._version_key(path)] = version
+            except (PathEscapeError, ValueError, OSError):
+                continue
+        return keys
+
     def apply(
         self, files: list[dict[str, Any]], *, dry_run: bool,
         expected_versions: dict[str, str | None] | None = None,
@@ -676,12 +700,10 @@ class FileSystemService:
             raise ProtectedRootError(str(self.root), reason)
 
         # The planner's spelling and the fixer's spelling are not necessarily the same.
-        # Normalise both sides so `./a.py` cannot walk past a version recorded for `a.py`
-        # (or the reverse) and overwrite a person's mid-call edit.
-        expected = (
-            {_expected_version_key(path): version for path, version in expected_versions.items()}
-            if expected_versions is not None
-            else None
+        # Key both sides by the file they resolve to, so `./a.py`, `a.py`, `sub//b.py` and an
+        # absolute in-workspace spelling cannot walk past a version recorded for another one.
+        expected: dict[Path, str | None] | None = (
+            self._version_keys(expected_versions) if expected_versions is not None else None
         )
 
         # ── phase 1: resolve and validate everything, touch nothing ──────────────
@@ -727,11 +749,10 @@ class FileSystemService:
                         f"{rel} exists but cannot be read ({note[len(UNREADABLE):]}), so it cannot be changed "
                         f"or deleted safely. Leave {rel} alone"
                     )
-            expected_key = _expected_version_key(rel)
-            if expected is not None and expected_key in expected and target not in virtual:
+            if expected is not None and target in expected and target not in virtual:
                 # `""` and None both mean "the path did not exist" (a create proposal stores `""`;
                 # an absent file's version is None). Normalising them keeps a create checkable.
-                if (bases.get(target) or "") != (expected[expected_key] or ""):
+                if (bases.get(target) or "") != (expected[target] or ""):
                     # Its own class: a malformed proposal and a file that moved are different answers. A
                     # fresh run asks the fixer once more with the current bytes; a replay fails the step.
                     raise FileMovedUnderProposalError(rel)

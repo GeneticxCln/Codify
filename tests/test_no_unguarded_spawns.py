@@ -201,8 +201,9 @@ SPAWN_SITE_COUNTS: dict[tuple[str, str], int] = {
     # Two unpackers, one per package format: `dpkg-deb -x` and the AppImage's own `--appimage-extract`.
     ("scripts/smoke_bundle.py", "run"): 2,
     # The command and the bwrap usability probe. Both are guarded and session-led; the
-    # probe is fixed argv and cached per binary, and tests/test_sandbox_jail.py pins its
-    # auto/required behavior against a bwrap that cannot create a namespace.
+    # probe is fixed argv, and a definite answer is cached per binary and network choice
+    # (a timeout is not). tests/test_sandbox_jail.py pins its auto/required behavior
+    # against a bwrap that cannot create a namespace, and pins the timeout case.
     ("engine/sandbox.py", "Popen"): 2,
 }
 

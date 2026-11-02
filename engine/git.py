@@ -309,6 +309,41 @@ class GitService:
             "sha": self.head_sha(root), "reason": None,
         }
 
+    def _untrusted_config_reason(self, cwd: str) -> str | None:
+        """Why this repository's config cannot be trusted for a commit, or None.
+
+        `.git` is bound read-only inside the jail only when it existed at launch: a jailed
+        command can still `git init` a fresh workspace and write a `filter.<name>.clean`
+        (or `.smudge`/`.process`) into the new config. `git add` then starts that program
+        outside the jail, with the engine's environment. `runner_args` disables hooks and
+        `core.fsmonitor`, and `--no-gpg-sign` neutralises a planted signing program, but
+        filters have no equivalent switch, so a repository that names one is refused a
+        Codify commit instead. The person can commit it themselves, or remove the setting.
+        """
+        try:
+            res = self._run_text(
+                ["config", "--local", "--includes", "--list"],
+                cwd=cwd, env=self._workspace_env(), timeout=self.read_only_timeout_s,
+            )
+        except subprocess.TimeoutExpired:
+            return "the repository's config did not finish reading in time, so Codify cannot check what its filters run"
+        except OSError as exc:
+            return f"the repository's config could not be read: {exc}"
+        if res.returncode != 0:
+            said = (res.stderr or res.stdout or "").strip().splitlines()
+            return f"the repository's config could not be read: {said[0] if said else res.returncode}"
+        for line in res.stdout.splitlines():
+            # `git config --list` writes `key=value`, or just `key` for a boolean. The key is
+            # everything before the first `=`; a value may contain anything at all.
+            key = line.split("=", 1)[0].strip()
+            setting = key.rsplit(".", 1)[-1].lower()
+            if key.lower().startswith("filter.") and setting in {"clean", "smudge", "process"}:
+                return (
+                    f"this repository's config names a git filter Codify will not run ({key}). "
+                    "The commit was not made: commit it yourself, or remove that setting and try again."
+                )
+        return None
+
     # ── the one way this class starts a process ─────────────────────────
 
     def _run_bytes(
@@ -584,6 +619,14 @@ class GitService:
             if not stageable:
                 return None, None
 
+        # A clean/smudge/process filter is repository config that `git add` starts outside the
+        # jail. Unlike a hook or `core.fsmonitor`, it has no switch that disables it, so a repo
+        # that names one is refused rather than run. This check is before `add`, which is the
+        # command that would start it.
+        reason = self._untrusted_config_reason(cwd)
+        if reason is not None:
+            return None, reason
+
         # New paths must be known to git before a pathspec commit can name them;
         # `-A` also records deletions. Only these paths are touched in the index.
         try:
@@ -601,7 +644,7 @@ class GitService:
         # worktree contents of the named paths, which is exactly what was written.
         try:
             res = self._run_text(
-                ["commit", "--no-verify", "-m", message, "--", *stageable],
+                ["commit", "--no-verify", "--no-gpg-sign", "-m", message, "--", *stageable],
                 cwd=cwd,
                 env=env,
                 timeout=self.commit_timeout_s,

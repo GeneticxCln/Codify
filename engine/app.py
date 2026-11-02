@@ -3523,9 +3523,10 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
     function because the guarantees are one set: a browser-chosen Origin is checked against the
     same loopback rule CORS uses when it is present (a native client that sends none is admitted by its
     token), the boot token is accepted on the Upgrade or as the same first `{"type": "auth"}` frame, and the
-    number of sockets waiting for that frame is capped so a flood cannot hold more than
-    `WS_MAX_PENDING` of the engine's descriptors and auth waits. The counter is per app state and
-    is decremented on every road out, including a disconnect during the wait.
+    number of sockets whose first frame is being checked is capped at `WS_MAX_PENDING`, and a
+    socket that has not sent one takes no slot at all — its wait is bounded by
+    `WS_AUTH_TIMEOUT_S`, so a silent flood cannot keep the UI out. The counter is per app state
+    and is decremented on every road out, including a disconnect during the check.
 
     Returns True with the socket accepted and authenticated. On False the socket has already been
     accepted and closed with the reason (4401 bad token, 4403 foreign Origin, 4429 over the cap).
@@ -3538,23 +3539,30 @@ async def _authenticate_ws(websocket: WebSocket) -> bool:
         await _close_quietly(websocket, WS_ORIGIN_REFUSED)
         return False
     # A client that authenticated on the Upgrade is not waiting for a frame and
-    # must not be behind the cap's unauthenticated queue. Check it before taking
-    # a pending slot; otherwise sixteen silent sockets can lock out the UI even
-    # though it presented the boot token in its header.
+    # takes no pending slot. Check it before accepting, so it never queues behind
+    # an unauthenticated one.
     auth_header = websocket.headers.get("authorization", "")
     if _same_secret(auth_header, f"Bearer {expected_token}"):
         await websocket.accept()
         return True
+    await websocket.accept()
+    try:
+        msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_S)
+    except Exception:
+        await _close_quietly(websocket, 4401)
+        return False
+    # A silent socket used to take a slot before its first frame, so sixteen of them
+    # held every slot for the whole auth wait and the UI — which has to authenticate
+    # in a first frame, because a browser cannot set an Upgrade header — got 4429.
+    # The slot is taken only once a frame is already here, and is held for one token
+    # comparison.
     pending = int(getattr(state, "ws_pending", 0))
     if pending >= WS_MAX_PENDING:
-        await websocket.accept()
         await _close_quietly(websocket, WS_TOO_MANY_PENDING)
         return False
     state.ws_pending = pending + 1
     try:
-        await websocket.accept()
         try:
-            msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_S)
             auth_msg = json.loads(msg)
             token = str(auth_msg.get("token") or "")
             if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):

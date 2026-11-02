@@ -6,6 +6,7 @@ The second layer of `ExecutorService` (see `engine/executor.py`); it calls only 
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 from engine.fs import FileSystemService, PathEscapeError
@@ -441,14 +442,26 @@ class _Evidence(_ExecutorCore):
         lines: list[str] = []
         skipped: list[str] = []
         for p in paths:
+            readable = p
             try:
                 target = fs.resolve(p)
             except PathEscapeError:
-                skipped.append(f"{p} (outside the workspace)")
-                if versions is not None:
-                    versions[p] = None
-                continue
-            text, version = fs.read_text_with_version_or_none(p)
+                # A planner can name an in-workspace file by its absolute path. It is the
+                # same file, so read it under the spelling `resolve` accepts; the version
+                # is still recorded under the planner's spelling, and `apply` reduces both
+                # to the target. A path that really is outside stays unreadable.
+                absolute = Path(p)
+                try:
+                    if not absolute.is_absolute():
+                        raise ValueError(p)
+                    readable = str(absolute.resolve().relative_to(fs.root))
+                    target = fs.resolve(readable)
+                except (OSError, ValueError):
+                    skipped.append(f"{p} (outside the workspace)")
+                    if versions is not None:
+                        versions[p] = None
+                    continue
+            text, version = fs.read_text_with_version_or_none(readable)
             if versions is not None:
                 versions[p] = version
             if text is None:

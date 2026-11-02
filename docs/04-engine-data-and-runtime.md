@@ -1891,11 +1891,16 @@ allowlist validated: the same resolved program and tokens are placed after `bwra
 
 `engine/sandbox.py` wraps the child in bubblewrap when the engine-wide `sandbox_isolation` setting is `required` or
 `auto` (the default). The jail binds `/` read-only, then binds the workspace read-write at the same absolute path and
-binds the workspace's `.git` back read-only before it `chdir`s there. A workspace test may edit the working tree; it
-cannot install a post-commit hook or name a `core.fsmonitor` that the engine's own commit would later run outside the
-jail with the person's real home. A fresh tmpfs is mounted over `/run`, where the host's session bus, gnupg, keyring,
-PipeWire and Wayland sockets live: a read-only `/` still leaves those pathname sockets connectable, and `--unshare-net`
-does not hide them, so they are absent rather than merely unwritable. A fresh tmpfs is also mounted over the person's
+binds the workspace's `.git` back read-only before it `chdir`s there **when `.git` already exists**. A workspace test
+may edit the working tree; it cannot install a post-commit hook or name a `core.fsmonitor` that the engine's own
+commit would later run outside the jail with the person's real home. A fresh workspace has no metadata to bind, so a
+jailed `git init` could still plant `filter.<name>.clean` or `gpg.program`: the engine's own git forces
+`--no-gpg-sign` (with `-c commit.gpgsign=false -c gpg.program=`) on every command, and refuses to commit a repository
+whose config names a clean, smudge or process filter, naming the key rather than running the program. `/run` and `/tmp`
+are fresh tmpfs: the host's session bus, gnupg, keyring, PipeWire, Wayland, X11, tmux and ssh-agent sockets all live at
+those paths, a read-only `/` still leaves them connectable, and `--unshare-net` does not hide them, so they are absent
+rather than merely unwritable. A pid namespace and an IPC namespace of the jail's own mean a test cannot signal, trace
+or kill the engine, the shell or the desktop. A fresh tmpfs is also mounted over the person's
 real home at that same path, so `~/.ssh`, `~/.codify` and everything beside them are absent rather than unreadable,
 while an absolute path a build tool prints still reads the same. The executable's own directory, a virtualenv root and the `PATH` entries under the home are rebound read-only,
 because a fresh home would otherwise hide the venv the command was started from; nothing else of the home is visible. A
@@ -1904,7 +1909,8 @@ engine's `sandbox_network` switch, default off. `HOME` is the tmpfs path, so a b
 the jail.
 
 `required` refuses with `command_not_allowed` when `bwrap` is not installed **or cannot build a jail**; `auto`
-probes the installed binary with a real trivial invocation (cached per binary), falls back to the same unjailed path,
+probes the installed binary with the same mounts and namespaces the command will get (a definite answer is cached per
+binary and network choice; a timeout is not), falls back to the same unjailed path,
 and reports `isolation: "off"` with an `isolation_warning` that the executor writes to the goal's event stream. This
 is the installed-but-useless host — user namespaces disabled or AppArmor-restricted — where `which` alone used to
 claim `isolation: "bwrap"` while every command failed. `off` is the deliberate opt-out, and `capabilities.sandbox_report()`
@@ -1912,8 +1918,9 @@ uses the same probe so Settings and the boot log do not promise a jail the host 
 test harness, the read-only librarian path) has no jail, because it cannot see the person's setting; the engine always
 passes `SettingsService` (`app.state.sandbox`). The jail does not replace `validate_argv` and does not admit a program the
 table refuses. Proven by `tests/test_sandbox_jail.py`, which runs real bwrap and checks a state-directory secret, a write
-outside the workspace, a home write, a `.git` metadata write, and loopback reachability with and without the opt-in; its
-jail argument is also asserted to carry `--tmpfs /run`. A command that times out reports exit `124` (`timeout(1)`'s code); one stopped because its goal
+outside the workspace, a home write, a `.git` metadata write, a host PID, a host file and a unix socket in `/tmp`, and
+loopback reachability with and without the opt-in; its jail argument is also asserted to carry `--tmpfs /run`,
+`--tmpfs /tmp`, `--unshare-pid` and `--unshare-ipc`. A command that times out reports exit `124` (`timeout(1)`'s code); one stopped because its goal
 was cancelled reports `130` and says so in its stderr, so the two are never confused with each other or with an exit the
 command chose.
 
@@ -1981,7 +1988,8 @@ signature, which makes git run gpg), names a file (`--file`, `-f`, `--exclude-fr
 - `branch` and `tag` accept a positional only with `--list`/`-l`, where it is a pattern.
 
 **The child process.** Read-only git — and the verifier's `git status`/`diff`/`log -1` — starts as
-`git --no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null SUBCOMMAND
+`git --no-pager -c core.fsmonitor=false -c core.hooksPath=/dev/null -c commit.gpgsign=false
+-c gpg.program= SUBCOMMAND
 [--no-ext-diff --no-textconv] ARGS…` with an environment of `PATH`, `LANG`, `LC_ALL`, `LC_CTYPE` and `TZ`
 plus `GIT_CONFIG_GLOBAL=/dev/null`, `GIT_CONFIG_NOSYSTEM`, `GIT_OPTIONAL_LOCKS=0` (a `status` otherwise
 rewrites the index), `GIT_TERMINAL_PROMPT=0` and `GIT_CEILING_DIRECTORIES` set to the workspace's parent,
@@ -1996,9 +2004,11 @@ process group is stopped and the model gets a sentence saying so.
 **What this does not cover, on purpose.** The repository's *own* config (`.git/config`,
 `.gitattributes`) is trusted, exactly as it is when a developer runs git in that repository. A
 `core.fsmonitor`, `diff.external` or textconv driver there is neutralised above because those are the
-ones plain `status`/`diff`/`log -p` start; a `filter.<name>.clean` command in that config still runs
-when git compares the working tree, and there is no single switch for those. A workspace whose
-`.git/config` came from someone else is not made safe by this table.
+ones plain `status`/`diff`/`log -p` start; a `filter.<name>.clean`, `.smudge` or `.process` command
+has no equivalent switch, so `GitService.commit_with_reason` reads the repository config and refuses a
+commit that names one, naming the key. A person's *global* config is theirs and still applies — that
+is where a legitimate LFS filter belongs — but a workspace whose `.git/config` came from someone else
+is not made safe for a command the person runs themselves; this refusal covers the engine's own commit.
 
 Proven by `tests/test_sandbox_read_only_git.py`, which runs real git against a real repository and
 asserts on the repository afterwards; its property tests are the ones that would have caught the class
@@ -2141,10 +2151,13 @@ otherwise reconnect at 1 Hz and re-deliver the whole log each time.
 **The handshake is bounded before either stream starts** (`_authenticate_ws`, shared by both endpoints so
 the two cannot drift). A browser-chosen `Origin`, when present, must pass the same loopback predicate CORS
 uses — an entry in `UI_ORIGINS`, or any `localhost`/`127.0.0.1` port; a client that sends none — the Tauri
-shell, a command-line test — is admitted by its token, and a foreign origin is closed `4403`. The auth wait is still five seconds, but at most `WS_MAX_PENDING` (16) sockets may be waiting for it
-at once; the next one is accepted only long enough to be closed `4429`, and a departure during the wait
-releases its slot. A socket that presents the boot token on the Upgrade has already authenticated: it does not
-take a pending slot, so a local flood of silent sockets cannot lock out the UI's header-authenticated stream. uvicorn's `ws_max_size` is 64 KiB, so a frame larger than any auth message is closed
+shell, a command-line test — is admitted by its token, and a foreign origin is closed `4403`. The auth wait is still
+five seconds, and `ws_max_size` bounds the frame, but a socket waiting for its first frame takes no pending slot at
+all: the cap (`WS_MAX_PENDING`, 16) counts only sockets whose frame has arrived and is being checked, and such a socket
+holds it for one token comparison. A silent socket is closed `4401` when the wait expires and cannot keep the UI out —
+the UI authenticates with `{"type":"auth"}` as its first frame, because a browser cannot set an `Upgrade` header. A
+socket that presents the boot token on the Upgrade authenticates immediately; one whose frame arrives while 16 checks
+are in flight is closed `4429` (`tests/test_ws_hardening.py`). uvicorn's `ws_max_size` is 64 KiB, so a frame larger than any auth message is closed
 `1009` before a handler sees it (`tests/test_ws_hardening.py`). A legitimate stream is unchanged, and the
 isolation guarantees are still the ones `tests/stream_isolation.py` states.
 

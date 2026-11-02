@@ -413,8 +413,10 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         workspace = self._scenario_workspace()
         (workspace / SLEEPER).write_text(SLEEPER_SOURCE, encoding="utf-8")
         heartbeat = workspace / HEARTBEAT
-        self._prepare_repo_with_filter(workspace)
-        client, goal_id, engine = self._start_a_goal(workspace, _CommitFilterFake)
+        config = self._prepare_repo_with_filter(workspace)
+        client, goal_id, engine = self._start_a_goal(
+            workspace, _CommitFilterFake, extra_env={"GIT_CONFIG_GLOBAL": str(config)},
+        )
 
         self.assertTrue(
             wait_until(ORPHAN_PROBE, matches=True, timeout=30),
@@ -596,14 +598,15 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         self.addCleanup(tmp.cleanup)
         return Path(tmp.name).resolve()
 
-    def _prepare_repo_with_filter(self, workspace: Path) -> None:
-        """A real repository whose clean filter execs the workspace script.
+    def _prepare_repo_with_filter(self, workspace: Path) -> Path:
+        """A real repository whose clean filter execs the workspace script, and the config.
 
         `git init` runs here rather than through GitService: this is the fixture, and
-        the path under test must not be the thing that builds it. Hooks are disabled
-        on the engine's git now, so a commit cannot be held open by a post-commit
-        hook; a clean filter is still repository config, and git waits for it while
-        it adds the file the fixer wrote.
+        the path under test must not be the thing that builds it. The filter lives in
+        the *person's* config, not the repository's: a repository-local clean filter is
+        refused now (a fresh workspace's `.git` was writable inside the jail), while a
+        global one is the remaining way a filter runs and the path this test proves.
+        The caller hands the file to the engine as `GIT_CONFIG_GLOBAL`.
         """
         subprocess.run(
             ["git", "init", "-q"], cwd=str(workspace), capture_output=True, check=True
@@ -611,13 +614,13 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         (workspace / ".gitattributes").write_text(
             "probe_target.txt filter=slow\n", encoding="utf-8"
         )
-        subprocess.run(
-            ["git", "config", "filter.slow.clean", f"python3 ./{SLEEPER}"],
-            cwd=str(workspace), capture_output=True, check=True,
-        )
+        config = workspace / "global.gitconfig"
+        config.write_text(f'[filter "slow"]\n\tclean = python3 ./{SLEEPER}\n', encoding="utf-8")
+        return config
 
     def _start_a_goal(
-        self, workspace: Path, handler: type[_FakeProvider]
+        self, workspace: Path, handler: type[_FakeProvider],
+        extra_env: dict[str, str] | None = None,
     ) -> tuple[httpx.Client, str, subprocess.Popen[bytes]]:
         """Boot a real engine, register the fake, and start a goal over the API.
 
@@ -641,7 +644,7 @@ class TestOrphanGuardThroughALiveEngine(unittest.TestCase):
         # real run gives it, and the sweeps only find what a *broken* guard left behind.
         self.addCleanup(sigkill_matching, ORPHAN_PROBE)
         self.addCleanup(sigkill_matching, SLEEPER)
-        engine, token, port = _boot_engine(home)
+        engine, token, port = _boot_engine(home, extra_env=extra_env)
         self.addCleanup(_kill_and_collect, engine)
 
         client = httpx.Client(
