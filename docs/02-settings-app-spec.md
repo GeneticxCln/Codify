@@ -177,7 +177,8 @@ Two person-only features with an API and a command line, and **no Settings scree
 `codify-cli notes` and `codify-cli profile`, `docs/09` §10.23). **`cross_workspace_notes`** (default off) is the switch
 that lets the standing notes (`docs/10` §8) reach a run; it is not written by a profile and `PUT /settings/engine` is its
 only door. The profile (`docs/09` §10.24) is exported and imported through `GET /profile/export` and
-`POST /profile/import`. A screen for either would be a thin card over these routes, in the style of §3.0a; it is not built.
+`POST /profile/import`. An import applies a role's tuning and its model name only while the provider stays the same; it never
+changes a provider, the conductor's routing or a system prompt, and the report lists each one it left. A screen for either would be a thin card over these routes, in the style of §3.0a; it is not built.
 
 ### 3.0b The fail-closed gate switch
 
