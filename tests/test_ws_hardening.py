@@ -1,0 +1,151 @@
+"""WebSocket handshakes are bounded before they can hold anything (audit gap 4).
+
+Three holes were open at the handshake, not in the streams themselves. Auth was copied into
+`ws_engine` and `ws_goal`, so the two could drift. A browser-chosen `Origin` was ignored, so a page
+on any site could open a socket and present a token it had somehow read. And the auth wait was
+unbounded in number: every silent socket held a coroutine and a descriptor for five seconds.
+
+The stream-isolation suite (`tests/test_concurrent_streams_ws.py`, through
+`tests/stream_isolation.py`) proves that a *legitimate* connection sees only its own goal's frames.
+These tests pin the boundary in front of it: a foreign origin gets 4403, a socket over the pending
+cap gets 4429, and uvicorn closes an oversized frame with 1009 before it reaches a handler. A client
+with no Origin — the Tauri shell, a command-line test — is still admitted by its token.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import socket
+import threading
+import time
+import unittest
+
+import uvicorn
+import websockets
+from starlette.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
+
+from engine.app import (
+    BOOT_TOKEN,
+    WS_MAX_MESSAGE_BYTES,
+    WS_MAX_PENDING,
+    WS_ORIGIN_REFUSED,
+    WS_TOO_MANY_PENDING,
+    app,
+)
+
+AUTH = {"authorization": f"Bearer {BOOT_TOKEN}"}
+
+
+def close_code(exc: websockets.ConnectionClosed) -> int | None:
+    """The code the peer sent, without the deprecated `ConnectionClosed.code` property."""
+    return exc.rcvd.code if exc.rcvd is not None else None
+
+
+class _Watch:
+    def subscribe(self) -> None:
+        return None
+
+    def unsubscribe(self) -> None:
+        return None
+
+
+class TestTheHandshake(unittest.TestCase):
+    def test_a_foreign_origin_is_refused_on_both_endpoints(self) -> None:
+        with TestClient(app) as client:
+            for path in ("/ws/engine", "/ws/goals/x"):
+                with self.subTest(path=path):
+                    with self.assertRaises(WebSocketDisconnect) as caught:
+                        with client.websocket_connect(
+                            path, headers={"origin": "http://evil.example"}
+                        ) as ws:
+                            ws.receive_text()
+                    self.assertEqual(WS_ORIGIN_REFUSED, caught.exception.code)
+
+    def test_an_allowed_origin_and_a_client_with_no_origin_are_admitted(self) -> None:
+        with TestClient(app) as client:
+            for extra in ({"origin": "http://tauri.localhost"}, {}):
+                with self.subTest(origin=extra.get("origin")):
+                    with client.websocket_connect("/ws/engine", headers={**AUTH, **extra}) as ws:
+                        # The handshake is the assertion. No frame is owed before the catalogue changes.
+                        ws.send_text("ignored")
+
+
+class ServerCase(unittest.IsolatedAsyncioTestCase):
+    """A real uvicorn server, because `ws_max_size` is its setting and TestClient does not enforce it."""
+
+    async def asyncSetUp(self) -> None:
+        app.state.token = BOOT_TOKEN
+        app.state.engine_conns = set()
+        app.state.catalog_watch = _Watch()
+        with socket.socket() as probe:
+            probe.bind(("127.0.0.1", 0))
+            self.port = int(probe.getsockname()[1])
+        config = uvicorn.Config(
+            app,
+            host="127.0.0.1",
+            port=self.port,
+            log_level="error",
+            lifespan="off",
+            timeout_graceful_shutdown=1,
+            ws_max_size=WS_MAX_MESSAGE_BYTES,
+        )
+        self.server = uvicorn.Server(config)
+        self.thread = threading.Thread(target=lambda: asyncio.run(self.server.serve()), daemon=True)
+        self.thread.start()
+        deadline = time.monotonic() + 10
+        while not self.server.started and time.monotonic() < deadline:
+            await asyncio.sleep(0.02)
+        self.assertTrue(self.server.started, "the test server never came up")
+        self.addCleanup(self._stop)
+
+    def _stop(self) -> None:
+        self.server.should_exit = True
+        self.thread.join(timeout=10)
+
+    @property
+    def url(self) -> str:
+        return f"ws://127.0.0.1:{self.port}/ws/engine"
+
+
+class TestTheFrameAndSocketBounds(ServerCase):
+    async def test_an_oversized_first_frame_is_closed_with_1009(self) -> None:
+        wire = await websockets.connect(self.url, additional_headers=AUTH)
+
+        with self.assertRaises(websockets.ConnectionClosed) as caught:
+            await wire.send("x" * (WS_MAX_MESSAGE_BYTES + 1))
+            await wire.recv()
+
+        closed = caught.exception
+        assert isinstance(closed, websockets.ConnectionClosed)
+        self.assertEqual(1009, close_code(closed), "uvicorn did not enforce ws_max_size")
+
+    async def test_the_pending_cap_refuses_and_releases_a_slot(self) -> None:
+        held = []
+        for _ in range(WS_MAX_PENDING):
+            held.append(await websockets.connect(self.url))
+            # Let the handler take its slot before the next socket arrives; the cap is checked when
+            # the handler starts, not when the TCP connection is accepted.
+            await asyncio.sleep(0.02)
+        try:
+            extra = await websockets.connect(self.url)
+            with self.assertRaises(websockets.ConnectionClosed) as caught:
+                await extra.recv()
+            closed = caught.exception
+            assert isinstance(closed, websockets.ConnectionClosed)
+            self.assertEqual(WS_TOO_MANY_PENDING, close_code(closed))
+        finally:
+            for wire in held:
+                await wire.close()
+        await asyncio.sleep(0.2)
+
+        good = await websockets.connect(self.url, additional_headers=AUTH)
+        await asyncio.sleep(0.1)
+        self.assertIsNone(good.close_code, "closing the flood did not release the pending slots")
+        await good.close()
+
+
+if __name__ == "__main__":
+    unittest.main()

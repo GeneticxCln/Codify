@@ -581,6 +581,17 @@ app.add_middleware(
     allow_headers=["Authorization", "Content-Type"],
 )
 
+# WebSocket handshake bounds. A browser always sends Origin on a WebSocket; the Tauri shell and a
+# command-line client need not, and are admitted by the token alone. A frame is never large: clients
+# send one auth message and otherwise frames are ignored, so 64 KiB is already generous.
+WS_MAX_MESSAGE_BYTES = 64 * 1024
+# How many sockets may be waiting on an auth frame at once. Each wait is bounded at five seconds, but
+# an unbounded number of them is still a descriptor and coroutine flood; this is the ceiling.
+WS_MAX_PENDING = 16
+WS_AUTH_TIMEOUT_S = 5.0
+WS_ORIGIN_REFUSED = 4403
+WS_TOO_MANY_PENDING = 4429
+
 
 @app.exception_handler(ApiError)
 async def api_error(_req: Request, exc: ApiError) -> JSONResponse:
@@ -3392,6 +3403,53 @@ async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
             pass
 
 
+async def _authenticate_ws(websocket: WebSocket) -> bool:
+    """One handshake for both WebSocket endpoints: Origin, token, and the pending-socket cap.
+
+    Auth used to be copied into `ws_engine` and `ws_goal`, which is how the two drift. It is one
+    function because the guarantees are one set: a browser-chosen Origin is checked against
+    `UI_ORIGINS` when it is present (a native client that sends none is admitted by its token), the
+    boot token is accepted on the Upgrade or as the same first `{"type": "auth"}` frame, and the
+    number of sockets waiting for that frame is capped so a flood cannot hold more than
+    `WS_MAX_PENDING` of the engine's descriptors and auth waits. The counter is per app state and
+    is decremented on every road out, including a disconnect during the wait.
+
+    Returns True with the socket accepted and authenticated. On False the socket has already been
+    accepted and closed with the reason (4401 bad token, 4403 foreign Origin, 4429 over the cap).
+    """
+    state = websocket.app.state
+    pending = int(getattr(state, "ws_pending", 0))
+    if pending >= WS_MAX_PENDING:
+        await websocket.accept()
+        await _close_quietly(websocket, WS_TOO_MANY_PENDING)
+        return False
+    state.ws_pending = pending + 1
+    try:
+        await websocket.accept()
+        origin = websocket.headers.get("origin")
+        if origin is not None and origin not in UI_ORIGINS:
+            await _close_quietly(websocket, WS_ORIGIN_REFUSED)
+            return False
+        expected_token = getattr(state, "token", None) or BOOT_TOKEN
+        auth_header = websocket.headers.get("authorization", "")
+        authenticated = _same_secret(auth_header, f"Bearer {expected_token}")
+        if not authenticated:
+            try:
+                msg = await asyncio.wait_for(websocket.receive_text(), timeout=WS_AUTH_TIMEOUT_S)
+                auth_msg = json.loads(msg)
+                token = str(auth_msg.get("token") or "")
+                if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):
+                    authenticated = True
+            except Exception:
+                pass
+        if not authenticated:
+            await _close_quietly(websocket, 4401)
+            return False
+        return True
+    finally:
+        state.ws_pending = max(0, int(getattr(state, "ws_pending", 1)) - 1)
+
+
 @app.websocket("/ws/engine")
 async def ws_engine(websocket: WebSocket) -> None:
     """Engine-level frames: today, one — the model catalogue moved.
@@ -3412,24 +3470,7 @@ async def ws_engine(websocket: WebSocket) -> None:
     connection sends nothing, and a client that sends nothing is how a dead
     socket gets noticed at all.
     """
-    expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
-    auth_header = websocket.headers.get("authorization", "")
-    authenticated = _same_secret(auth_header, f"Bearer {expected_token}")
-
-    await websocket.accept()
-
-    if not authenticated:
-        try:
-            msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
-            auth_msg = json.loads(msg)
-            token = str(auth_msg.get("token") or "")
-            if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):
-                authenticated = True
-        except Exception:
-            pass
-
-    if not authenticated:
-        await _close_quietly(websocket, 4401)
+    if not await _authenticate_ws(websocket):
         return
 
     queue: asyncio.Queue[str] = asyncio.Queue(maxsize=8)
@@ -3514,24 +3555,7 @@ async def _close_quietly(websocket: WebSocket, code: int) -> None:
 
 @app.websocket("/ws/goals/{goal_id}")
 async def ws_goal(websocket: WebSocket, goal_id: str, after: int = 0) -> None:
-    expected_token = getattr(websocket.app.state, "token", None) or BOOT_TOKEN
-    auth_header = websocket.headers.get("authorization", "")
-    authenticated = _same_secret(auth_header, f"Bearer {expected_token}")
-
-    await websocket.accept()
-
-    if not authenticated:
-        try:
-            msg = await asyncio.wait_for(websocket.receive_text(), timeout=5.0)
-            auth_msg = json.loads(msg)
-            token = str(auth_msg.get("token") or "")
-            if auth_msg.get("type") == "auth" and _same_secret(token, expected_token):
-                authenticated = True
-        except Exception:
-            pass
-
-    if not authenticated:
-        await _close_quietly(websocket, 4401)
+    if not await _authenticate_ws(websocket):
         return
 
     # Authenticated, but the goal must exist too — checking only after auth so
@@ -3661,6 +3685,9 @@ def serve() -> None:
         host="127.0.0.1",
         port=port,
         log_level="warning",
+        # Clients send one auth frame, or nothing; a frame larger than this is not a frame this
+        # engine has a use for. uvicorn enforces it before the handler sees it (close 1009).
+        ws_max_size=WS_MAX_MESSAGE_BYTES,
         # A stop request has to finish in bounded time. uvicorn's default here is
         # "wait for in-flight work, forever", and this engine's in-flight work is a
         # turn against a model — minutes of it, on a local one — or an event stream
