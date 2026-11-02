@@ -19,6 +19,14 @@ remote="${1:-origin}"
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$root"
 
+# Git hands a hook the repository it was started from: from a linked worktree that is
+# `GIT_DIR=<main>/.git/worktrees/<name>`. The gate's own tests run `git` in throwaway
+# repos, and an inherited GIT_DIR sends every one of those commands to *this* repository
+# instead, so the gate failed (dozens of unrelated tests) for exactly the pushes made
+# from a worktree and passed from a plain clone. This hook only runs `make`, so it
+# needs none of them; `git` finds the repository from the directory like anywhere else.
+unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_DIRECTORY GIT_ALTERNATE_OBJECT_DIRECTORIES
+
 # Only branch content is gated: a tag-only push, or a push that is nothing but
 # deletions, adds no source for the suite to have an opinion on. Say so out loud
 # rather than exiting quietly — a gate that skips silently is the failure mode this

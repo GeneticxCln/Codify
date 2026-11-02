@@ -63,6 +63,7 @@ def activate() -> str:
     # Before either branch below, and on every run: an inherited parent pid is
     # the one inherited value that can kill this process.
     disarm_parent_watchdogs()
+    drop_inherited_repository()
     pin_laya_sdk_off()
     quiet_slow_callback_notes()
 
@@ -76,6 +77,29 @@ def activate() -> str:
     # Leaving a directory behind on every run is its own small mess.
     atexit.register(shutil.rmtree, _scratch, True)
     return _scratch
+
+
+# The variables git exports to a hook (`git rev-parse --local-env-vars`) that name *which repository* a command
+# is about. Spelled out rather than asked of `git`: this runs at import, before anything may start a process.
+_LOCAL_GIT_ENV = (
+    "GIT_DIR", "GIT_WORK_TREE", "GIT_IMPLICIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_PREFIX", "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY", "GIT_ALTERNATE_OBJECT_DIRECTORIES", "GIT_NAMESPACE", "GIT_GRAFT_FILE",
+    "GIT_SHALLOW_FILE", "GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_REF_BASE", "GIT_CONFIG", "GIT_CONFIG_PARAMETERS",
+    "GIT_CONFIG_COUNT",
+)
+
+
+def drop_inherited_repository() -> None:
+    """Forget which repository the launcher was in, so a test's `git` can only mean its own.
+
+    A suite started from a git hook in a linked worktree inherits `GIT_DIR=<main>/.git/worktrees/<name>`, and
+    then every test that runs `git add` or `git commit` inside a throwaway directory acts on *the developer's
+    repository* instead: it committed four fixture commits onto the branch being pushed, and wrote
+    `core.bare=true`, `commit.gpgsign` and a `gpg.program` into the shared `.git/config`, which broke every
+    other worktree of that repository. A test that wants a repository makes one; it never needs this one.
+    """
+    for name in _LOCAL_GIT_ENV:
+        os.environ.pop(name, None)
 
 
 def disarm_parent_watchdogs() -> None:
