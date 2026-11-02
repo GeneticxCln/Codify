@@ -105,6 +105,8 @@ export type EventType =
    * Session drawer.
    */
   | "session_compacted"
+  | "review_lens"
+  | "review_report"
   /**
    * The engine's own per-stage measurement (docs/04 §4.7). Listed here because
    * the engine publishes it into this goal's log, so `GET /goals/{id}/events`
@@ -683,6 +685,8 @@ export interface EngineSettings {
   sandbox_network?: EngineSettingValue;
   /** 1 = an unavailable pre-flight gate refuses the turn instead of warning (docs/05 §3). */
   laya_required?: EngineSettingValue;
+  /** 1 = two fresh-context review lenses read each step before the critic decides (docs/21 P1). Off by default. */
+  review_deep?: EngineSettingValue;
   /** 1 = summarise older thread turns automatically before answering. */
   session_compact_auto?: EngineSettingValue;
   /** How many recent turns stay verbatim beside the summary. */

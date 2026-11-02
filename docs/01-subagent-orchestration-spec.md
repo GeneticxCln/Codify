@@ -36,6 +36,16 @@ librarian, so it locks a direction from evidence rather than from a blank page);
 settings screen renders that rather than keeping its own description — a second copy is how a screen
 ends up promising an ability the engine no longer grants.
 
+**Deep review.** The engine-wide switch `review_deep` (0 by default; `PUT /settings/engine`, so a person's, never a
+goal's or a model's) puts two fresh-context readers before the critic's decision. Each is a `critic` call with a
+different system prompt (a lens is a parameter, never a ninth role) and is shown only the packet `engine/review.py`
+builds: the request, the step, the acceptance lines, the diff and the paths. The librarian's evidence and the
+fixer's summaries never reach a lens. A third lens, readiness (do the paths the step names exist, did source change
+with no test), is answered from the disk with no model call. The merged findings are appended to the critic's own
+prompt as evidence, and the critic still decides. A lens whose reply is unusable after the one re-ask is recorded
+`not_run` and not retried; if no model lens ran, the critic is sent exactly its standard prompt. Typical cost is two
+extra model calls per reviewed step, and the events are `review_lens` and `review_report` (the event table in `04`).
+
 The gate is not a pipeline stage: it runs once per goal before the librarian and never receives or
 produces a `PlanStep`. See `05` for its typed contract, engines, and blocking policy.
 

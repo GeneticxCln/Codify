@@ -30,8 +30,9 @@ workstreams of roughly 13–14 days, because four of its premises did not hold (
 2. **A review packet excludes author context.** The packet holds the step title and request, the acceptance lines, the
    diff and the cited paths. It holds no librarian evidence, no fixer summary and no plan rationale — that is what makes
    the reader a goldfish. The standard critic prompt is unchanged, byte for byte, and a golden test holds it.
-3. **The review move takes no `depth` argument.** Depth is `review_depth` (`standard` | `deep`, default `standard`) in
+3. **The review move takes no `depth` argument.** Depth is the `review_deep` switch (0 or 1, default 0) in
    `engine_settings`, written only by `PUT /settings/engine` (invariant 2). A model or a skill cannot raise spend.
+   It is a 0/1 switch like `laya_required` rather than a `standard`/`deep` string, because it has two states.
 4. **A health verdict is recorded by a person, not an agent.** An agent may propose verdicts in a plan-only goal; it
    records nothing, and no tool reaches the recording route. (Invariants 2 and 9 in spirit: the person owns the outcome.)
 5. **Health records, if built, live in SQLite** (`~/.codify/codify.db`, invariant 7), never in a workspace file, because
@@ -48,7 +49,7 @@ None of this adds a gate mechanism: a new check joins `make check` or an existin
 **P0 — Clarity. Status: built in this change.** `CLAUDE.md` trimmed from 21.8 KB to under 12 KB with every invariant
 quote byte-identical; a byte cap in `tests/test_claude_md_contracts.py`; this document registered in all four places.
 
-**P1 — Goldfish review. Status: planned.**
+**P1 — Goldfish review. Status: engine and UI built (`engine/review.py`, the deep path in `_critic`, `review_deep`, the two events, `ReviewReport.tsx`, `DeepReviewCard.tsx`, the audit lane); the benchmark is planned.**
 - `engine/review.py`, pure: `ReviewPacket`, one `build_packet`, `parse_findings` (severity `blocker|major|nit`, non-empty
   scope and recommendation), a deterministic `synthesize` (dedupe by file, line and category; severity max; lens list kept),
   `render_report`. Lenses: *zoom-out* (YAGNI, reuse, premature abstraction), *comprehension* (can a fresh reader follow
@@ -62,7 +63,7 @@ quote byte-identical; a byte cap in `tests/test_claude_md_contracts.py`; this do
 - Proof: a review tier of seeded-defect tasks (off-by-one, missing call site, path escape, untested branch), several
   attempts each. Under the canned provider only the wiring is checked and quality checks report `skipped`, never `passed`.
   The default stays `standard`; the measured recall and false-positive counts are reported as they come out.
-- Rollback: set `review_depth` to `standard`. No migration.
+- Rollback: set `review_deep` to 0. No migration.
 
 **P2 — Project health. Status: planned, deliberately small.** A `builtin_health.json` of checklist items, each mapped to
 a capability that exists (`scan_code`, `audit_usage`, `design-review`, `security-review`, `wide-audit`, `prove`), and a

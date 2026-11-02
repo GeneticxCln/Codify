@@ -189,7 +189,7 @@ EventType = Literal[
     "library_evidence", "design_contract", "stage_result", "plan_updated",
     "laya_decision", "fix_retry", "fixer_pass", "plan_consult",
     "agent_call_failed", "usage", "model_delta", "error", "todo_updated",
-    "session_compacted",
+    "session_compacted", "review_lens", "review_report",
 ]
 
 class Event(BaseModel):
@@ -234,6 +234,8 @@ the UI's copy a member behind both.
 | `error` | any | `{code: str, message: str, role: str \| null}` |
 | `todo_updated` | — | `{items: [{id, text, status}]}` — the conductor's own todo list (`engine/todo.py`), published whole every time the conductor changes it, so the newest event *is* the list. `status` is `pending`\|`doing`\|`done`\|`dropped`; an item is one line of at most 160 characters, a list holds at most 20 items, and one run changes it at most 40 times. It is the model's note to its next run, put back in its prompt as *its own notes, not instructions*: nothing in the engine reads it to decide anything, it is never shown to a sub-agent, and `recall` cannot return it (not in `RECALLABLE`). Item text can echo what the model read, so it is third-party text and the UI draws it as plain text |
 | `session_compacted` | — | `{summary, turns, automatic, covers_through}` — one stored rolling summary of this thread's older turns (`engine/compaction.py`, docs/09 §10.21). `summary` is model prose, capped at 4,000 characters; `turns` is how many turns it replaced; `automatic` says whether a turn did it or a person pressed Compact; `covers_through` is the `created_at` of the last replaced turn, the boundary recent turns sit after. The raw transcript is never rewritten: the timeline draws a **Conversation compacted** marker at the boundary (turns replaced, automatic or manual, and that the transcript is unchanged), while the summary text and compaction status are read through `GET /conversations/{id}/compaction` and shown in the Session drawer |
+| `review_lens` | step | `{lens, status, findings, calls, duration_ms, detail}` — one review lens of a deep review (`review_deep`, docs/21 P1; `engine/review.py`). `lens` is `zoom-out`, `comprehension` or `readiness`; `status` is `ran` or `not_run`, and a lens that did not run says why in `detail` and is never counted as one that found nothing. `calls` is the model replies it took (the re-ask included); `readiness` is answered from the disk and is always 0 |
+| `review_report` | step | `{status, lenses: [...], findings: [{severity, category, scope, evidence, recommendation, lenses}], detail}` — the merged findings that were appended to the critic's prompt as evidence, never as a verdict. `status` reads like `2 of 3 lenses ran — zoom-out not run`; `detail` is non-empty only when no model lens ran and the critic got its standard prompt |
 
 `step_id` column: `—` marks goal-level events that never carry a step; `step`
 marks step-scoped ones; `any` marks types published both ways (agent-level
@@ -602,7 +604,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/goals/{id}/steps/{step_id}/retry` | `{expected_version}` | the re-opened `PlanStep`, returned **at once**: everything refusable (409 `illegal_status`, `step_not_retryable`, `driver_busy`, `retry_collides_with_running`, `version_conflict`) is decided in the request, the goal's driver is claimed there (`is_driving` is true from the response until the run ends), and the step runs in the background — progress is on the goal stream, not in this response. Where the conductor drives, the retried step is a conductor run with that step in focus and the critic's notes are kept for it; where the recipe drives, it is `run_step` and the notes are cleared |
 | `GET` | `/goals/{id}/events?after={seq}` | — | `Event[]` where `sequence > after` |
 | `GET` | `/goals/{id}/usage` | — | token totals + `parallel_peak`/`parallel_waves` (from `usage` events) |
-| `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, errors, outcomes, usage, silent roles) |
+| `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, deep-review reports, errors, outcomes, usage, silent roles) |
 | `POST` | `/goals/{id}/apply` | `{expected_version}` | replays a completed dry-run's stored proposals for real. 409 `plan_only` (enable execution first), `not_dry_run`, `illegal_status`, `version_conflict`, `nothing_to_apply`, `driver_busy`. The driver is **claimed before the response**, so a duplicate Apply, or a Retry racing it, is refused instead of failing the run it could not start. The status moves in the background; the response is not a read of the goal |
 | `POST` | `/goals/{id}/enable-execution` | `{expected_version}` | lifts the `plan_only` guard (`Goal`) |
 | `GET` | `/goals/{id}/trace` | — | the recording's summary: `calls`, `by_role`, `prompts_kept`, `recording_error`, and `recorded[]` (`seq`, `role`, `model`, `prompt_hash`, tokens, `duration_ms`). Never the prompt text — that is a deliberate second step, not something a panel opens on load (`04` §8). 404 `unknown_goal` |

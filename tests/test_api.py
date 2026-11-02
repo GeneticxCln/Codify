@@ -2485,6 +2485,15 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
             "role": "planner", "provider": "ollama", "model": "qwen3:8b",
             "input_tokens": 200, "output_tokens": 50, "total_tokens": 250,
         }, 107.0))
+        # A deep review's merged report rides into the audit document as it was published.
+        app.state.goals.publish(ev("rr1", "review_report", {
+            "status": "2 of 3 lenses ran — comprehension not run", "detail": "",
+            "lenses": [{"lens": "zoom-out", "status": "ran", "findings": 1, "calls": 1, "duration_ms": 3}],
+            "findings": [{
+                "severity": "major", "category": "call-site", "scope": "a.py:1", "evidence": "",
+                "recommendation": "fix it", "lenses": ["zoom-out"],
+            }],
+        }, 104.5))
         # s1 never gets a terminal status — the engine died here.
 
         # Assignment without completion: the critic was announced but never
@@ -2519,6 +2528,10 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(body["fix_retries"]), 1)
         self.assertEqual(body["fix_retries"][0]["attempt"], 1)
+
+        self.assertEqual(1, len(body["review_reports"]))
+        self.assertEqual("2 of 3 lenses ran — comprehension not run", body["review_reports"][0]["status"])
+        self.assertEqual("major", body["review_reports"][0]["findings"][0]["severity"])
 
         self.assertEqual(len(body["errors"]), 1)
         err = body["errors"][0]
@@ -2606,6 +2619,32 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(r.status_code, 400)
         self.assertEqual(r.json()["code"], "unknown_setting")
+
+    async def test_review_deep_is_a_person_s_engine_switch_and_a_goal_cannot_carry_it(self) -> None:
+        """Deep review costs extra model calls on every reviewed step, so only `PUT /settings/engine` turns it on.
+
+        A goal that tried to carry the switch would be a client choosing its own spend; `POST /goals` refuses
+        unknown fields (docs/00 §6.2), and this pins that for the one new setting.
+        """
+        r = await self.client.get("/settings/engine", headers=self.headers)
+        self.assertEqual({"value": 0, "min": 0, "max": 1}, r.json()["review_deep"])
+
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"review_deep": True})
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertEqual(1, r.json()["saved"]["review_deep"], "a checkbox's true is a 1")
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"review_deep": 7})
+        self.assertEqual(1, r.json()["saved"]["review_deep"], "anything truthy is the switch on, not a level")
+        r = await self.client.put("/settings/engine", headers=self.headers, json={"review_deep": 0})
+        self.assertEqual(0, r.json()["saved"]["review_deep"])
+
+        ws_id = (await self.client.post(
+            "/workspaces", headers=self.headers, json={"name": "W", "root_path": str(self.root)},
+        )).json()["id"]
+        r = await self.client.post(
+            "/goals", headers=self.headers,
+            json={"workspace_id": ws_id, "title": "spend more", "review_deep": 1},
+        )
+        self.assertEqual(422, r.status_code, "a goal must not carry the switch")
 
     async def test_agent_skills_are_listed_and_their_toggles_are_per_workspace(self) -> None:
         """The skills tab reads one workspace's real menu and saves two independent sets.

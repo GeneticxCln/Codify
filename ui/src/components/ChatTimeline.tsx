@@ -18,6 +18,7 @@ import { DiffViewer } from "./DiffViewer";
 import type { LayaDecision } from "../types";
 import { getAudioStatus, getGoalUsage, GoalUsage, getGoalAudit } from "../api";
 import { AuditReport } from "./AuditReport";
+import { ReviewReport, looksLikeReviewReport } from "./ReviewReport";
 import { TracePanel } from "./TracePanel";
 import { canArmTrace } from "../traceSummary";
 import { COMPOSER_ANCHOR_ID } from "../composerAnchor";
@@ -1883,11 +1884,23 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 // lines in the log for a planner that consulted the
                                 // librarian four times — which reads as four agents.
                                 if (ev.type === "agent_assigned") return;
+                                // `review_lens` is one reader of a deep review, and the `review_report`
+                                // card below already draws every reader with its status. A line each here
+                                // would say the same thing three times, once per lens.
+                                if (ev.type === "review_lens") return;
                                 rendered.push(
                                   <div key={ev.sequence} className="text-xs">
                                     {ev.type === "session_compacted" && (
                                       <CompactionMarker event={ev} />
                                     )}
+
+                                    {/* A deep review's merged findings. The per-lens events
+                              are folded into this card's lens row, so they
+                              render nothing of their own. */}
+                                    {ev.type === "review_report" &&
+                                      looksLikeReviewReport(ev.payload) && (
+                                        <ReviewReport report={ev.payload} />
+                                      )}
 
                                     {ev.type === "diff" && (
                                       <DiffViewer

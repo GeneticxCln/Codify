@@ -11,8 +11,11 @@ from __future__ import annotations
 import asyncio
 import os
 import subprocess
+import time
+from pathlib import Path
 from typing import Any
 
+from engine import review
 from engine.executor_design import DELIVERABLE_ROLE, DELIVERABLE_SUBJECT, MAX_DESIGN_MD_CHARS
 from engine.executor_support import (
     AgentOutputInvalid,
@@ -1221,6 +1224,10 @@ class _Steps(_Design):
             # so this review does not re-litigate what text comparison settled.
             + self._critic_design_section(goal_id, step, ws_root, test_outcome)
         )
+        # Deep review (docs/21 P1): independent readers' findings ride after the critic's own prompt, so the
+        # standard prompt is a strict prefix of the deep one and `review_deep` off changes nothing at all.
+        if self._review_deep():
+            base_prompt += await self._review_lenses(goal_id, step, diffs, ws_root)
         commands_left = MAX_CRITIC_COMMANDS
         prompt = base_prompt
 
@@ -1298,6 +1305,81 @@ class _Steps(_Design):
                 self._pause(goal_id, step.id, "critic_rejected")
                 raise CriticRejection("critic requested changes; human retry required", reasons)
             raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
+
+    async def _review_lenses(
+        self, goal_id: str, step: PlanStep, diffs: list[dict[str, Any]], ws_root: str,
+    ) -> str:
+        """Run the review lenses over a fresh-context packet and return what the critic is told about them.
+
+        Two lenses cost a model call each (`review.MODEL_LENSES`); readiness is answered from the disk. The
+        packet is built from the request, the step, the acceptance lines and the diff only, so a lens cannot
+        be influenced by the librarian's evidence or the author's summaries. A lens whose reply cannot be used
+        (after the re-ask every reply gets) is recorded `not_run` and is not retried: a retry is a call the
+        cap did not price. A lens that did not run is never reported as one that found nothing, and when no
+        model lens ran at all the critic gets its standard prompt and the report says it fell back.
+        """
+        goal = self.goals.get(goal_id)
+        design = self._design_for(goal_id)
+        packet = review.build_packet(
+            request=f"{goal.title}\n{goal.description}".strip(),
+            step_title=step.title,
+            step_description=step.description,
+            acceptance=[str(a) for a in design.get("acceptance") or []],
+            diffs=diffs,
+        )
+        runs: list[review.LensRun] = []
+        found: list[review.Finding] = []
+        for lens in review.MODEL_LENSES:
+            started = time.monotonic()
+            replies = 0
+            lens_findings: list[review.Finding] = []
+
+            def accept(reply: Any, lens: str = lens) -> None:
+                nonlocal replies
+                replies += 1
+                review.parse_findings(reply, lens)
+
+            try:
+                reply = await self.orchestrator.run_agent(
+                    "critic", goal_id, step.id, packet.text(),
+                    system=review.lens_system_prompt(lens), accept=accept,
+                )
+                lens_findings = review.parse_findings(reply, lens)
+                status, detail = "ran", ""
+            except (AgentOutputInvalid, ProviderError) as exc:
+                status, detail = "not_run", str(exc)[:200]
+                self._log(goal_id, step.id, "warn", f"review lens {lens} did not run: {detail}")
+            found += lens_findings
+            runs.append(review.LensRun(
+                lens=lens, status=status, findings=len(lens_findings), calls=replies,
+                duration_ms=int((time.monotonic() - started) * 1000), detail=detail,
+            ))
+            self.goals.publish(self._event(goal_id, step.id, "review_lens", dict(runs[-1].__dict__)))
+
+        started = time.monotonic()
+        root = Path(ws_root)
+
+        def exists(rel: str) -> bool:
+            target = (root / rel).resolve()
+            return target.is_relative_to(root.resolve()) and target.exists()
+
+        mechanical = review.readiness_findings(step.suggested_paths, [str(d["path"]) for d in diffs], exists)
+        found += mechanical
+        runs.append(review.LensRun(
+            lens=review.READINESS, status="ran", findings=len(mechanical), calls=0,
+            duration_ms=int((time.monotonic() - started) * 1000),
+        ))
+        self.goals.publish(self._event(goal_id, step.id, "review_lens", dict(runs[-1].__dict__)))
+
+        report = review.ReviewReport(runs=tuple(runs), findings=tuple(review.synthesize(found)))
+        payload = report.payload()
+        if not any(r.status == "ran" for r in runs if r.lens in review.MODEL_LENSES):
+            payload["detail"] = "fell back to the standard single review: no model lens produced a usable reply"
+            self.goals.publish(self._event(goal_id, step.id, "review_report", payload))
+            return ""
+        payload["detail"] = ""
+        self.goals.publish(self._event(goal_id, step.id, "review_report", payload))
+        return review.render_for_critic(report)
 
     def _critic_design_section(
         self, goal_id: str, step: PlanStep, ws_root: str, test_outcome: dict[str, Any] | None,

@@ -660,6 +660,7 @@ export async function saveEngineSettings(
     sandbox_isolation?: string;
     sandbox_network?: boolean;
     laya_required?: boolean;
+    review_deep?: boolean;
     session_compact_auto?: boolean;
     session_compact_keep_turns?: number;
   }

@@ -99,6 +99,8 @@ EventType = Literal[
     "error",
     "todo_updated",
     "session_compacted",
+    "review_lens",
+    "review_report",
 ]
 
 SYSTEM_PROMPT_OVERRIDE_MAX = 32768

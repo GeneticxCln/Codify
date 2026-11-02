@@ -1,10 +1,10 @@
 ---
 name: docs-contract-keeper
-description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00–20 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
+description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00–21 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
 tools: Read, Grep, Glob
 ---
 
-`docs/00`–`20` are binding contracts, not background reading. `CONTRIBUTING.md` is
+`docs/00`–`21` are binding contracts, not background reading. `CONTRIBUTING.md` is
 blunt about it: *"The docs have lied before; don't add to it."* A contract that
 changed while its doc stayed put is worse than a doc that was never written, because
 the next contributor trusts it.
@@ -38,6 +38,7 @@ Each row names the doc that owns a subject and the change that invalidates it.
 | Release, updates, the packaged engine | `docs/18` | The tag rule, the bundle, the update button's reach |
 | The 24 native recipes and which actions stay with a person | `docs/19` | A built-in skill, a person-only action |
 | MCP admission: remote-only, per-tool Read/Act, invariant 10 | `docs/20` | A transport, an admitted address, a call bound, a tool's authority |
+| The improvement plan: review lenses, project health, cache diagnostics, the size budget, skill contracts, and each phase's status | `docs/21` | A phase built or dropped without its status line changing; a decision reversed; a number the plan quotes |
 
 Not every code change is a contract change. Renaming a local variable, restructuring
 a function body, or fixing a typo in a comment usually is not. Say which of those a
