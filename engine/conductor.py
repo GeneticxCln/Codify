@@ -88,6 +88,7 @@ past a refusal — it is told so and the refusal stands.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import dataclass
 from typing import Any, Protocol
@@ -184,6 +185,28 @@ _VERBATIM_REFUSALS = {
 # nothing about the temperature a call ran at could not be compared with another run.
 CALL_TEMPERATURE = 0.2
 CALL_MAX_TOKENS = 2048
+
+# Tools that only read, and that a reply may ask for several of at once. Every one is confined to this
+# workspace and none takes the sandbox or git lock, so running them together can change how long a turn takes and
+# nothing else. A tool that writes, runs a command, ends the turn or touches the window is deliberately not here:
+# it stays one at a time, in the order the model asked.
+CONCURRENT_READ_TOOLS: frozenset[str] = frozenset({"read_file", "search_code", "git_history", "recall"})
+MAX_CONCURRENT_READS = 4
+
+
+def _batches(calls: list[Any]) -> list[list[Any]]:
+    """Split one reply's calls into runs: consecutive read-only calls together, anything else alone.
+
+    Order is kept, so a `run_command` between two reads is a barrier: the second read never overtakes it.
+    """
+    out: list[list[Any]] = []
+    for call in calls:
+        if call.name in CONCURRENT_READ_TOOLS and out and out[-1][0].name in CONCURRENT_READ_TOOLS:
+            out[-1].append(call)
+        else:
+            out.append([call])
+    return out
+
 
 # Refusals the model is shown but cannot argue with. Everything else is
 # recoverable and comes back as text.
@@ -642,23 +665,52 @@ class Conductor:
                     "Ask me to continue and I will pick it up."
                 )
 
-            for call in reply.tool_calls:
-                # Between the calls of one reply too: a model that asked for three tools and
+            for batch in _batches(reply.tool_calls):
+                # Between the batches of one reply too: a model that asked for three tools and
                 # was cancelled during the first must not get to run the other two.
                 if self._is_cancelled():
                     return ""
-                content = await self._run_tool(call, messages)
-                self.tools_used.append(call.name)
-                messages.append({
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": content,
-                })
+                # A batch of one is the old loop exactly. A longer one is consecutive read-only calls, run
+                # together; the results below are still handed back in the order the model asked.
+                contents = await self._run_batch(batch, messages)
+                for call, content in zip(batch, contents, strict=True):
+                    if content is None:
+                        continue  # cancelled before it started: never run, so nothing to hand back
+                    self.tools_used.append(call.name)
+                    messages.append({
+                        "role": "tool",
+                        "tool_call_id": call.id,
+                        "name": call.name,
+                        "content": content,
+                    })
                 if self.ended is not None:
                     # The person has been asked something. The rest of this reply is dropped unrun: a tool
                     # that ran after the question would be a move made while its answer was still unknown.
+                    # `ask_user` is never in a batch, so everything before it has already finished.
                     return self.ended.reply
+                if None in contents:
+                    return ""
+
+    async def _run_batch(self, batch: list[Any], messages: list[dict[str, Any]]) -> list[str | None]:
+        """The results of one batch, in call order; None for a call a cancel stopped before it began.
+
+        At most `MAX_CONCURRENT_READS` run at once. Cancel is looked at again as each call is about to start,
+        because the calls of a batch are admitted together and the serial loop's promise was that a call asked
+        for after the cancel does not run.
+        """
+        if len(batch) == 1:
+            return [await self._run_tool(batch[0], messages)]
+        # FIFO, so the "same call as the one just before" check in `_run_tool` still sees the call that
+        # started last, which is the call before this one in the reply.
+        gate = asyncio.Semaphore(MAX_CONCURRENT_READS)
+
+        async def one(call: Any) -> str | None:
+            async with gate:
+                if self._is_cancelled():
+                    return None
+                return await self._run_tool(call, messages)
+
+        return list(await asyncio.gather(*(one(c) for c in batch)))
 
     def _budget_refusal(self, name: str) -> str:
         return (

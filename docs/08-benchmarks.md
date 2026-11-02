@@ -475,3 +475,56 @@ conductor beyond those three turns and one small model, any hosted model beyond 
 endpoint, and any hardware but one CPU. `--min-pass-rate` exists to enforce a floor, but a floor
 is only worth setting against a baseline recorded with the model *you* use: 12% (4 of 33, and 9% to 18% between
 rounds) is a fact about a 1.5B model, not a target.
+
+## 9. The parallel-steps spike: measure before building
+
+**Question.** Should an approved plan's steps run together under the conductor? Today they cannot. The conductor takes
+one step at a time (`run_conductor_resume`), and steps run together only on the recipe driver, for a `parallel` goal, in
+batches `_independent_batch` can prove path-disjoint from the planner's `suggested_paths` (`_run_parallel`; `docs/09`
+§10.7). A `parallel` goal therefore also gives up the conductor. A conductor-driven version would need that same gate,
+so the spike measures what the gate is worth before anything is built on it.
+
+**Run it.** `python3 -m benchmarks.parallel_spike --steps 4 --latency 0.5` (hermetic: no network, no model, no spend; the
+latency is a sleep in every scripted model call). It drives the engine's own `_run_steps_locked`, the loop
+`POST /goals/{id}/start` runs, over four configurations: **A** recipe sequential, **B** recipe parallel with disjoint
+declared paths, **C** recipe parallel with overlapping declared paths (the gate's refusal), **D** conductor sequential.
+`tests/test_parallel_spike.py` keeps it honest; it is not part of `make bench-smoke` and gates nothing.
+
+**What it measured** (one machine, width 4, one run each; a ratio, not a benchmark):
+
+| Steps | Latency per call | A | B | B over A | C over A | D (conductor) | Calls A / D |
+|---|---|---|---|---|---|---|---|
+| 4 | 0.05 s | 2.19 s | 1.55 s | 1.41x | 1.01x | 3.23 s | 16 / 36 |
+| 4 | 0.5 s | 9.40 s | 3.37 s | 2.79x | 1.00x | 19.48 s | 16 / 36 |
+| 8 | 0.5 s | 18.82 s | 6.71 s | 2.80x | 1.00x | 38.94 s | 32 / 72 |
+
+**What it shows.**
+
+1. **The gate is correct.** Every configuration completed every step with exactly one commit per step and the same files
+   on disk, so running steps together changed the time and nothing else. A plan whose declared paths overlap runs
+   exactly as slowly as a sequential one (C over A is 1.0x): the refusal costs nothing and breaks nothing.
+2. **The win depends on what a model call costs.** With 50 ms calls the fixed work (git commits, the file operations)
+   dominates and the speedup is 1.41x. At 500 ms it is 2.8x, which is the width (4) less the serialised commits, and
+   more steps did not raise it (8 steps: 2.80x). A real local model takes seconds, so the regime that matters is the
+   second one.
+3. **The conductor costs 2.25x the model calls of the recipe** for the same plan (36 against 16: each step is `write`,
+   `verify`, `review`, `summarize`, each one a sub-agent call, plus the conductor's own call before each). If it got B's
+   speedup, D would fall from 19.5 s to about 7.0 s, but a recipe run already takes 9.4 s sequentially. So the build
+   buys a conductor that is 2.8x faster than today's, not a conductor that beats the recipe.
+
+**What it does not show, and why it decides the question.**
+
+* **Whether a model plans disjoint steps.** The scripted planner names a file per step. If real planners usually name
+  shared paths (a test file, a `README`, an index), the gate refuses and the speedup is the 1.0x of row C. Only the
+  `repo_scale` tier with a real model can say, and nothing has measured it.
+* **The sandbox.** The scripted verifier proposes no command, so the sandbox lock (now one per workspace, `docs/09`
+  §10.7) is never taken. Real verification is a test run that serialises inside one workspace, and the speedup
+  falls with the share of a step that is spent in it.
+* **Quality.** A canned provider cannot say whether four concurrent fixers produce a worse result than four in turn.
+
+**Decision: not built.** The scheduler is not the obstacle (the gate is correct and the ceiling is real), but the build
+is worth making only if planners emit disjoint paths often enough, and that is unmeasured. **Revisit** when a
+`repo_scale` run with a real model records, per plan, whether `_independent_batch` *would have* found a batch larger than
+one. Nothing records that yet: `parallel_peak` and `parallel_waves` (`_parallel_peak_from_events`) say what a `parallel`
+goal actually ran together, and a sequential goal never asks the gate. A read-only call to `_independent_batch` at plan
+time, logged on the plan event, is the cheap next step, and it does not change what any run does.

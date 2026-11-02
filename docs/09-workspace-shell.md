@@ -2692,6 +2692,23 @@ next request anyway, so a model that kept asking kept the loop running forever â
 A turn that was cut off says so. One that trails off mid-thought reads as a bug
 rather than as the bound it is.
 
+**Reads in one reply overlap; nothing else does.** When a reply asks for several of `read_file`,
+`search_code`, `git_history` and `recall` in a row, the loop runs that run of calls together, at most four at a time
+(`MAX_CONCURRENT_READS`), so three slow reads cost about one read's time. Each is confined to the workspace and none
+takes the sandbox or git lock. Everything else is a barrier and runs alone, in the order the model asked: a
+`run_command`, a stage move, `ask_user`, a browser or editor action. What the serial loop promised still holds, and
+`tests/test_conductor_concurrent_reads.py` pins it. The results are handed back in the order the model asked, whichever
+finished first; a cancel is looked at again as each call is about to start, so a read not yet started when it came
+never runs; `ask_user` ends the run only after the reads before it have finished and drops everything after it; and an
+identical call right after another is still refused rather than run twice. This does not widen what a tool may read:
+the set is a constant, and a tool joins it by being read-only, not by being asked for twice.
+
+The sandbox lock that keeps one command from running in a tree another is measuring is **per workspace tree**
+(`ExecutorService.sandbox_lock(root)`, keyed by resolved path), not one for the engine. Inside a workspace nothing
+changed: a verifier's test, the critic's probe and the conductor's `run_command` still take turns, so a write never
+moves under a read-only probe. A long test in one workspace no longer holds up another workspace's commands
+(`tests/test_sandbox_lock_per_workspace.py`). The git lock is still engine-wide.
+
 ### 10.8 Failure is a sentence, not a crash
 
 An invented tool name, a malformed argument, a tool that raised â€” each comes back

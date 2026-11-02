@@ -175,7 +175,9 @@ class _ExecutorCore:
         # Shared-resource locks for parallel goals. asyncio.Lock() is loop-lazy
         # (binds on first acquire), so constructing here — before any loop
         # exists — is safe.
-        self._sandbox_lock = asyncio.Lock()
+        # One sandbox lock per workspace tree (`sandbox_lock`), not one for the engine: what the lock protects is a
+        # directory, so two workspaces have no reason to wait on each other's commands.
+        self._sandbox_locks: dict[str, asyncio.Lock] = {}
         self._git_lock = asyncio.Lock()
         # Optional settings store (SettingsService). Attached by app lifespan
         # when present; tests without one just get the default width.
@@ -373,6 +375,16 @@ class _ExecutorCore:
 
     def release_driver(self, goal_id: str) -> None:
         self._drivers.discard(goal_id)
+
+    def sandbox_lock(self, root: str | os.PathLike[str]) -> asyncio.Lock:
+        """The lock a command in this workspace tree holds while it runs.
+
+        Per tree, by resolved path: under a parallel goal another step's test must not run in the tree a command
+        is measuring, and a read-only probe must not see a write move under it. That is a rule about one
+        directory. Two workspaces share nothing, so a long test in one no longer holds up the other's commands.
+        The same tree reached by two spellings (a symlink) is one lock.
+        """
+        return self._sandbox_locks.setdefault(os.path.realpath(root), asyncio.Lock())
 
     def cancel_signal(self, goal_id: str) -> threading.Event:
         """The signal a sandboxed command of this goal watches, so a Cancel stops it where it runs."""

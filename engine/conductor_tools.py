@@ -472,8 +472,11 @@ class ConductorTools:
         )
 
     async def read_file(self, args: dict[str, Any]) -> str:
+        # Off the event loop, like the other reads: a reply can ask for several at once, and a read that
+        # blocks the loop is a read nothing can overlap with.
         return format_read(
-            self.library.read(
+            await asyncio.to_thread(
+                self.library.read,
                 str(args.get("path") or ""),
                 args.get("offset"),
                 args.get("limit"),
@@ -634,7 +637,7 @@ class ConductorTools:
         # not run in the tree this command is measuring.
         # `to_thread` re-raises in the awaiter, so a refusal still arrives as
         # `CommandNotAllowed` — the behaviour this tool already had.
-        async with self.service._sandbox_lock:
+        async with self.service.sandbox_lock(self.root):
             result = await asyncio.to_thread(
                 self.service.sandbox.run_command, self.root, argv,
                 mode="test" if approved else "read_only",
@@ -877,7 +880,8 @@ class ConductorTools:
                 "message fragment, a path or a stage name."
             )
         days = args.get("days")
-        rows = self.service.goals.recall_events(
+        rows = await asyncio.to_thread(
+            self.service.goals.recall_events,
             self.goal.workspace_id,
             window_days=int(days) if isinstance(days, int) else 0,
         )
