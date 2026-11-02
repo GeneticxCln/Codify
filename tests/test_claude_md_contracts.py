@@ -778,3 +778,39 @@ class TestTheMachineToolsAreNamed(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestTheAgentFilesCountWhatTheDocsCount(unittest.TestCase):
+    """An agent that says "nine invariants" about a list of ten reviews nine."""
+
+    NUMBER_WORDS = {
+        "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10, "eleven": 11, "twelve": 12,
+    }
+
+    def _owner_invariants(self) -> int:
+        text = next(PROJECT_ROOT.glob("docs/00-*.md")).read_text(encoding="utf-8")
+        section = text.split("## 6. Invariants", 1)[1].split("\n## 7", 1)[0]
+        return len(re.findall(r"(?m)^### 6\.\d+", section)) or len(re.findall(r"(?m)^\d+\.\s", section))
+
+    def test_no_agent_file_names_a_wrong_invariant_count(self) -> None:
+        expected = self._owner_invariants()
+        self.assertGreaterEqual(expected, 10, "could not count the invariants in docs/00 §6")
+        for path in (PROJECT_ROOT / ".claude" / "agents").glob("*.md"):
+            text = path.read_text(encoding="utf-8")
+            for word, number in self.NUMBER_WORDS.items():
+                if re.search(rf"\b{word} (?:non-negotiable )?invariants\b", text, re.I):
+                    with self.subTest(file=path.name, said=word):
+                        self.assertEqual(
+                            expected, number,
+                            f"{path.name} says {word} invariants; docs/00 §6 has {expected}",
+                        )
+
+    def test_the_contract_keeper_maps_every_numbered_doc(self) -> None:
+        keeper = (PROJECT_ROOT / ".claude" / "agents" / "docs-contract-keeper.md").read_text(encoding="utf-8")
+        for doc in sorted((PROJECT_ROOT / "docs").glob("[0-9][0-9]-*.md")):
+            number = doc.name[:2]
+            with self.subTest(doc=number):
+                self.assertIn(
+                    f"`docs/{number}`", keeper,
+                    f"docs-contract-keeper has no row for docs/{number}, so a change to its subject is never checked",
+                )

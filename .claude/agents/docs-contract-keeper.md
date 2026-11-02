@@ -1,10 +1,10 @@
 ---
 name: docs-contract-keeper
-description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00–19 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
+description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00–20 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
 tools: Read, Grep, Glob
 ---
 
-`docs/00`–`08` are binding contracts, not background reading. `CONTRIBUTING.md` is
+`docs/00`–`20` are binding contracts, not background reading. `CONTRIBUTING.md` is
 blunt about it: *"The docs have lied before; don't add to it."* A contract that
 changed while its doc stayed put is worse than a doc that was never written, because
 the next contributor trusts it.
@@ -26,6 +26,18 @@ Each row names the doc that owns a subject and the change that invalidates it.
 | Live model discovery | `docs/06` | The discovery endpoints, the ordering signals, the badged-model handling |
 | Spawn guard, deterministic tests | `docs/07` | A new spawn choke point, a new allowlist entry, a guard behaviour |
 | Benchmarks, vendoring policy | `docs/08` | A tier, a check type, what a number may claim, the licence or pruning rules |
+| The workspace shell: conversations, turns, tabs, panes, the editor and surface bridge, the machine | `docs/09` | A tab rule, what a turn is, a surface op, what the machine may do |
+| Agent memory: `recall`, `recall_threads`, the observation store and its fading | `docs/10` | A memory tool, a retention or fading rule |
+| What was borrowed from or refused to Ruflo, and by which invariant | `docs/11` | A borrowed or refused idea, the invariant it was refused under |
+| `fetch_page` and the native parser: its rules and what was refused | `docs/12` | A fetch rule, the host policy, a limit |
+| `scan_code`, its profiles and masking | `docs/13` | A scanner profile, a masking rule, a new check |
+| `analyze_binary`, the native reader and the guarded Ghidra fallback | `docs/14` | A format the reader answers, a child resource limit, the fallback's conditions |
+| `audit_usage` and what it may claim in tokens | `docs/15` | A measured or unmeasurable class of waste |
+| What is portable from DeepInfer and cmux, and what is refused | `docs/16` | An OSC notification, transcript replay, a JSON-schema reply |
+| The routing-table audit and the cost of one conductor call | `docs/17` | The tool surface a conductor is offered |
+| Release, updates, the packaged engine | `docs/18` | The tag rule, the bundle, the update button's reach |
+| The 24 native recipes and which actions stay with a person | `docs/19` | A built-in skill, a person-only action |
+| MCP admission: remote-only, per-tool Read/Act, invariant 10 | `docs/20` | A transport, an admitted address, a call bound, a tool's authority |
 
 Not every code change is a contract change. Renaming a local variable, restructuring
 a function body, or fixing a typo in a comment usually is not. Say which of those a
@@ -33,7 +45,7 @@ finding is, so the author can tell the difference without arguing.
 
 ## How to work
 
-1. **Read the diff** and name which of the nine subjects it touches, if any.
+1. **Read the diff** and name which of the subjects in the map it touches, if any.
 2. **Read the owning doc** for each subject it touches. Not from memory — the failure
    mode being guarded against is exactly a reviewer trusting a remembered contract.
 3. **Compare** the doc's claim against the new code, literally. A doc that says a
