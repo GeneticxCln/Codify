@@ -1935,7 +1935,10 @@ allowlist validated: the same resolved program and tokens are placed after `bwra
 ### The jail
 
 `engine/sandbox.py` wraps the child in bubblewrap when the engine-wide `sandbox_isolation` setting is `required` or
-`auto` (the default). The jail binds `/` read-only, then binds the workspace read-write at the same absolute path and
+`auto` (the default). Where no jail can be built, `required` refuses every command and `auto` refuses one that runs the
+project's own code (anything but `read_only` mode and `git`) unless the engine switch `sandbox_unjailed_ok` is 1, a
+person-only setting (`PUT /settings/engine`) that a profile never carries; with it on, the command runs unjailed and
+the result's `isolation_warning` says so. The jail binds `/` read-only, then binds the workspace read-write at the same absolute path and
 binds the workspace's `.git` back read-only before it `chdir`s there **when `.git` already exists**. A workspace test
 may edit the working tree; it cannot install a post-commit hook or name a `core.fsmonitor` that the engine's own
 commit would later run outside the jail with the person's real home. A fresh workspace has no metadata to bind, so a

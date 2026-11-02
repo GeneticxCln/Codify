@@ -220,9 +220,9 @@ def startup_lines() -> list[str]:
         lines.append(f"sandbox jail bwrap at {sandbox['bwrap']}")
     elif sandbox["bwrap"]:
         lines.append(
-            f"sandbox jail bwrap at {sandbox['bwrap']} cannot build a jail — auto mode runs commands unjailed"
+            f"sandbox jail bwrap at {sandbox['bwrap']} cannot build a jail — auto mode refuses the project's own code unless Settings allows unjailed runs"
         )
     else:
-        lines.append("sandbox jail unavailable — auto mode runs commands unjailed")
+        lines.append("sandbox jail unavailable — auto mode refuses the project's own code unless Settings allows unjailed runs")
     lines.extend(f"warning: {warning}" for warning in report["warnings"])
     return lines

@@ -432,7 +432,8 @@ filesystem code uses `getattr(os, "O_NOFOLLOW", 0)` (`fs.py:574`), which degrade
   (Seatbelt is deprecated and weaker than namespaces), the browser pane (WKWebView layering), audio and packaging. A
   macOS engine **without** the machine tab and with a weaker, clearly labelled sandbox is the smallest honest slice,
   and "clearly labelled" would mean `sandbox_isolation` reporting what it cannot do, as it already does when `bwrap` is
-  missing (`engine/capabilities.py`).
+  missing (`engine/capabilities.py`). Without a jail `auto` already refuses the project's own code until a person sets
+  `sandbox_unjailed_ok`, so a port starts closed rather than open.
 * **Windows** is close to a different product. No namespaces, no `fcntl`, no `resource`, no process groups; the sandbox
   and machine tab would be a container or WSL requirement, which is not "local-first" in the way the rest of this
   document uses it.

@@ -69,6 +69,7 @@ PORTABLE_STRING_SETTINGS = (
 LEFT_OUT = {
     "sandbox_network": "lets workspace commands reach the network",
     "sandbox_isolation": "decides whether workspace commands are jailed",
+    "sandbox_unjailed_ok": "lets workspace code run when no jail can be built",
     "browser_actions": "lets the assistant click and type in your browser tabs",
     "web_fetch": "lets the assistant read web pages",
     "web_fetch_hosts": "names the sites it may read",

@@ -220,7 +220,7 @@ class StartupLinesTests(unittest.TestCase):
             lines = capabilities.startup_lines()
         self.assertIn("warning: something is wrong", lines)
         self.assertIn("laya SDK not importable — ModuleNotFoundError", lines)
-        self.assertIn("sandbox jail unavailable — auto mode runs commands unjailed", lines)
+        self.assertIn("sandbox jail unavailable — auto mode refuses the project's own code unless Settings allows unjailed runs", lines)
 
 
 class RuntimeRouteTests(unittest.IsolatedAsyncioTestCase):

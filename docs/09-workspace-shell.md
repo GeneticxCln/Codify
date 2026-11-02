@@ -3492,7 +3492,7 @@ removed from the file.
 
 **Opening one never widens what the engine may do.** The numeric settings it carries are an allowlist
 (`PORTABLE_INT_SETTINGS`), not a denylist, so a setting added later is left out until someone decides it belongs. Not
-carried, and ignored if a file has them: `sandbox_network`, `sandbox_isolation`, `browser_actions`, `web_fetch` and its
+carried, and ignored if a file has them: `sandbox_network`, `sandbox_isolation`, `sandbox_unjailed_ok`, `browser_actions`, `web_fetch` and its
 hosts, `suggest_ci`, `cross_workspace_notes`, `laya_required`, `laya_checkpoint`, every audio setting, and any role's
 `base_url`, protocol or key. A role on a provider that is not built in is skipped (it would need an address, and an
 address decides where code is sent). The body is `extra=forbid` all the way down, so a file naming an address is a 422 and
