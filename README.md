@@ -40,22 +40,21 @@ animation are sped up and carry a speed badge; <a href="docs/media/demo.mp4">the
 
 ---
 
-**Codify** turns a plain-language request into a plan, waits for your approval, and then carries it out with
-specialised subagents: a pre-flight gate, a librarian that reads your code, a planner, and a fixer, verifier,
-critic and scribe that work one step at a time. Commands run in an allowlisted sandbox, each step is committed on
-its own with only the files it wrote, and every stage streams live into a desktop app.
+**Codify** turns a plain-language request into a plan, waits for your approval, and then carries it out one verified
+step at a time. A pre-flight gate rules on the request, a librarian reads your code, a planner writes the steps, and a
+fixer, verifier, critic and scribe work each step in turn. Commands run in an allowlisted sandbox, each step is
+committed on its own with only the files it wrote, and every stage streams live into a desktop app.
 
-- **Plan first.** A gate rules on every request before any model is called. In **Plan Only** mode nothing is
-  written until you press **Start**, and that is enforced by the engine's write gate, not by the UI.
-- **Verified, not asserted.** The verifier runs your project's own tests, the critic audits the diff, and a step
-  that fails goes back instead of forward.
+- **Plan first.** In **Plan Only** mode nothing is written until you press **Start**, and that is enforced by the
+  engine's write gate, not by the UI.
+- **Verified, not asserted.** The verifier runs your project's own tests and the critic audits the diff. A step that
+  fails goes back instead of forward, and a critic that asks for changes pauses the goal for you.
 - **Scoped commits.** A step commits *only* the paths it wrote. The engine never runs a bare `git add -A`.
 - **Local-first.** The engine binds `127.0.0.1` behind a boot token, and API keys never reach SQLite or an API
   response. Run it on a local model, or point any role at a hosted one.
-- **Your models, discovered live.** Eight providers are built in (Anthropic, OpenAI, Google, DeepSeek,
-  OpenRouter, Groq, NVIDIA and Ollama) and any OpenAI-compatible or Ollama-style endpoint can be added. Codify
-  ships no model list.
-- **Nineteen themes**, including the one in the clip, swapped at runtime with no rebuild.
+- **Your models, discovered live.** Eight providers are built in (Anthropic, OpenAI, Google, DeepSeek, OpenRouter,
+  Groq, NVIDIA and Ollama), any OpenAI-compatible or Ollama-style endpoint can be added, and Codify ships no model list.
+- **Nineteen themes**, shown in the [slideshow below](#-appearance) and swapped at runtime with no rebuild.
 
 Everything below is specified in [`docs/`](docs/00-codify-architecture-overview.md). That set is the source of
 truth; this file is the tour.
@@ -87,38 +86,32 @@ the waiting cut down, and every sped-up stretch carries a badge.
 
 ## 🚀 Quickstart
 
-Ask the machine what it needs. A list of versions in prose is where drift lives:
-
-```bash
-make doctor     # checks everything below, prints the install command for what is missing
-```
-
-It looks for **Python 3.10+** with `venv` (3.10 is a real deployment floor: the shell boots the engine as
-`python3 -m engine`), **Node 22.22.2+ / 24.15+ / 26+** (jsdom's range, which the UI suite inherits), **Rust
-stable** with `rustfmt` (rustup's default profile includes it, `--profile minimal` does not) and WebKitGTK 4.1 (2.40 or newer: the UI is
-built with Tailwind 4, which needs a Safari 16.4-class engine), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config`, and a display for the Tauri leg (`xvfb` is used
-automatically on a headless machine). **bubblewrap** (`bwrap`) that can actually build a jail, and `unshare` (util-linux) on a kernel that lets an unprivileged
-user mount an overlay over a tmpfs (Linux 6.6+), because the machine tab is a jailed shell with its own copy of the project and
-its containment tests start real ones (WebKitGTK's own sandbox already uses bubblewrap). The app itself runs without the
-overlay, with the project read-only in the machine; `make ci` does not. PipeWire's `pw-record` is optional and only needed for the mic (see
-[Voice](#-voice)). It also checks this checkout's `.venv` against
-`pyproject.toml`, so a virtualenv made before a dependency was added is reported rather than quietly running.
-
 ```bash
 git clone https://github.com/GeneticxCln/Codify.git
 cd Codify
+make doctor     # checks the machine, and prints the install command for anything missing
 make setup      # creates .venv, installs the engine and dev tools, runs npm ci
 make run-app    # builds the UI, embeds it, launches the app
 ```
 
-A virtualenv rather than `pip install -r`: stock Ubuntu 24.04, Debian 12+ and Fedora refuse `pip install` into
-the system Python (PEP 668). The Makefile and the shell both use `./.venv` when it exists, so nothing has to be
-activated.
+`make doctor` is the list of what you need, kept honest by running it. In short:
 
-The in-process **Laya gate** is optional and deliberately not part of `make setup`: the SDK brings torch and
-downloads its checkpoints on first use. `make setup-laya` adds it to the checkout's `.venv` (the interpreter the
-shell spawns), and `make doctor` says whether it is there. A package ships without it and gates through the
-role's fallback model — [`docs/05`](docs/05-laya-system-1-gate.md), [`docs/18`](docs/18-release-and-updates.md) §2.
+| You need | Because |
+|---|---|
+| **Python 3.10+** with `venv` | The shell boots the engine as `python3 -m engine`, and 3.10 is a real deployment floor. |
+| **Node 22.22.2+, 24.15+ or 26+** | The range jsdom supports, which the UI test suite inherits. |
+| **Rust stable** with `rustfmt` | The Tauri shell. WebKitGTK 4.1 (2.40+), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config` come with it. |
+| **bubblewrap** and `unshare` | The Machine tab is a jailed shell, and its tests build real jails (an unprivileged overlay mount needs Linux 6.6+). The app runs without the overlay, with the project read-only in the machine. |
+| A display | For the Tauri tests; `xvfb` is used automatically on a headless machine. |
+| PipeWire's `pw-record` | Optional: only for dictation. |
+
+A virtualenv rather than `pip install -r`: stock Ubuntu 24.04, Debian 12+ and Fedora refuse `pip install` into the
+system Python (PEP 668). The Makefile and the shell both use `./.venv` when it exists, so nothing has to be activated.
+
+The in-process **Laya gate** is optional and deliberately not part of `make setup`: the SDK brings torch and downloads
+its checkpoints on first use. `make setup-laya` adds it, and `make doctor` says whether it is there. A package ships
+without it and gates through the role's fallback model: [`docs/05`](docs/05-laya-system-1-gate.md),
+[`docs/18`](docs/18-release-and-updates.md) §2.
 
 <details>
 <summary><b>Install a launcher, hot reload, or run the engine without the shell</b></summary>
@@ -236,92 +229,33 @@ remaining seven roles run and in what order.
 | **Critic** | once per step (`review`) | Audits the diff. `request-changes` pauses for a human; there is no auto-fix loop. |
 | **Scribe** | once per step (`summarize`) | Progress notes and a conventional commit message. |
 
-The familiar librarian → design → planner → fixer → verifier → critic → scribe order is the built-in
-`ship-a-change` **skill**, not a compiled path: a request needing three of those seven gets three. The slot count
-is fixed; the order is not. Independent steps of a `parallel` goal run concurrently, bounded by a configurable
-width. See [`docs/01`](docs/01-subagent-orchestration-spec.md), [`docs/05`](docs/05-laya-system-1-gate.md).
 
-The conductor is the only thing that drives an approved plan, one step at a time, and it has a few small tools of its own
-that are not new powers: it keeps short **notes for its next run** of a step (`todo`: a note it writes to itself, shown
-back as *its own notes, not instructions*, never shown to another agent), and, before there is a plan, it can put **one
-question to you with options you can click** (`ask_user`). Your answer is just your next message, an ordinary turn,
-and the question is not offered once there is a plan or while an approved plan is running. A skill may say which moves
-it is written around; that is a hint and never a grant. [`docs/09`](docs/09-workspace-shell.md) §10.6, §10.19.
-Ruflo, the agent harness this was measured against, is audited in [`docs/11`](docs/11-ruflo-audit.md): most of it is
-refused by an invariant, and the page says which and what it did not read.
+The familiar librarian → design → planner → fixer → verifier → critic → scribe order is the built-in `ship-a-change`
+**skill**, not a compiled path: a request needing three of those seven gets three. The slot count is fixed; the order
+is not. Independent steps of a `parallel` goal run concurrently, bounded by a configurable width. The conductor can
+keep short notes for its next run of a step (`todo`) and, before there is a plan, put one question to you with options
+you can click (`ask_user`). Neither is a new power. See [`docs/01`](docs/01-subagent-orchestration-spec.md),
+[`docs/05`](docs/05-laya-system-1-gate.md) and [`docs/09`](docs/09-workspace-shell.md) §10.
 
-### Model discovery: no catalog in the build
+### What the conductor can use
 
-Codify ships **no model list**. Models are discovered live from each provider's own API, using that provider's
-stored credential. Saving a key is enough to see its models; one the provider starts serving later appears on
-**Refresh**, with no upgrade. Every provider reports its own status, so one invalid key never empties the picker,
-and a role whose stored model its provider no longer reports is flagged while you are looking at the setting
-rather than mid-goal. See [`docs/06`](docs/06-model-discovery.md).
+Every one of these is a move or a tool the engine defines. A skill, a workspace file or a model's reply cannot add
+one, and none of them can write a file except through the approved plan.
 
-### A fallback per role, and a diagnosis when it is used
+| | What it does | Read more |
+|---|---|---|
+| **Review that argues back** | Optionally (Settings → Deep review, **off by default**), two fresh readers see only the request, the step and the diff, never the research the author used, before the critic decides. The critic still decides. | [`docs/01`](docs/01-subagent-orchestration-spec.md), [`docs/21`](docs/21-improvement-plan.md) |
+| **Skills as data** | A library of built-in recipes (ship a change, prove, security review, health review and more) loaded on demand. A workspace can add or replace its own in `.codify/skills/`. A skill sequences moves that already exist and never gains a capability. | [`docs/01`](docs/01-subagent-orchestration-spec.md), [`docs/19`](docs/19-deepseek-stack-audit.md) |
+| **Memory** | `recall` asks this workspace's own history *has this happened here before?* It is bounded and allow-listed, and what the brief mentions unprompted fades with age. | [`docs/10`](docs/10-agent-memory.md) |
+| **The web** | Pages open inside Codify and are readable by the model (`read_page`). `fetch_page` reads a public page with the engine's own parser; Settings → Web pages narrows it to sites you list, or switches it off. | [`docs/09`](docs/09-workspace-shell.md), [`docs/12`](docs/12-scrapling-audit.md) |
+| **Security review** | `scan_code` runs curated rule profiles (secrets, injection, crypto, deserialization, unsafe C, web) and returns ranked candidates at `path:line`, with what it did not look at. A workspace can add profiles as data. | [`docs/13`](docs/13-grepify-audit.md) |
+| **Compiled files** | `analyze_binary` reads ELF, PE and Mach-O headers, symbols, imports and strings natively. Ghidra is an optional fallback. The file is never run. | [`docs/14`](docs/14-rea-audit.md) |
+| **Where tokens went** | `audit_usage` reports wasted calls in **tokens** (there is no price table, on purpose), and explains a prompt-cache miss by what changed, from digests that hold no prompt text. | [`docs/15`](docs/15-xerg-audit.md), [`docs/21`](docs/21-improvement-plan.md) |
+| **MCP servers** | Remote data sources over HTTPS only, with per-tool Read or Act authority. Act tools run only while a goal is approved and running. A server is never a new capability. | [`docs/20`](docs/20-mcp-admission-design.md) |
+| **Models** | Discovered live from each provider, so one bad key never empties the picker. Each role can name a fallback, and Settings is the only place a role's model changes. | [`docs/02`](docs/02-settings-app-spec.md), [`docs/06`](docs/06-model-discovery.md) |
 
-Every role can name a second target (provider and model) for when the primary cannot be used at all. It is per
-role because the honest fallback differs by job: a local model is fine for the scribe and a bad idea for the
-fixer. It is tried once per call and only for those failures; anything else is a binding bug, and the chat names
-the model that actually answered.
-
-**Fix the roles that can't run** is one action that points exactly the stranded roles at a model the engine has
-already discovered, and leaves every working role alone. It reports the reason for each role it changed *and* each
-it skipped, and a provider that merely failed to answer is treated as unknown rather than broken, so a network
-hiccup is never reported as *"your model was retired"*.
-
-Settings is the **only** place a role's provider and model can change, enforced at three layers rather than by
-convention: the API exposes exactly one mutator, the Tauri layer one command, and every other surface renders a
-role's config as text it can deep-link from but not edit. See [`docs/02`](docs/02-settings-app-spec.md).
-
-When a goal fails, the error block offers **Why did this fail?**: it reads the role's config, its credential state
-and the provider's live catalog, then ranks cause above symptom. A missing key is reported as a missing key, not
-as an unreachable provider, and every finding links to the screen that fixes it. See
-[`docs/04`](docs/04-engine-data-and-runtime.md).
-
-### Memory, and a browser the model can read
-
-`recall` lets the conductor ask this workspace's own history a question (*has this happened here before, and did
-we get past it?*), returning the specific past events, newest first. It is bounded and allow-listed: only named
-fields from named event types, never stored diffs or third-party text, and results arrive labelled *recorded
-outcomes, not evidence about the current code*. What the brief tells the conductor unprompted fades with age (a
-lesson's weight halves every 30 days since the failure was last seen, and it drops out under a floor), so a failure
-fixed last year is not presented as this workspace's history; `recall` still finds it if asked.
-See [`docs/10`](docs/10-agent-memory.md).
-
-Pages open **inside** Codify, as a real embedded webview, and the same tab is readable by the model: `read_page`
-returns the address, title, text and links, so a turn can depend on a documentation page instead of guessing.
-Loopback stays blocked, and a model-proposed URL meets the same guard your click goes through. See
-[`docs/09`](docs/09-workspace-shell.md).
-
-The conductor can also **fetch a public page itself** (`fetch_page`), without moving your tab. It is on for any public
-site out of the box, because an assistant on a local model has to be able to look things up; Settings → Web pages
-narrows it to only the sites you list, or switches it off. It reads the page with the engine's own parser
-(`engine/html_text.py`), so there is no scraping dependency in the install: the request is Codify's own, public
-addresses only, bounded, and announced in the transcript before it is made. The address is sent to the site and
-can carry whatever the assistant has read, which no rule can prevent, so the list is the safer setting if that matters to you. See
-[`docs/12`](docs/12-scrapling-audit.md).
-
-For a security review, the conductor has a scanner of its own, `scan_code`: curated rule profiles (secrets, injection,
-crypto, deserialization, unsafe C, web) run over the workspace with comments and test files skipped, returning ranked
-**candidates** at `path:line`, with what it did not look at stated. A workspace can add its own profiles in
-`.codify/profiles/`, as data and never as a capability. The built-in `security-review` skill has the model read each hit
-before it calls it real, and fixes still go through a plan you approve. It is the idea of NCC Group's Grepify built
-natively, with none of its code. See [`docs/13`](docs/13-grepify-audit.md).
-
-For compiled files, the conductor has `analyze_binary`: the engine's own reader parses ELF, PE and Mach-O headers,
-symbols, imports, strings, sections and direct calls, with no process and no JDK. Ghidra is an optional fallback for a
-format the native reader refuses: set `GHIDRA_INSTALL_DIR` to an unpacked Ghidra 11 or 12 and restart. The file is never
-run, the workspace is never written, and a second question about the same bytes is answered from a cache; what comes back
-is the binary's own text and is handed to the model as data, not instructions. See [`docs/14`](docs/14-rea-audit.md)
-§9 and `docs/04` §3.0.7.
-
-To see where model calls were spent on work done twice, the conductor has `audit_usage` and a built-in `usage-audit` skill. It reads
-the events this engine already records and reports, in **tokens** (there is no price table, on purpose), re-asked calls whose step then
-succeeded and fix attempts a retry got past, plus descriptive signals. It opens with what it could not see: repeated tool calls are
-reported as not measurable, and prompt-cache reads and writes are shown as a signal — never a saving — with the churn rate it cannot
-know, so an empty result is never "no waste". It is the method of Xerg's agent skill, built natively and with none of its code. See
-[`docs/15`](docs/15-xerg-audit.md).
+When a goal fails, the error block offers **Why did this fail?**: it reads the role's config, its credential state and
+the provider's live catalog, and ranks cause above symptom.
 
 ---
 
@@ -331,10 +265,10 @@ Nineteen themes ship in the box, and choosing one is a **runtime swap, not a reb
 custom properties, so the whole app repaints with no component change and no restart.
 
 <p align="center">
-  <img src="docs/themes.gif" alt="All nineteen themes side by side, each running its own animated backdrop at the same time, except the two that ship none: Codify Dark and Still" width="1000">
+  <img src="docs/media/themes.gif" alt="A slideshow of all nineteen themes, one at a time, each captioned with its name and its place in the order. Seventeen have an animated backdrop of their own; Codify Dark and Still ship none." width="900">
 </p>
 
-<sub>All nineteen at once: seventeen of them with an animated backdrop of their own, and two (<b>Codify Dark</b> and <b>Still</b>) that ship no canvas at all. <b>OLED CMatrix</b> is the pure-black one with the green rain, and the one in the clip above.</sub>
+<sub>All nineteen, one slide each, in the order of the table below: seventeen of them with an animated backdrop of their own, and two (<b>Codify Dark</b> and <b>Still</b>) that ship no canvas at all. Each slide is one frame of the real app on a finished goal (the browser build, with a scripted model), so a backdrop is caught mid-motion. <b>OLED CMatrix</b> is the pure-black one with the green rain, and the one in the clip above.</sub>
 
 | Theme | What it is |
 |---|---|
@@ -411,93 +345,14 @@ dictate, for at most two minutes, and deletes the recording once it has been tra
 missing, `make doctor` says so as a note, not a failure; everything else runs without them. Details:
 [docs/09 §9](docs/09-workspace-shell.md), [docs/04 §3.0.2](docs/04-engine-data-and-runtime.md) and
 [docs/03 §1.9](docs/03-security-and-roadmap.md).
+## Working surfaces
 
-## Clipboard history
-
-An icon beside **Notifications** in the header opens a history of what you copied, cut or pasted *inside Codify*:
-selected text, pastes, a code block's Copy. Each clip can be **copied again**, **inserted into the message box**,
-**pasted into the terminal**, pinned or deleted.
-
-- **Inside Codify only.** It does not watch the system clipboard and asks for no permission, so a copy made in
-  another application, or in a browser tab, is not in it.
-- **Kept in this window, and never sent anywhere.** It is stored in the window's own storage, not the engine or
-  its database, and holds the newest 50 clips plus up to 20 pinned.
-- **Keys and passwords are never kept.** Anything from a password field, and anything shaped like a key or token
-  (`sk-…`, `ghp_…`, a `Bearer` value, a private key block, a long random token), is refused, and the drawer says
-  so. That is a heuristic and not a guarantee: delete anything it should have refused.
-- **A shell does not run what you did not read.** A multi-line clip is only pasted into a terminal that has asked
-  for bracketed paste; otherwise each line would run as soon as it arrived.
-
-Details: [docs/09 §11](docs/09-workspace-shell.md) and [docs/03 §1.10](docs/03-security-and-roadmap.md).
-
-## Split panes
-
-Show a chat beside a terminal, an editor or a browser page, or two of those side by side. Right-click a tab and choose **Show beside the current tab**
-(or **Split with a new terminal**), pick **Split** in the command palette (Ctrl+K), or press **Ctrl+.** (again to close).
-Drag the divider, or use its arrow keys. Click in a pane to work in it; the tab strip follows.
-
-- **A browser page can be one of the two,** beside a chat, a terminal or an editor. A link in an answer opens beside the answer when there is room.
-  Not two pages (each is a native view the shell seats over one rectangle), and not two conversations (they would share one message box); the menu says
-  so instead of doing nothing. While you drag the divider, or have the palette or a menu open, the page steps out of the way, because a native view paints
-  over everything else. Clicking inside a page moves the split's focus marker to it, like clicking anywhere else in a pane.
-- **A narrow window draws one pane.** The left panel gives way first; if two panes still do not fit, the focused one is drawn and the other
-  returns when there is room.
-- **A split is not remembered across a restart** (terminals are not); the divider's position is.
-
-Details: [docs/09 §12](docs/09-workspace-shell.md).
-
-## Editor
-
-Press **Ctrl+K**, type part of a file's name and pick it: the file opens in its own tab, and **Ctrl+.** puts it beside the
-conversation you are in. It is a plain code editor (syntax colours for JavaScript/TypeScript, Python, JSON, Markdown, CSS and HTML;
-undo; **Ctrl+S** to save). A change in a run's diff card has an **Open** link to the file it touched.
-
-The assistant can **see** it and **use** it, through three tools it can call on any turn:
-
-- **`read_editor`** reports which files you have open, which one is in front, your cursor and selection, and the text **including
-  what you have not saved**.
-- **`open_in_editor`** points at a file and a range. It opens beside the chat you are reading, never takes the keyboard from the message
-  box you are typing in, and never rearranges a split you made: with no room, or a terminal in front, the tab opens in the background and is marked.
-- **`edit_editor`** changes the text in the open buffer, as one undoable step, highlighted until you save.
-
-- **The assistant never saves.** Its edit is unsaved text in your editor, marked as its own; the file on disk changes only when
-  *you* press Save. That is the one other way a file is written besides the fixer's approved step, it needs the engine's boot token,
-  and no agent, skill or conductor tool can reach it ([invariant 9](docs/00-codify-architecture-overview.md)).
-- **It will not overwrite a file that changed under you.** If the fixer or a terminal rewrote it, Save says so and offers *Reload from
-  disk* or *Keep my version*.
-- **Unsaved text is not restored after a restart,** and closing the window (as opposed to the tab) does not ask. Editors are not remembered, as terminals are not.
-
-Details: [docs/09 §13](docs/09-workspace-shell.md), the routes in [docs/04 §3.0.3](docs/04-engine-data-and-runtime.md).
-
-## Machine
-
-A **Machine** is a Linux shell in a jail, in a tab of its own. Open one from the **Machine** button in the left panel or from the
-palette (**Ctrl+K**, "machine"); **Ctrl+.** puts it beside the conversation you are in. It needs **`bubblewrap`** (`make doctor` says
-whether it can build a jail on your computer, and how to fix it if not).
-
-It is a jail, **not a virtual machine**: it shares your computer's kernel, and says so.
-
-- **Your project is there as the machine's own copy**, at `/work`. It can edit, build and run tests in it freely, and **your files are never written**: the copy is kept in memory, capped in size, and thrown away with the machine. Nothing leaves except text you select and copy by hand. (Where your computer cannot make the copy, `/work` is read-only instead, and the header says why.)
-- **Its home and `/tmp` are scratch** (size-capped memory), thrown away when the machine closes.
-- **It cannot run away with your computer.** One process that spins for half an hour of CPU is ended by the kernel; a file past a gigabyte cannot be written; and if everything in the machine adds up to more than its share of your memory (half of it, never more than 4 GB) the machine is stopped, with a line on the screen saying why. That check looks twice a second, so a program that allocates faster than that can overshoot first. Nothing here can stop a bug in the kernel itself: a machine shares your kernel.
-- **It has no credentials**: not your home folder, not your keys, not Codify's own state, not the engine's token.
-- **It has no network** unless you open it with one (the second row in the palette). That choice is made once and the header says it in words;
-  it cannot be switched on later, and the assistant cannot open a machine or change it. **With the network on it shares your computer's
-  network**, including services listening on `127.0.0.1`.
-- **If a jail cannot be built, nothing starts**: there is no fallback to a plain shell.
-
-The assistant can **see** it and **type into** it, through three tools it can call on any turn:
-
-- **`read_machine`** shows which machines are open, the screen as you see it, and what scrolled off it. It works for a machine in a background tab.
-- **`run_in_machine`** types a command, waits for the output to settle, and brings back what it printed. A command that keeps running is not waited for.
-- **`key_in_machine`** presses one of twelve named keys (Enter, Tab, Escape, the arrows, Backspace, Ctrl-C, -D, -L, -Z).
-- **`reset_machine`** starts the machine again from a clean project, for a machine that is wedged, full, or was stopped. It keeps the network you chose and cannot open a machine. You have the same thing as a **Reset** button in the machine's header, which asks first.
-
-Inside the jail the assistant is **not held to the command allowlist**; the jail is what contains it, and
-[invariant 6](docs/00-codify-architecture-overview.md) says so in one sentence. A machine is not remembered: a restart reopens none, and closing the tab ends everything running in it, its copy of your project with it.
-
-**Not in this version:** a graphical desktop or a full virtual machine, a seccomp filter, a kernel-enforced memory limit (it is watched, not capped), snapshots beyond "clean", and any way to copy a file out. The limits are listed in
-[docs/09 §14](docs/09-workspace-shell.md), with what was measured in a real jail and what was not, and the claims the jail makes are [docs/03 §1.11](docs/03-security-and-roadmap.md).
+| | |
+|---|---|
+| **Editor** | **Ctrl+K**, type part of a file's name, and it opens in its own tab. The assistant can see it (`read_editor`), open a file and range (`open_in_editor`) and change the open text (`edit_editor`), but it **never saves**: its edit is unsaved text marked as its own, and the file changes only when *you* press Save. [`docs/09`](docs/09-workspace-shell.md) §13 |
+| **Machine** | A Linux shell in a bubblewrap jail, in a tab of its own, on its **own copy** of your project: **your files are never written**, it has no credentials, and it has no network unless you open it with one. If a jail cannot be built, nothing starts. It is a jail, **not a virtual machine**. The assistant can `read_machine`, `run_in_machine`, `key_in_machine` and `reset_machine`, but cannot open one. [`docs/09`](docs/09-workspace-shell.md) §14, [`docs/03`](docs/03-security-and-roadmap.md) §1.11 |
+| **Split panes** | A chat beside a terminal, an editor or a browser page: right-click a tab, or **Ctrl+.**. A narrow window draws one pane. [`docs/09`](docs/09-workspace-shell.md) §12 |
+| **Clipboard history** | What you copied, cut or pasted *inside Codify*, kept in this window and never sent anywhere. Anything shaped like a key or password is refused (a heuristic, not a guarantee). [`docs/09`](docs/09-workspace-shell.md) §11 |
 
 ---
 
@@ -536,27 +391,26 @@ Each is specified with its reasoning in [`docs/03`](docs/03-security-and-roadmap
 ## 🧪 The gate
 
 ```bash
-make check     # lint, typecheck, UI tests, Python suite, stream isolation, build, cargo
-make ci        # the same Python legs again on the declared minimum (3.10)
+make check     # lint, typecheck, UI tests, Python suite, stream isolation, benchmark smoke, build, size budget, cargo
+make ci        # make check, then the same Python legs again on the declared minimum (3.10)
 ```
 
 `make check` only ever runs the interpreter you have installed. `make ci` runs the Python legs again on **3.10**,
-fetching that interpreter on demand rather than skipping the leg. 3.10 matters: a construct only 3.12+ parses is
-invisible on a modern interpreter and fatal on the declared minimum. `.github/workflows/check.yml` runs the same
-targets on GitHub's runners for every pull request and every push to `master`: a second opinion from a clean machine.
+fetching that interpreter on demand rather than skipping the leg, because a construct only 3.12+ parses is invisible on
+a modern interpreter and fatal on the declared minimum. `make budgets` (part of `make check`) fails when the built UI
+grows more than 10% past the baselines in `ui/budgets.json`.
 
-`make hooks` installs the versioned hooks: the cheap checks at commit time, the full gate before every push. The
-suite is **hermetic by construction**: `tests/hermetic.py` points every test at a throwaway state directory and
-disables the keychain, and two tests assert that, so removing the bootstrap fails the suite rather than silently
-rewriting a real store.
+`.github/workflows/check.yml` runs the same targets in parallel on GitHub's runners for every pull request and every push
+to `master`: a second opinion from a clean machine. `make hooks` installs the versioned hooks: lint and typecheck at
+commit time, and `make ci` before every push, followed by `make check-history`, which checks that **every commit** in the
+push builds, not just the tip (about five minutes a commit, so a long push is slow on purpose).
 
-Determinism is structural rather than a matter of discipline: every process the engine, the benchmark harness or
-a script starts goes through one spawn guard that makes it die with the process that started it, and a test
-freezes that list, so a new spawn cannot appear unannounced. See
-[`docs/07`](docs/07-spawn-guard-and-deterministic-tests.md). Benchmark numbers live in a separate harness with an
-explicit rule about what one may claim (*does this pipeline still do its job*, never *is the model good*), and it
-fails rather than scoring a repository it was not given, so no third-party source is committed here. See
-[`docs/08`](docs/08-benchmarks.md).
+The suite is **hermetic by construction**: `tests/hermetic.py` points every test at a throwaway state directory and
+disables the keychain, and two tests assert that. Every process the engine, the benchmark harness or a script starts goes
+through one spawn guard, and a test freezes that list, so a new spawn cannot appear unannounced
+([`docs/07`](docs/07-spawn-guard-and-deterministic-tests.md)). Benchmark numbers live in a separate harness with an
+explicit rule about what one may claim (*does this pipeline still do its job*, never *is the model good*), and no
+third-party source is committed here ([`docs/08`](docs/08-benchmarks.md)).
 
 ---
 
@@ -593,12 +447,13 @@ The specifications are the source of truth; the README summarises them.
 
 ```
 engine/     FastAPI backend — app.py (routes), conductor.py (the loop), executor.py (+ executor_*.py, its layers),
-            laya.py (gate), providers.py, sandbox.py, fs.py, git.py, db.py, watchdog.py
+            review.py (deep-review lenses), laya.py (gate), providers.py, sandbox.py, fs.py, git.py, db.py
 ui/         React 19 + TS + Vite — App.tsx, components/, hooks/, api.ts, appearance.ts
 src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the embedded pages),
             the render-starvation watchdog
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
-scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py
+scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py, check_budgets.py
+benchmarks/ the tiered harness: smoke, repo_scale and the review tier
 docs/       00–21, the specifications this README summarises
 ```
 
