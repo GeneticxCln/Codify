@@ -187,7 +187,7 @@ off disk or received over the bridge — so its containment is an allow-list, no
   recovery is evidence and not itself a match.
 - **Opening a profile cannot widen the engine, and standing notes cannot carry a workspace's memory out.** A profile
   (`docs/09` §10.24) is a file a person may be sent, so the import is an allowlist: tuning settings, role tuning (temperature, limits, thinking effort,
-  keep-alive), a role's model name while its provider stays the same, and skills only. It never sets network, browser, web,
+  keep-alive) and a role's model name while its provider stays the same; skills, memory and notes only when the person chooses them. It never sets network, browser, web,
   isolation, audio, checkpoint or CI switches, never a `base_url`, never a role's or the conductor's **provider** (a provider
   name is an address with the person's stored key behind it) and never a role's system prompt; each is reported as skipped,
   because an address decides where code is sent. Skills reach the single creator door

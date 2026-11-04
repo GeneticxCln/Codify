@@ -47,6 +47,7 @@ from engine.services import (
 from engine.skills import load_skills
 
 KEY = "sk-live-0123456789abcdefSECRET"
+MCP_SECRET = "mcp-bearer-9f8e7d6c5b4a39281706deadbeef"  # noqa: S105 — a fixture, not a credential
 
 
 class Base(unittest.IsolatedAsyncioTestCase):
@@ -207,6 +208,24 @@ class TestExport(Base):
         self.assertNotIn("0123456789abcdef", text)
         self.assertIn("[redacted]", text)
 
+    def test_an_mcp_servers_credential_is_scrubbed_from_the_file_too(self) -> None:
+        """The scrubber knew every provider key and no MCP credential, which is the other secret the engine holds."""
+        secret = MCP_SECRET
+        self.conn.execute(
+            "INSERT INTO mcp_servers (id, name, url, auth_kind, auth_header, api_key_ref, enabled, created_at, updated_at) "
+            "VALUES ('srv1', 'Issues', 'https://93.184.216.34/mcp', 'bearer', '', 'mcp/srv1', 1, 1, 1)"
+        )
+        self.conn.commit()
+        self.keychain.set_secret("mcp/srv1", secret)
+        self.registry.set_config("fixer", AgentConfigUpdate(system_prompt_override=f"Call the tracker with {secret}."))
+        self.skill_file(self.a, "tracker", body=f"Authorization: Bearer {secret}")
+        self.observe(self.a, "code:tracker", f"the call used {secret}", f"token {secret}")
+        self.notes.add(f"tracker token {secret}")
+        text = json.dumps(self.export(self.a, memory=True, notes=True))
+        self.assertNotIn(secret, text)
+        self.assertNotIn("9f8e7d6c5b4a", text)
+        self.assertIn("[redacted]", text)
+
     def test_it_carries_no_address_no_key_reference_and_no_authority_setting(self) -> None:
         for key in ("sandbox_network", "browser_actions", "suggest_ci", "cross_workspace_notes", "web_fetch"):
             self.settings.set_int(key, 2 if key == "web_fetch" else 1)
@@ -269,7 +288,7 @@ class TestImport(Base):
         self.conn.execute("DELETE FROM global_notes")
         self.conn.commit()
 
-        report = self.do_import(out, self.b, memory=True, notes=True)
+        report = self.do_import(out, self.b, skills=True, memory=True, notes=True)
 
         self.assertEqual(7, self.settings.get_int("parallel_width"))
         self.assertEqual("qwen-x", self.settings.get_str("conductor_model"))
@@ -410,7 +429,7 @@ class TestImport(Base):
             skills=[{"name": "mine", "description": "d", "instructions": "THEIR BODY"}],
             memory=[{"subject": "code:same", "lesson": "THEIR LESSON"}],
             notes=[{"text": "Same note."}],
-        ), self.b, memory=True, notes=True)
+        ), self.b, skills=True, memory=True, notes=True)
         self.assertIn("MY OWN BODY", (Path(self.b.root_path) / ".codify/skills/mine.md").read_text())
         self.assertEqual("MY OWN LESSON", self.conn.execute(
             "SELECT lesson FROM observations WHERE workspace_id = ? AND subject = 'code:same'", (self.b.id,)).fetchone()[0])
@@ -418,18 +437,24 @@ class TestImport(Base):
         self.assertEqual(([], 0, 0), (report["applied"]["skills"], report["applied"]["memory"], report["applied"]["notes"]))
         self.assertEqual(3, len(report["skipped"]))
 
-    def test_memory_and_notes_are_opt_in_and_the_report_says_they_were_left(self) -> None:
+    def test_skills_memory_and_notes_are_opt_in_and_the_report_says_they_were_left(self) -> None:
+        """A skill is instructions the conductor reads, from a file that may have come from anyone: it is not applied
+        because a file was opened, any more than a lesson or a note is."""
+        self.assertEqual((False, False, False), (ProfileApply().skills, ProfileApply().memory, ProfileApply().notes))
         report = self.do_import(self.profile(
+            skills=[{"name": "from-a-file", "description": "d", "instructions": "x"}],
             memory=[{"subject": "code:x", "lesson": "L"}], notes=[{"text": "N"}],
         ), self.b)
+        self.assertFalse((Path(self.b.root_path) / ".codify" / "skills" / "from-a-file.md").exists())
         self.assertEqual(0, self.conn.execute("SELECT COUNT(*) FROM observations").fetchone()[0])
         self.assertEqual(0, self.notes.count())
-        self.assertEqual({"memory", "notes"}, {s["what"] for s in report["skipped"]})
+        self.assertEqual({"skills", "memory", "notes"}, {s["what"] for s in report["skipped"]})
+        self.assertEqual([], report["applied"]["skills"])
 
     def test_skills_and_memory_without_a_workspace_to_land_in_are_skipped_not_guessed(self) -> None:
         report = self.do_import(self.profile(
             skills=[{"name": "s", "description": "d", "instructions": "x"}], memory=[{"subject": "code:x", "lesson": "L"}],
-        ), None, memory=True)
+        ), None, skills=True, memory=True)
         self.assertEqual({"skills", "memory"}, {s["what"] for s in report["skipped"]})
 
     def test_imported_text_is_scrubbed_flattened_and_never_counts_as_proof(self) -> None:

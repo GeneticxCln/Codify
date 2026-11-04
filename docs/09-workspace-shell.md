@@ -3504,8 +3504,11 @@ nothing is applied. `left_out` in the file says which and why, and the import re
 
 **It overwrites nothing it did not ask about.** A skill that exists, a memory subject that exists and a note already kept
 are left alone and reported. Skills go through the creator's door, handed to the profile by the route (the route module is
-the only one that may name it, `docs/00` §6.9, held by `tests/test_invariants_at_their_boundary.py`). Settings and role
-configs are replaced, and only if the person chose to apply them. **Memory and notes are opt-in** on both sides of the file.
+the only one that may name it, `docs/00` §6.9, held by `tests/test_invariants_at_their_boundary.py`). Settings take the file's values and a role takes
+its tuning, and only if the person chose to apply them. **Skills, memory and notes are opt-in** on both sides of the file
+(`apply.skills`, `apply.memory`, `apply.notes` default false; `codify-cli profile import --skills --memory --notes`): a skill
+is instructions the conductor reads, a lesson is a claim it may act on and a note is text it is shown, each from a file that
+may have come from anyone. The export scrubber knows every provider key **and every MCP server credential**.
 Imported memory arrives as proof 1 with no evidence, flattened to one line, as a claim a person brought and not one this
 machine saw; imported notes are marked `imported` and `read_notes` says so.
 

@@ -194,6 +194,26 @@ class TestCommandsAgainstTheRealApp(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(0, app.state.settings.get_int("sandbox_network"), "a file turned a door on through the client")
         self.assertIn("left alone: setting sandbox_network", imported.out)
 
+    async def test_profile_import_applies_skills_only_when_asked(self) -> None:
+        """A skill is instructions from a file that may have come from anyone: `--skills` is the person saying yes."""
+        target = self.root / "with-skill.json"
+        target.write_text(json.dumps({
+            "format": "codify-profile", "version": 1,
+            "skills": [{"name": "from-a-file", "description": "Use when testing.", "instructions": "Do the thing."}],
+        }))
+        landed = Path(self.ws.root_path) / ".codify" / "skills" / "from-a-file.md"
+
+        plain = await self.go("profile", "import", str(target), "--workspace", self.ws.id)
+        self.assertEqual(0, plain.code, plain.err)
+        self.assertFalse(landed.exists(), "a skill was applied because a file was opened")
+        self.assertIn("skills: none", plain.out)
+        self.assertIn("left alone: skills", plain.out)
+
+        asked = await self.go("profile", "import", str(target), "--workspace", self.ws.id, "--skills")
+        self.assertEqual(0, asked.code, asked.err)
+        self.assertTrue(landed.is_file())
+        self.assertIn("skills: from-a-file", asked.out)
+
     async def test_a_profile_that_is_not_one_is_refused_before_anything_is_sent(self) -> None:
         bad = self.root / "bad.json"
         bad.write_text("{ not json")
