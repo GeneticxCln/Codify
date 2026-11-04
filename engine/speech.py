@@ -299,7 +299,7 @@ def parse_inputs(dump: str) -> list[dict[str, Any]]:
     """The audio sources in a `pw-dump`, each with whether it is the session's default."""
     try:
         objects = json.loads(dump)
-    except ValueError:
+    except (ValueError, RecursionError):
         return []
     if not isinstance(objects, list):
         return []

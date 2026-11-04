@@ -110,7 +110,7 @@ def _as_prose(raw: str) -> str:
         return text
     try:
         parsed = json.loads(candidate)
-    except ValueError:
+    except (ValueError, RecursionError):
         # Still prose as far as the reader is concerned: an object that does not
         # parse is a truncated stream or an odd sentence, and stripping it to
         # nothing would replace something readable with nothing.

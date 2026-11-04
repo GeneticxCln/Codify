@@ -358,7 +358,7 @@ def _load_repaired(span: str) -> Any:
         # `strict=False`: a raw newline or tab inside a string is how a model writes a file's content, and
         # the only reading of it is the character it is.
         return json.loads(cleaned, strict=False)
-    except ValueError:
+    except (ValueError, RecursionError):
         pass
     try:
         value = ast.literal_eval(_pythonish(cleaned))
@@ -385,6 +385,9 @@ def _repaired_problem(span: str) -> tuple[str, bool] | None:
     cleaned = _triple_quoted_to_json(_strip_comments_and_trailing_commas(span))
     try:
         json.loads(cleaned, strict=False)
+    except RecursionError:
+        # Nested past what the parser will read: not truncated, and not repairable by closing brackets.
+        return "the reply is nested too deeply to read", False
     except json.JSONDecodeError as exc:
         ran_out = exc.pos >= len(cleaned.rstrip()) - 1 or exc.msg.startswith("Unterminated string")
         # Line numbers count the *repaired* text, where a multi-line `\"\"\"` value has become one line,
@@ -508,7 +511,7 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
             found.append(value)
             i = end
             continue
-        except ValueError as exc:
+        except (ValueError, RecursionError) as exc:
             problem = str(exc)
             if first_problem is None:
                 first_problem = f"invalid JSON: {problem}"
@@ -518,7 +521,7 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
             if repair_truncation:
                 try:
                     found.append(_close_truncated(stripped[i:]))
-                except ValueError:
+                except (ValueError, RecursionError):
                     pass
             else:
                 # What the re-ask quotes, so it says where the document breaks *after* the repairs, and
@@ -533,7 +536,7 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
             break
         try:
             found.append(_load_repaired(stripped[i:end_at]))
-        except ValueError:
+        except (ValueError, RecursionError):
             pass  # `first_problem` already holds why the plain parse refused it
         # Skip the whole span either way: a span that could not be read must not have its
         # *inner* objects returned in its place.

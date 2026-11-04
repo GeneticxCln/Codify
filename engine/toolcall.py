@@ -287,7 +287,7 @@ def _last_fenced_json(body: str) -> Any:
             continue
         try:
             parsed = json.loads(inner)
-        except ValueError:
+        except (ValueError, RecursionError):
             continue
         if isinstance(parsed, dict):
             return parsed
@@ -305,7 +305,9 @@ def _from_content(text: str, tools: list[ToolSpec]) -> list[ToolCall]:
     if body.startswith("{"):
         try:
             parsed = json.loads(body)
-        except ValueError:
+        except (ValueError, RecursionError):
+            # `RecursionError` is what a document nested past the interpreter's limit raises, and it is not a
+            # `ValueError`: a small model stuck repeating `[` is enough (docs/04, tests/test_deeply_nested_json.py).
             parsed = None
     elif body.startswith("```"):
         # A model that writes ```json ... ``` instead of calling the tool is
@@ -316,7 +318,7 @@ def _from_content(text: str, tools: list[ToolSpec]) -> list[ToolCall]:
             inner = inner[4:].strip()
         try:
             parsed = json.loads(inner)
-        except ValueError:
+        except (ValueError, RecursionError):
             parsed = None
     if not isinstance(parsed, dict):
         # Prose that *contains* a fenced call, which is the third shape a model
@@ -459,7 +461,7 @@ def coerce_arguments(
     if isinstance(raw, str):
         try:
             raw = json.loads(raw) if raw.strip() else {}
-        except ValueError:
+        except (ValueError, RecursionError):
             # A model that emitted half an object. An empty argument dict lets
             # the tool itself refuse with a message the model can read, which is
             # recoverable; raising here would kill the whole turn.
@@ -498,7 +500,7 @@ def _array_from_text(value: str) -> Any:
     """
     try:
         parsed = json.loads(value)
-    except ValueError:
+    except (ValueError, RecursionError):
         return value
     if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
         return parsed
