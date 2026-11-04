@@ -2070,6 +2070,16 @@ is where a legitimate LFS filter belongs — but a workspace whose `.git/config`
 is not made safe for a command the person runs themselves; this refusal covers the engine's own
 `status`, `diff`, `add` and `commit`, not the person's push (which runs no filter and keeps its hook).
 
+**The sandbox's git is the second door, and it asks the same question.** `SandboxService.run_command` runs the librarian's
+`read_only` git and the conductor's `run_command` before a plan is approved, without going through `GitService`, so a
+planted filter was started by a read-only `git status` or `git diff` (and, inside the jail, wrote into the workspace,
+the one place the jail leaves writable: `tests/test_sandbox_read_only_git.py`
+`TestRepositoryFiltersAreNotRunByTheSandboxEither`). `git_readonly.untrusted_config` now refuses any git there, in either
+mode, whose repository config names a `filter` section or `include`s another file (which could). It reads
+`<gitdir>/config`, `config.worktree` and, for a linked worktree, the main repository's `config` through `commondir`,
+from the files, so no new process is started to ask. It is conservative on purpose: a repository that uses Git LFS is
+refused in the same sentence, as `GitService` already refused it, and the person can run the command themselves.
+
 Proven by `tests/test_sandbox_read_only_git.py`, which runs real git against a real repository and
 asserts on the repository afterwards; its property tests are the ones that would have caught the class
 (no abbreviation of any listed option is accepted).

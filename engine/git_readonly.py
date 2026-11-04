@@ -36,6 +36,7 @@ import os
 import re
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 
 
 class GitRefusal(Exception):
@@ -369,3 +370,75 @@ def runner_args(args: Sequence[str]) -> list[str]:
         *_NO_DRIVERS.get(sub, ()),
         *rest,
     ]
+
+
+# ── the repository's own config ───────────────────────────────────────────────
+
+# `filter.<name>.clean`, `.smudge` and `.process` are programs named in a repository's config, and git starts them from
+# plain `status` and `diff` (a file that looks modified is run through its clean filter to compare it). Hooks and
+# `core.fsmonitor` have a switch in `runner_args`; a filter has none. `GitService` therefore refuses a repository whose
+# config names one, in the one door its commands go through, and this is the same rule for the sandbox's door, read
+# from the files so that nothing new is started to ask. A section header is matched anywhere on a line rather than
+# parsed, because the point is to be unable to be argued with: a false refusal costs one sentence, a missed filter
+# costs a program run as the person (and, in the jail, a write into the workspace).
+_CONFIG_FILTER = re.compile(r"\[\s*filter\b", re.IGNORECASE)
+_CONFIG_INCLUDE = re.compile(r"\[\s*include(?:if)?\b", re.IGNORECASE)
+_MAX_CONFIG_BYTES = 1024 * 1024
+
+
+def _git_dir(root: Path) -> Path | None:
+    """Where this workspace's git directory is: `.git` itself, or the one a linked worktree's `.git` file names."""
+    dot = root / ".git"
+    if dot.is_dir():
+        return dot
+    if dot.is_file():
+        try:
+            first = dot.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+        except (OSError, IndexError):
+            return None
+        if first.startswith("gitdir:"):
+            target = Path(first[len("gitdir:"):].strip())
+            return target if target.is_absolute() else (root / target)
+    return None
+
+
+def untrusted_config(root: str, command: str = "git") -> str | None:
+    """Why this repository's config cannot be trusted to run `git <command>`, or None.
+
+    Reads `<gitdir>/config`, `<gitdir>/config.worktree` and, for a linked worktree, the main repository's `config`
+    (found through `commondir`). A config that names a filter, or that includes another file (which could), is refused.
+    A directory that is not a repository has no config and is left for git to report. The user's and the system's
+    config are not consulted by the read-only child (`runner_env`), so they are not read here either.
+    """
+    gitdir = _git_dir(Path(root))
+    if gitdir is None:
+        return None
+    files = [gitdir / "config", gitdir / "config.worktree"]
+    try:
+        common = (gitdir / "commondir").read_text(encoding="utf-8", errors="replace").strip()
+    except OSError:
+        common = ""
+    if common:
+        shared = Path(common)
+        files.append((shared if shared.is_absolute() else gitdir / shared) / "config")
+    for path in files:
+        try:
+            if path.stat().st_size > _MAX_CONFIG_BYTES:
+                return f"this repository's {path.name} is larger than {_MAX_CONFIG_BYTES} bytes, so Codify did not read it; it did not run `{command}`"
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"this repository's {path.name} could not be read ({exc.strerror or exc}), so Codify did not run `{command}`"
+        body = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith(("#", ";")))
+        if _CONFIG_FILTER.search(body):
+            return (
+                f"this repository's {path.name} names a git filter, a program git would run to compare files, so "
+                f"Codify did not run `{command}`. Run it yourself, or remove the filter setting and try again."
+            )
+        if _CONFIG_INCLUDE.search(body):
+            return (
+                f"this repository's {path.name} includes another config file, which could name a git filter, so "
+                f"Codify did not run `{command}`. Run it yourself, or remove the include and try again."
+            )
+    return None
