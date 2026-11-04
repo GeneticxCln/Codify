@@ -2450,6 +2450,16 @@ per model call of every recorded run.
 Deleting a goal deletes its recording through `ON DELETE CASCADE`, so a recording never outlives the
 run it describes.
 
+`event_retention_days` (Settings → Engine, default **365**, band 0–3650; `0` keeps everything) bounds how long a
+goal's **timeline** lives. The `events` table is the store's copy of prompts, diffs and command output, so it is the
+most sensitive thing the engine keeps and the retention policy covers it. `GoalService.prune_events` runs at **boot**
+and deletes the events of a goal that has *ended* (`COMPLETED`, `FAILED`, `CANCELLED`) and whose `updated_at` is older
+than the window; the goal row, its steps and its statistics stay. A goal that has not ended is never touched, however
+old it looks: `PLANNING` and `RUNNING` are in use, `PAUSED` is waiting for a person (the critic asked for changes, or
+their own Pause) and `PENDING` for their approval, and a Start on either resumes a run that needs its history
+(`tests/test_db_and_services.py` `test_only_a_goal_that_has_ended_loses_its_timeline_to_retention`; the first version
+excluded only `PLANNING` and `RUNNING`).
+
 ### 8.4 Replay
 
 ```

@@ -354,6 +354,37 @@ class TestDbAndServices(unittest.TestCase):
         self.assertEqual(remaining, {young.id}, "the young goal's timeline was pruned too")
         self.assertEqual(self.goals.prune_events(0), 0, "0 means keep everything")
 
+    def test_only_a_goal_that_has_ended_loses_its_timeline_to_retention(self) -> None:
+        """A paused goal is waiting for a person and a pending one for approval: neither has ended.
+
+        `prune_events` excluded PLANNING and RUNNING only, so a goal paused for longer than the window (the critic
+        asking for changes, a person who went on holiday) lost every event it had, and its Start resumed a run with no
+        history to show. Only COMPLETED, FAILED and CANCELLED age out.
+        """
+        import time
+
+        ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=self.temp_dir.name))
+        db = self.goals._db
+        made: dict[str, str] = {}
+        for status in ("PENDING", "PLANNING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED"):
+            goal = self.goals.create(GoalCreate(workspace_id=ws.id, title=status, description=""))
+            db.execute("UPDATE goals SET status = ?, updated_at = ? WHERE id = ?", (status, time.time() - 90 * 86400, goal.id))
+            db.execute(
+                "INSERT INTO events (id, goal_id, step_id, type, payload, timestamp, sequence) "
+                "VALUES (?, ?, NULL, 'log', '{}', ?, ?)",
+                (f"e-{status}", goal.id, time.time(), self.goals.next_sequence(goal.id)),
+            )
+            made[status] = goal.id
+        db.commit()
+
+        self.goals.prune_events(30)
+
+        kept = {r["goal_id"] for r in db.execute("SELECT DISTINCT goal_id FROM events").fetchall()}
+        for status in ("PENDING", "PLANNING", "RUNNING", "PAUSED"):
+            self.assertIn(made[status], kept, f"a {status} goal lost its timeline to retention")
+        for status in ("COMPLETED", "FAILED", "CANCELLED"):
+            self.assertNotIn(made[status], kept, f"an ended ({status}) goal outlived the retention window")
+
     def test_seeded_roles_name_no_model(self) -> None:
         """A fresh install must not ship hardcoded model ids.
 

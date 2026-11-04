@@ -661,6 +661,17 @@ class ConductorTools:
         # `to_thread` re-raises in the awaiter, so a refusal still arrives as
         # `CommandNotAllowed` — the behaviour this tool already had.
         async with self.service.sandbox_lock(self.root):
+            if approved:
+                # The lock can be held for minutes by another goal's tests in this workspace, which is when a
+                # person presses Pause or Cancel. The status read above is then stale, so it is read again now that
+                # nothing stands between this call and the process: only the person's Start puts the approval
+                # back, exactly as for `write` (`_approval_withdrawn`) and for `verify`.
+                still, why = self.service._write_allowed(self.goal_id)
+                if not still:
+                    raise CommandNotAllowed(
+                        "Nothing was run: the goal's approval was taken back while this command waited its turn "
+                        f"({why.removeprefix('Nothing was written. ')}"
+                    )
             result = await asyncio.to_thread(
                 self.service.sandbox.run_command, self.root, argv,
                 mode="test" if approved else "read_only",
