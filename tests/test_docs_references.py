@@ -8,7 +8,9 @@ docs say of themselves that they have lied before; this is the check that a refe
 Two things are checked, and each is deliberately narrow so a failure is always a real broken pointer:
 
 * **Paths.** A backticked token that starts with one of this repository's top-level directories and names a file or a
-  folder must exist. Audit documents (`docs/11`–`17`, `19`, `22`) describe *other* projects' files and are skipped, a
+  folder must exist, unless `.gitignore` ignores it: a build output (`ui/dist`, `src-tauri/target`) is real on the machine
+  that built it and absent from a fresh checkout, so existence cannot be the test for it. (The first version of this file
+  asked only whether the path existed, passed on the machine that had built the UI and failed on CI's clean checkout.) Audit documents (`docs/11`–`17`, `19`, `22`) describe *other* projects' files and are skipped, a
   token with a glob, a placeholder or an ellipsis is skipped, and `path:line`, `path::item` and `path#anchor` are read as
   the path. The few intentional exceptions are in `ALLOWED_MISSING`, each with its reason.
 * **Sections.** `docs/NN §S` (and the short form `` `NN` §S ``) must name a heading numbered `S` in that document.
@@ -49,6 +51,26 @@ def _documents() -> list[Path]:
     return sorted((ROOT / "docs").glob("*.md")) + [ROOT / n for n in ("README.md", "CONTRIBUTING.md", "DESIGN.md", "CLAUDE.md")]
 
 
+def _gitignored(path: str) -> bool:
+    """Whether `.gitignore` (the repository's own record of what is generated) names this path or a parent of it.
+
+    Only the literal entries are read: a name with no slash matches a path component anywhere, an entry with a slash is
+    anchored at the root. A pattern with a wildcard is skipped, which can only make the check stricter.
+    """
+    parts = path.split("/")
+    for raw in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines():
+        entry = raw.strip()
+        if not entry or entry.startswith(("#", "!")) or any(ch in entry for ch in "*?["):
+            continue
+        entry = entry.strip("/")
+        if "/" not in entry:
+            if entry in parts:
+                return True
+        elif path == entry or path.startswith(entry + "/"):
+            return True
+    return False
+
+
 def _is_external(path: Path) -> bool:
     return path.parent.name == "docs" and path.name[:2] in EXTERNAL_AUDITS
 
@@ -79,11 +101,20 @@ class DocsPointAtRealThings(unittest.TestCase):
                     if path is None:
                         continue
                     checked += 1
-                    if path in ALLOWED_MISSING or (ROOT / path).exists():
+                    if path in ALLOWED_MISSING or (ROOT / path).exists() or _gitignored(path):
                         continue
                     broken.append(f"{doc.relative_to(ROOT)}:{number}  `{path}`")
         self.assertGreater(checked, 500, "the scan found almost nothing: the pattern, not the docs, is broken")
         self.assertFalse(broken, "documents name paths that do not exist:\n  " + "\n  ".join(broken))
+
+    def test_a_build_output_is_not_a_broken_pointer_even_where_it_was_never_built(self) -> None:
+        """The CI failure this exists for: `ui/dist` is named in the docs and absent from a clean checkout."""
+        self.assertTrue(_gitignored("ui/dist"))
+        self.assertTrue(_gitignored("src-tauri/target/release/codify"))
+        self.assertTrue(_gitignored("ui/node_modules/react"))
+        self.assertFalse(_gitignored("ui/src/App.tsx"))
+        self.assertFalse(_gitignored("engine/app.py"))
+        self.assertFalse(_gitignored("docs/04-engine-data-and-runtime.md"))
 
     def test_the_allowed_exceptions_are_still_exceptions(self) -> None:
         """An entry that starts existing (or that no document names any more) is a stale excuse: remove it."""
