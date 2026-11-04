@@ -101,7 +101,7 @@ make run-app    # builds the UI, embeds it, launches the app
 | **Python 3.10+** with `venv` | The shell boots the engine as `python3 -m engine`, and 3.10 is a real deployment floor. |
 | **Node 22.22.2+, 24.15+ or 26+** | The range jsdom supports, which the UI test suite inherits. |
 | **Rust stable** with `rustfmt` | The Tauri shell. WebKitGTK 4.1 (2.40+), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config` come with it. |
-| **bubblewrap** and `unshare` | The Machine tab is a jailed shell, and its tests build real jails (an unprivileged overlay mount needs Linux 6.6+). The app runs without the overlay, with the project read-only in the machine. |
+| **bubblewrap** and `unshare` | The Machine tab is a jailed shell, and its tests build real jails (an unprivileged overlay mount needs Linux 6.6+). The app runs without the overlay, with the project read-only in the machine. The same jail contains the commands a goal runs: **without a working jail, an approved goal's tests and scripts are refused** until you allow unjailed runs in Settings → Agents → Workspace command jail (`sandbox_unjailed_ok`). |
 | A display | For the Tauri tests; `xvfb` is used automatically on a headless machine. |
 | PipeWire's `pw-record` | Optional: only for dictation. |
 
@@ -367,7 +367,7 @@ missing, `make doctor` says so as a note, not a failure; everything else runs wi
    goal cannot rewrite `~/.bashrc`.
 4. **Command sandboxing.** Commands pass an allowlist (`pytest`, `npm test`, `cargo test`, `go test`, linters and type-checkers
    such as `ruff check`, `mypy`, `tsc --noEmit` and `make lint`, read-only git), and a linter is never handed a flag that
-   edits. The librarian's run in `read_only` mode, so reconnaissance can never change the workspace.
+   edits. The librarian's run in `read_only` mode, so reconnaissance can never change the workspace. They run inside a bubblewrap jail (read-only filesystem except the workspace, your home absent, no network unless allowed); on a machine that cannot build one, running the project's own code is refused until you say otherwise in Settings.
 5. **Human in the loop.** When the critic requests changes the step pauses and the goal transitions to `PAUSED`;
    only a human resumes it. The same goes for a conductor that cannot finish a step (it ran out of calls, lost its
    model, or stopped): the goal pauses with a stated reason and your Start picks it up at that step. There is no

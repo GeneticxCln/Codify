@@ -947,7 +947,7 @@ to survive it deliberately:
   backdrop is decoration the user asked for; it is never decoration *underneath
   the words they are reading*, and it never moves anything, covers a control, or
   takes a click (`pointer-events-none`, `aria-hidden`).
-- **The cyberpunk horizon** (`components/ui/CyberBackdrop.tsx` over
+- **The cyberpunk horizon** (`components/ui/WeatherBackdrop.tsx` mounting
   `components/ui/CyberGrid.tsx`, plus the `.cyber-veil` class) — the second
   animated theme, and the same bargain as the rain rather than a new exemption.
   Choosing the theme is the act; the grid and the sun are what was chosen. It

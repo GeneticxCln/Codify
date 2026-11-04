@@ -125,8 +125,10 @@ CONTROL_CHARS = re.compile(r"[\x00-\x1f\x7f]")
 # the disk. The wall-clock timeout stays the bound on time.
 COMMAND_LIMITS = Limits(core_bytes=0, file_bytes=2 * 1024**3)
 
-# How a workspace command is contained. `required` refuses to run at all without bubblewrap; `auto` runs
-# unjailed and says so in the result (and the goal's event stream); `off` is the deliberate opt-out.
+# How a workspace command is contained. `required` refuses to run at all without bubblewrap; `auto` jails a command when
+# a jail can be built and, when it cannot, refuses one that runs the project's own code unless a person has set
+# `sandbox_unjailed_ok` (a read-only `ls`, `wc` or `git` runs either way, and says it ran unjailed); `off` is the
+# deliberate opt-out.
 ISOLATION_MODES = ("required", "auto", "off")
 # Inside the jail the person's home is a fresh tmpfs at the same path. That hides `~/.ssh`, `~/.codify` and
 # everything else under it, while leaving the absolute paths a build tool may print unchanged.
@@ -152,7 +154,7 @@ CANCELLED_EXIT_CODE = 130
 
 # The bwrap probe's answer, per binary and per network choice. Only a definite answer is kept:
 # a probe that timed out on a loaded host says nothing about the host, and caching that `False`
-# made every later command run unjailed (`auto`) or be refused (`required`) until the engine
+# made every later command be refused (`required`, or `auto` without the acknowledgement) or run unjailed (`auto` with it) until the engine
 # restarted even after the host had recovered.
 _PROBE_ANSWERS: dict[tuple[str, bool], bool] = {}
 _PROBE_LOCK = threading.Lock()
@@ -600,7 +602,7 @@ class SandboxService:
             return
         raise CommandNotAllowed(
             f"sandbox isolation is auto, but {why}, and this command runs the project's own code. "
-            "Nothing was run. Settings → Workspace command jail lets a person allow unjailed runs on this machine "
+            "Nothing was run. Settings → Agents → Workspace command jail lets a person allow unjailed runs on this machine "
             "(sandbox_unjailed_ok); it cannot be changed from here."
         )
 

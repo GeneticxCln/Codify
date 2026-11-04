@@ -781,6 +781,17 @@ the grant is a named permission like every other command
 (`allow-codify-engine-log`), so the command is unreachable until it is listed;
 the browser module's ACL test fails the build's test leg when the two lists drift.
 
+**The engine's stdout is read the same way, and ends only when the pipe does.** stdout carries one thing, the boot
+handshake (`CODIFY_ENGINE token=… port=…`, `04` §6), and the reader keeps draining it for the life of the process so a
+later write never meets EPIPE. `engine_protocol::next_stdout_line` reads bytes and decodes each *complete* line lossily
+(a byte that is not UTF-8 becomes a replacement character), caps one line at 64 KiB (`MAX_STDOUT_LINE_BYTES`), and returns
+`None` only at end of file or a real I/O error, which it names on stderr. It used to be `BufReader::lines()` read with
+`while let Ok(Some(..))`, which ends on the first undecodable byte: the loop below it then cleared the token and port of
+an engine that was still running and the supervisor started a second one (`§5.6`). Before a launch parks its child handle,
+any handle still parked is sent `start_kill`, since dropping a tokio `Child` does not stop the process; a restart can
+therefore never end with two engines. Held by the `engine_protocol` tests (bad bytes before and after the handshake, a
+last line with no newline, the line cap).
+
 ### 5.6 An engine that exits on its own is started again, a few times
 
 The launcher used to retry only a boot that never handed over a port. An engine that crashed *after* its handshake

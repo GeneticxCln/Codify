@@ -4,7 +4,7 @@
 
 Agent configuration is edited only at **Settings → Agents**. Enforced at three layers:
 
-1. **API** — only `settings_api.py` exposes `PUT /settings/agents/{role}` (`01` §7). Goal payloads `extra=forbid`.
+1. **API** — only the settings routes in `engine/app.py` write agent configuration (`PUT /settings/agents/{role}`, `POST /settings/agents/repair`, `PUT /settings/engine`; `00` §6.2). Goal payloads `extra=forbid`.
 2. **Tauri** — only `SettingsPanel.tsx` / `AgentConfigCard.tsx` call `codify_update_agent_config`.
 3. **Display** — `StepStatus` / `GoalDetail` render `agent_assigned` as text. Click MAY deep-link to Settings → Agents → `{role}`.
 
@@ -26,7 +26,7 @@ ui/src/
     TestConnectionButton.tsx
     PromptOverrideEditor.tsx
     ConductorSettingsCard.tsx  # the conductor's own model + budgets, not a role
-    SandboxCard.tsx            # Workspace command jail: mode, network, host bwrap availability
+    SandboxCard.tsx            # Workspace command jail: mode, network, unjailed-run acknowledgement, host bwrap availability
     LayaRequiredToggle.tsx     # Fail closed when the pre-flight gate cannot answer
     AgentSkillsPane.tsx        # Agent skills: one on/off switch per skill in this workspace's menu
     SessionSettingsPane.tsx    # Sessions: auto-compaction and how many recent turns stay verbatim
@@ -135,7 +135,7 @@ about the host, not the selected mode; the sandbox card below combines the two.
 
 ### 3.0a The sandbox card
 
-`SandboxCard.tsx` shows `sandbox_isolation` (`auto` / `required` / `off`), the network permission
+`SandboxCard.tsx` (Settings → Agents, titled *Workspace command jail*, above the deep-review card) shows `sandbox_isolation` (`auto` / `required` / `off`), the network permission
 (`sandbox_network`), and the host's bwrap availability from `GET /settings/runtime` together,
 because the mode alone is not the guarantee. **`auto` on a host without bubblewrap is the one
 combination that must be said out loud:** the card says the project's own code is refused until a
