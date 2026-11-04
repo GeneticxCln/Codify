@@ -245,7 +245,7 @@ async def cmd_profile(engine: Engine, args: argparse.Namespace, out: TextIO) -> 
         body: dict[str, Any] = {
             "profile": profile,
             "apply": {
-                "settings": not args.no_settings, "roles": not args.no_roles, "skills": not args.no_skills,
+                "settings": not args.no_settings, "roles": not args.no_roles, "skills": args.skills,
                 "memory": args.memory, "notes": args.notes,
             },
         }
@@ -325,7 +325,7 @@ def build_parser() -> argparse.ArgumentParser:
     imp.add_argument("--notes", action="store_true", help="apply the file's notes (off unless asked)")
     imp.add_argument("--no-settings", action="store_true")
     imp.add_argument("--no-roles", action="store_true")
-    imp.add_argument("--no-skills", action="store_true")
+    imp.add_argument("--skills", action="store_true", help="apply the file's skills (off unless asked)")
     return parser
 
 

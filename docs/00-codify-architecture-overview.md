@@ -27,7 +27,7 @@ The original design was solid for a single-LLM, single-agent tool. The v2 requir
 
 | Gap | Risk | Fix |
 |---|---|---|
-| All state (`_workspaces`, `_goals`) lives in in-memory Python dicts | Lost on Engine restart | SQLite `~/.codify/codify.db` via SQLModel — `03` §2, `04` §2 |
+| All state (`_workspaces`, `_goals`) lives in in-memory Python dicts | Lost on Engine restart | SQLite `~/.codify/codify.db` through the standard-library `sqlite3` driver (no ORM) — `03` §2, `04` §2 |
 | One monolithic `LLMService` | Cannot bind 5 providers | `AgentOrchestrator` + per-provider adapters — `01` §3–5 |
 | No concurrency guard on Goal mutation | Lost updates across asyncio tasks | `Goal.version: int` check-and-increment — `04` §1.2 |
 | No API key storage strategy | `.env` does not scale to 5×N | OS keychain; Engine NEVER returns raw keys — `03` §1.1 |

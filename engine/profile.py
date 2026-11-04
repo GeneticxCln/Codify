@@ -161,12 +161,17 @@ class Profile(BaseModel):
 
 
 class ProfileApply(BaseModel):
-    """What the person chose to apply. Memory and notes are opt-in: they are off unless asked for."""
+    """What the person chose to apply. Skills, memory and notes are opt-in: they are off unless asked for.
+
+    Settings and role tuning are the person's own setup moving between machines. A skill is instructions the conductor
+    reads, a lesson is a claim it may act on and a note is text it is shown, each from a file that may have come from
+    anyone, so none of them is applied because a file was opened.
+    """
 
     model_config = {"extra": "forbid"}
     settings: bool = True
     roles: bool = True
-    skills: bool = True
+    skills: bool = False
     memory: bool = False
     notes: bool = False
 
@@ -218,6 +223,22 @@ class ProfileTools:
                 value = ""
             if value:
                 found.append(value)
+        # An MCP server's credential is the other secret the engine holds (docs/00 §6.10). It lives in the same store
+        # under `mcp/<id>`, and a prompt, lesson or note that quoted it was exported verbatim unless it happened to be
+        # spelled `Bearer ...`.
+        try:
+            refs = [str(r["api_key_ref"]) for r in self._db.execute(
+                "SELECT api_key_ref FROM mcp_servers WHERE api_key_ref != ''"
+            ).fetchall()]
+        except sqlite3.Error:
+            refs = []
+        for ref in refs:
+            try:
+                secret = self.keychain.get(ref)
+            except Exception:  # noqa: BLE001 — a keychain that cannot answer has nothing to scrub with
+                secret = ""
+            if secret:
+                found.append(secret)
         return tuple(found)
 
     # ── export ──────────────────────────────────────────────────────────────────────────────────────────────────

@@ -625,11 +625,14 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/suggestions/scan` | — | `{created}` — one sweep now: the same read-only detectors and rate limits the watcher runs, with no model call. `{created: 0}` when the `suggestions` setting is off |
 | `POST` | `/suggestions/{id}/snooze` | `{hours}` 1–168, default 24, extra=forbid | `Suggestion`. 409 `illegal_status` if it is not open |
 | `POST` | `/suggestions/{id}/dismiss` | — | `Suggestion`. 409 `illegal_status` if it is not open |
+| `GET` | `/conversations/{id}/compaction` | — | `CompactionStatus`: this thread's rolling summary and what a compaction would cover now (`09` §10.21) |
+| `POST` | `/conversations/{id}/compaction` | — | `CompactionStatus`. Replaces the thread's older turns with a summary **on request**; the raw turns are untouched, only what the next model call is shown changes. 409 while a turn is still being answered |
+| `DELETE` | `/conversations/{id}/compaction` | — | `CompactionStatus`. Forgets the newest summary (the turns it replaced were always still there). 404 `nothing_to_undo`, 409 `conversation_busy` |
 | `POST` | `/suggestions/{id}/accept` | `{goal_id}` extra=forbid | `Suggestion` — records the turn a person already made from the offer; **creates nothing**. 409 `goal_not_in_workspace` / `goal_predates_suggestion`. A turn comes only from `POST /conversations/{id}/turns` (`00` §6.8) |
 | `GET` | `/settings/notes` | — | `{notes: [{id, text, source, created_at}], enabled, max_notes}` — the standing notes (`10` §8). `enabled` is the `cross_workspace_notes` switch |
 | `POST` | `/settings/notes` | `{text}` extra=forbid | the note. 422 `invalid_note` (empty, or over 500 characters), 409 `note_exists`, 409 `too_many_notes` (50) |
 | `DELETE` | `/settings/notes/{id}` | — | 204. 404 `unknown_note` |
-| `GET` | `/profile/export?workspace_id=&memory=&notes=` | `memory` and `notes` default false | the profile document (`09` §10.24): `{format: "codify-profile", version: 1, settings, roles, skills, memory, notes, left_out}`. Skills and memory come from `workspace_id`; `memory=true` without one is 422 `workspace_required`. No key, no address, no authority setting |
+| `GET` | `/profile/export?workspace_id=&memory=&notes=` | `skills`, `memory` and `notes` default false | the profile document (`09` §10.24): `{format: "codify-profile", version: 1, settings, roles, skills, memory, notes, left_out}`. Skills and memory come from `workspace_id`; `memory=true` without one is 422 `workspace_required`. No key, no address, no authority setting |
 | `POST` | `/profile/import` | `{profile, workspace_id?, apply: {settings, roles, skills, memory, notes}}` extra=forbid all the way down; `memory` and `notes` default false | `{applied: {settings, roles, skills, memory, notes}, skipped: [{what, reason}]}`. A file naming a `base_url`, a key, an unknown field, an unknown version or an oversized list is a 422 and **nothing is applied**. Never overwrites a skill, a memory subject or a note |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
@@ -664,6 +667,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/settings/runtime` | — | the engine's self-check (`engine/capabilities.py`): which interpreter is running, whether *it* can import the gate's SDK, and any warnings. Separate from `/settings/laya` because that route also honours `CODIFY_LAYA_SDK` and this one is a fact about the interpreter — a gate can be off because it was told to be or because the package is not there, and those need different fixes. Names filesystem paths, so it is behind the boot token like everything else |
 | `GET` | `/settings/keys` | — | per-provider key status + `storage`/`storage_detail`/`storage_reason` (`04` §7) |
 | `POST` | `/settings/keys` | `{provider, api_key}` (surrounding whitespace is stripped; whitespace or a control character inside is `422`, because an HTTP client would refuse the header later and put its value in the message) | `{ok, provider, storage}` |
+| `DELETE` | `/settings/keys/{provider}` | — | `{ok, provider, removed}`. Forgets the provider-scoped key `POST /settings/keys` wrote, **idempotently** (`removed: false` for a key that was not there is the state the caller asked for, not an error); 422 `invalid_provider` for a name that is not a provider slug. A role's own key reference is a separate credential and is left alone. The provider's cached model list is dropped, because it can change when its credential does |
 | `GET` | `/settings/agents` | — | `AgentConfig[]`, fixed role order |
 | `GET` | `/settings/agents/stats` | query: `limit` | per-role last call / last error / counts, from the event log, plus `runs` / `success_rate` / `outcomes` / `tokens` measured over every run the log holds (§4.7). The rate is about the *role* — did it do its job — not about the goal, which is the other question and is answered by `/stats/overview` |
 | `POST` | `/settings/agents/repair` | — | `RepairReport` (`04` §3.1) |
@@ -1959,8 +1963,10 @@ the jail.
 
 `required` refuses with `command_not_allowed` when `bwrap` is not installed **or cannot build a jail**; `auto`
 probes the installed binary with the same mounts and namespaces the command will get (a definite answer is cached per
-binary and network choice; a timeout is not), falls back to the same unjailed path,
-and reports `isolation: "off"` with an `isolation_warning` that the executor writes to the goal's event stream. This
+binary and network choice; a timeout is not) and, when it cannot make a jail, **refuses a command that runs the project's own
+code** with `command_not_allowed` naming `sandbox_unjailed_ok`. Only a `read_only` command (`ls`, `wc`, hardened `git`), or any
+command once a person has turned that switch on, takes the unjailed path, and it reports `isolation: "off"` with an
+`isolation_warning` that the executor writes to the goal's event stream. This
 is the installed-but-useless host — user namespaces disabled or AppArmor-restricted — where `which` alone used to
 claim `isolation: "bwrap"` while every command failed. `off` is the deliberate opt-out, and `capabilities.sandbox_report()`
 uses the same probe so Settings and the boot log do not promise a jail the host cannot make. `isolation` is `"bwrap"` when the jail ran. A `SandboxService()` constructed without settings (a bare
@@ -2251,7 +2257,7 @@ proves it. A rejected token arrives as `4401` within milliseconds, so it never r
 `STABLE_CONNECTION_MS` window answers a different question and governs only when the backoff counter resets.
 Events delivered late by a socket that has been closed or replaced are ignored. (`openGoalStream` has no
 `onConnected`: an open proves nothing on `/ws/goals/{id}` either, a goal with no events sends no frame to prove
-it by, and nothing needed the signal. `tests/goalStream.test.ts` pins its absence at the type level. A caller
+it by, and nothing needed the signal. `ui/tests/goalStream.test.ts` pins its absence at the type level. A caller
 that wants one must take the proof rule above, timer included.) The app re-reads `GET /models` on the first
 `onConnected` that follows any `onReconnecting` (every close counts, a rejected socket as much as a lost one),
 once per run of closes; at mount nothing has closed, so a healthy start does not re-read (docs/06 §6).
@@ -2449,6 +2455,16 @@ per model call of every recorded run.
 
 Deleting a goal deletes its recording through `ON DELETE CASCADE`, so a recording never outlives the
 run it describes.
+
+`event_retention_days` (Settings → Engine, default **365**, band 0–3650; `0` keeps everything) bounds how long a
+goal's **timeline** lives. The `events` table is the store's copy of prompts, diffs and command output, so it is the
+most sensitive thing the engine keeps and the retention policy covers it. `GoalService.prune_events` runs at **boot**
+and deletes the events of a goal that has *ended* (`COMPLETED`, `FAILED`, `CANCELLED`) and whose `updated_at` is older
+than the window; the goal row, its steps and its statistics stay. A goal that has not ended is never touched, however
+old it looks: `PLANNING` and `RUNNING` are in use, `PAUSED` is waiting for a person (the critic asked for changes, or
+their own Pause) and `PENDING` for their approval, and a Start on either resumes a run that needs its history
+(`tests/test_db_and_services.py` `test_only_a_goal_that_has_ended_loses_its_timeline_to_retention`; the first version
+excluded only `PLANNING` and `RUNNING`).
 
 ### 8.4 Replay
 

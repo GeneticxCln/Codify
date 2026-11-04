@@ -218,6 +218,17 @@ class _StepState:
         self.reviewed = False
 
 
+def _log_label(text: str, limit: int = 60) -> str:
+    """A server or tool name as it may appear in a log line: one line, at most `limit` characters.
+
+    The name in a refusal is whatever the *model* typed. Events are stored whole and recall reads `warn` rows, so an
+    unbounded name was a way for text that a hostile page or MCP result had steered the model into writing to land
+    in the engine's memory of what went wrong (docs/00 §6.10: a result is data and is not recallable).
+    """
+    flat = " ".join(str(text).split())
+    return flat if len(flat) <= limit else flat[: limit - 1] + "…"
+
+
 class ConductorTools:
     """The conductor's tools, each bound to the service the pipeline uses.
 
@@ -454,12 +465,12 @@ class ConductorTools:
             # credential, and the goal's log is a response the window renders.
             self.service._log(
                 self.goal_id, None, "warn",
-                f'MCP call {server or "?"}.{tool or "?"} refused ({exc.code})',
+                f'MCP call {_log_label(server) or "?"}.{_log_label(tool) or "?"} refused ({exc.code})',
             )
             return f"Refused, and retrying will not help: {exc}"
         self.service._log(
             self.goal_id, None, "info",
-            f'MCP call {result["server"]}.{result["tool"]} ({result["authority"]}): ok, '
+            f'MCP call {_log_label(str(result["server"]))}.{_log_label(str(result["tool"]))} ({result["authority"]}): ok, '
             f'{result["size"]} chars, {result["duration_ms"]} ms',
         )
         text: str = result["text"]
@@ -661,6 +672,17 @@ class ConductorTools:
         # `to_thread` re-raises in the awaiter, so a refusal still arrives as
         # `CommandNotAllowed` — the behaviour this tool already had.
         async with self.service.sandbox_lock(self.root):
+            if approved:
+                # The lock can be held for minutes by another goal's tests in this workspace, which is when a
+                # person presses Pause or Cancel. The status read above is then stale, so it is read again now that
+                # nothing stands between this call and the process: only the person's Start puts the approval
+                # back, exactly as for `write` (`_approval_withdrawn`) and for `verify`.
+                still, why = self.service._write_allowed(self.goal_id)
+                if not still:
+                    raise CommandNotAllowed(
+                        "Nothing was run: the goal's approval was taken back while this command waited its turn "
+                        f"({why.removeprefix('Nothing was written. ')}"
+                    )
             result = await asyncio.to_thread(
                 self.service.sandbox.run_command, self.root, argv,
                 mode="test" if approved else "read_only",

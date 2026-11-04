@@ -337,14 +337,14 @@ def _json_message(reply: _Reply, request_id: int) -> dict[str, Any]:
                 continue
             try:
                 item = json.loads(raw)
-            except ValueError:
+            except (ValueError, RecursionError):
                 continue
             if isinstance(item, dict) and item.get("id") == request_id:
                 return item
         raise McpError("the server's event stream carried no answer.", "mcp_bad_reply")
     try:
         item = json.loads(reply.body.decode("utf-8"))
-    except (UnicodeDecodeError, ValueError) as exc:
+    except (UnicodeDecodeError, ValueError, RecursionError) as exc:
         raise McpError("the server's answer was not JSON.", "mcp_bad_reply") from exc
     if not isinstance(item, dict):
         raise McpError("the server's answer was not a JSON-RPC object.", "mcp_bad_reply")

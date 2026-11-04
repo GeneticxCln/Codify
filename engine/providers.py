@@ -178,7 +178,7 @@ def error_detail(body: str, known: tuple[str, ...] = ()) -> str:
     reason = text
     try:
         parsed = json.loads(text)
-    except ValueError:
+    except (ValueError, RecursionError):
         parsed = None
     if isinstance(parsed, dict):
         error = parsed.get("error")
@@ -1139,7 +1139,7 @@ class OpenAICompatProvider(BaseProvider):
                     async for chunk in self._stream_lines(response):
                         try:
                             obj = json.loads(chunk)
-                        except ValueError:
+                        except (ValueError, RecursionError):
                             continue
                         choices = obj.get("choices") or [{}]
                         text += choices[0].get("delta", {}).get("content") or ""
@@ -1323,7 +1323,7 @@ class OllamaProvider(BaseProvider):
                                 pass
                             if piece.get("done"):
                                 data = piece
-                    except json.JSONDecodeError as exc:
+                    except (json.JSONDecodeError, RecursionError) as exc:
                         raise ProviderError(
                             "provider_bad_response", f"ollama streamed a line that is not JSON: {exc}"
                         ) from exc

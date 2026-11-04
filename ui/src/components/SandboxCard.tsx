@@ -18,7 +18,8 @@ const MODES = [
  *
  * The mode is a setting; whether this host can make a jail is a fact from `/settings/runtime`.
  * Both are shown together because `auto` on a host without bubblewrap is the one combination a
- * person needs to see before a command runs: it is not an error, but it is not containment either.
+ * person needs to see before a command runs: the project's own code is refused until they tick the acknowledgement
+ * below, because running it with no jail is not containment.
  */
 export const SandboxCard: React.FC = () => {
   const [mode, setMode] = useState<string | null>(null);

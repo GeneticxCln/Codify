@@ -2267,15 +2267,17 @@ class GoalService:
 
         Events are the store's copy of prompts, diffs and command output. They used to be deleted only
         when a person deleted the goal or the workspace, so a retention setting covered recordings and
-        snapshots but left the most sensitive rows in place forever. A goal still in PLANNING or RUNNING
-        is never touched, however old its `updated_at` looks.
+        snapshots but left the most sensitive rows in place forever. Only a goal that has *ended*
+        (COMPLETED, FAILED, CANCELLED) is touched, however old its `updated_at` looks: a PAUSED goal is
+        waiting for a person and a PENDING one for their approval, and either can be started again,
+        which would resume a run with its history gone.
         """
         if keep_days <= 0:
             return 0
         cutoff = time.time() - keep_days * 86400
         cur = self._db.execute(
             "DELETE FROM events WHERE goal_id IN ("
-            "SELECT id FROM goals WHERE updated_at < ? AND status NOT IN ('PLANNING', 'RUNNING')"
+            "SELECT id FROM goals WHERE updated_at < ? AND status IN ('COMPLETED', 'FAILED', 'CANCELLED')"
             ")",
             (cutoff,),
         )

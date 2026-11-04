@@ -50,6 +50,7 @@ from engine.models import (
     AgentConfigUpdate,
     ConversationCreate,
     Event,
+    GoalCreate,
     TurnCreate,
     WorkspaceCreate,
 )
@@ -643,6 +644,49 @@ class TestTheToolsAreThePipelinesDoors(ConductorTestCase):
         out = await table["run_command"]({"argv": ["python3", "evil.py"], "reason": "approved"})
         self.assertIn("(exit 0)", out)
         self.assertTrue(mark.exists(), "an approved goal could not run its project's command")
+
+    async def test_a_pause_or_cancel_that_lands_while_a_command_waits_for_the_lock_stops_it(self) -> None:
+        # `run_command` read the goal's status, then waited for the workspace's sandbox lock, which another goal's
+        # tests can hold for minutes, and ran. A Pause or Cancel pressed during that wait changed nothing: the
+        # project's code ran after the person had taken the approval back (docs/03 §1.4). The status is read again
+        # once the lock is held, as `write` reads it again at the write (`_approval_withdrawn`).
+        for taken_back in ("PAUSED", "CANCELLED"):
+            with self.subTest(taken_back=taken_back):
+                mark = self._plant_code_that_leaves_a_mark()
+                mark.unlink(missing_ok=True)
+                goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title=taken_back, description=""))
+                self.goals.update_status(goal.id, self.goals.get(goal.id).version, "RUNNING")
+                executor = self._executor(_ToolProvider())
+                table = executor._conductor_dispatch(goal.id, self.goals.get(goal.id), str(self.repo), load_skills(str(self.repo)))
+                lock = executor.sandbox_lock(str(self.repo))
+
+                await lock.acquire()
+                try:
+                    waiting = asyncio.create_task(table["run_command"]({"argv": ["python3", "evil.py"], "reason": "x"}))
+                    await asyncio.sleep(0.2)  # approved when it asked, and now queued behind the lock
+                    self.assertFalse(waiting.done())
+                    self.goals.update_status(goal.id, self.goals.get(goal.id).version, taken_back)
+                finally:
+                    lock.release()
+
+                with self.assertRaises(CommandNotAllowed) as caught:
+                    await waiting
+                self.assertIn(taken_back.lower(), str(caught.exception))
+                self.assertFalse(mark.exists(), "project code ran after the person took the approval back")
+
+    async def test_a_command_that_waits_for_the_lock_still_runs_when_nothing_changed(self) -> None:
+        mark = self._plant_code_that_leaves_a_mark()
+        mark.unlink(missing_ok=True)
+        self.goals.update_status(self.goal.id, self.goals.get(self.goal.id).version, "RUNNING")
+        executor = self._executor(_ToolProvider())
+        table = executor._conductor_dispatch(self.goal.id, self.goals.get(self.goal.id), str(self.repo), load_skills(str(self.repo)))
+        lock = executor.sandbox_lock(str(self.repo))
+        await lock.acquire()
+        waiting = asyncio.create_task(table["run_command"]({"argv": ["python3", "evil.py"], "reason": "x"}))
+        await asyncio.sleep(0.1)
+        lock.release()
+        self.assertIn("(exit 0)", await waiting)
+        self.assertTrue(mark.exists())
 
     async def test_a_linter_runs_project_code_only_once_the_plan_is_approved(self) -> None:
         # The linters on the test allowlist are not read-only: mypy imports the plugins a

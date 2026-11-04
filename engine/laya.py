@@ -303,7 +303,7 @@ def _extract_json(raw: str) -> dict[str, Any]:
     try:
         parsed = json.loads(text)
         return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         pass
     start = text.find("{")
     end = text.rfind("}")
@@ -312,7 +312,7 @@ def _extract_json(raw: str) -> dict[str, Any]:
     try:
         parsed = json.loads(text[start : end + 1])
         return parsed if isinstance(parsed, dict) else {}
-    except json.JSONDecodeError:
+    except (json.JSONDecodeError, RecursionError):
         return {}
 
 
