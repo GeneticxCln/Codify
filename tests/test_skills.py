@@ -19,6 +19,8 @@ from engine.conductor import TOOLS, Conductor
 from engine.conductor_tools import ConductorTools
 from engine.skills import (
     MAX_DESCRIPTION_CHARS,
+    MAX_REPORTED_PROBLEMS,
+    MAX_SCANNED_ENTRIES,
     MAX_SKILL_CHARS,
     MAX_WORKSPACE_SKILLS,
     SKILLS_DIRNAME,
@@ -101,6 +103,51 @@ class TestAHugeSkillFileIsNotReadWhole(SkillCase):
         skills, _ = workspace_skills(str(self.root))
 
         self.assertEqual(["wide"], [s.name for s in skills])
+
+
+class TestAHostileSkillsDirectoryCostsABoundedAmount(SkillCase):
+    """A cloned repository chooses what is in `.codify/skills/`, including how many entries.
+
+    Every entry that is not a skill produced one "ignored" sentence, and nothing bounded them: 300,000 junk files took
+    16 s and 225 MB to load (inside an `async` route, so the whole engine waited), and each conductor run then logged
+    every sentence as its own `warn` event, hundreds of thousands of rows per turn. The 100-skill cap bounded the
+    skills read and not the entries examined or the problems told.
+    """
+
+    def hostile(self, junk: int, extras: int) -> Path:
+        directory = self.root / SKILLS_DIRNAME
+        (directory / "big").mkdir(parents=True)
+        for number in range(junk):
+            (directory / f"zjunk{number:06d}.txt").touch()
+        for number in range(extras):
+            (directory / "big" / f"extra{number:06d}.bin").touch()
+        (directory / "big" / "SKILL.md").write_text("---\nname: big\ndescription: Use when testing.\n---\nbody\n", encoding="utf-8")
+        self.write_skill("aaa-good", "---\nname: aaa-good\ndescription: Use when testing.\n---\nbody\n")
+        return directory
+
+    def test_the_problems_told_are_bounded_and_the_real_skills_still_load(self) -> None:
+        self.hostile(junk=6000, extras=3000)
+        found, problems = workspace_skills(str(self.root), None)
+        self.assertEqual({"aaa-good", "big"}, {skill.name for skill in found})
+        self.assertLessEqual(len(problems), MAX_REPORTED_PROBLEMS + 3, f"{len(problems)} problems were told")
+        summary = [p for p in problems if "not examined" in p or "more entries" in p]
+        self.assertTrue(summary, "the bound was applied silently: a person cannot see why entries are missing")
+
+    def test_a_directory_past_the_scan_limit_says_how_much_was_not_looked_at(self) -> None:
+        self.hostile(junk=MAX_SCANNED_ENTRIES + 500, extras=0)
+        entries = MAX_SCANNED_ENTRIES + 500 + 2  # the junk, the `big` folder and `aaa-good.md`
+        _found, problems = workspace_skills(str(self.root), None)
+        expected = f"{entries - MAX_SCANNED_ENTRIES} more entries were not examined"
+        self.assertTrue(any(expected in p for p in problems), problems[-3:])
+
+    def test_a_small_directory_still_reports_every_entry_it_ignored(self) -> None:
+        directory = self.root / SKILLS_DIRNAME
+        directory.mkdir(parents=True)
+        for name in ("notes.txt", "data.json", "image.png"):
+            (directory / name).touch()
+        _found, problems = workspace_skills(str(self.root), None)
+        self.assertEqual(3, sum("ignored" in p for p in problems))
+        self.assertFalse(any("not examined" in p for p in problems))
 
 
 class TestWhatShipsWithCodify(unittest.TestCase):

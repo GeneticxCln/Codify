@@ -689,6 +689,13 @@ class SandboxService:
         if not resolved:
             raise CommandNotAllowed(f"{argv[0]} not found on PATH")
         if argv[0] == "git":
+            # `runner_args` switches off what git has a switch for (hooks, `core.fsmonitor`, external diff, textconv).
+            # A filter has none, and `status` and `diff` start it, so a repository whose config names one is refused
+            # here exactly as `GitService` refuses it (`git_readonly.untrusted_config`); inside the jail it would
+            # otherwise write into the workspace, which is the one place the jail leaves writable.
+            config_problem = git_readonly.untrusted_config(root_path, " ".join(argv[1:2]) or "git")
+            if config_problem is not None:
+                raise CommandNotAllowed(config_problem)
             # Every git the sandbox starts, in either mode, is the hardened one: no pager,
             # no configured diff driver, no user config, no credentials in its environment,
             # and repository discovery that stops at the workspace.

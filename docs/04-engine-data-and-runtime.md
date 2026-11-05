@@ -675,7 +675,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `PUT` | `/settings/agents/{role}` | `AgentConfigUpdate` | `AgentConfig` |
 | `POST` | `/settings/agents/{role}/test-connection` | — | `{ok, message}` — a 15s liveness probe (`01` §3) |
 | `GET` | `/settings/roles` | — | each role's `job` + `timing` (`01` §1) |
-| `GET` | `/settings/skills` | query: `workspace_id` (required) | `{workspace_id, available_moves, skills: [{name, description, source, moves, enabled}], disabled, problems, shadows}` — the menu `load_skills` builds for that workspace, built-ins included, with its parse problems and shadowed names. `available_moves` is the conductor's own tool table, for the creator's move picker. A missing id is `422 workspace_required`; an unknown one is `404` |
+| `GET` | `/settings/skills` | query: `workspace_id` (required) | `{workspace_id, available_moves, skills: [{name, description, source, moves, enabled}], disabled, problems, shadows}` — the menu `load_skills` builds for that workspace, built-ins included, with its parse problems and shadowed names. A workspace's `.codify/skills/` is a directory a cloned repository chose, so the scan is bounded: at most 2 000 entries (by name) are examined, at most 25 problems are listed with the rest summarised in one line, and the route reads it off the event loop. `available_moves` is the conductor's own tool table, for the creator's move picker. A missing id is `422 workspace_required`; an unknown one is `404` |
 | `POST` | `/settings/skills` | `{name, description, moves, instructions}`, query: `workspace_id` (required) | `201 {workspace_id, name, description, path, source, moves, shadows}` — a person's New skill action. Renders the canonical `---` header and creates `.codify/skills/<name>.md`. It is create-only: an existing file or folder with that name is `409 skill_exists`; a bad name, description, move or body is `422`; a linked `.codify`/`skills` directory is `422 skill_directory_refused`. It clears a stale disabled row for the new name and never touches another file |
 | `POST` | `/settings/skills/import` | `{filename, content}`, query: `workspace_id` (required) | `201` with the same shape. Uploads one Markdown file. `filename` is a label and a fallback name, never a path; a header `name:` wins. The text is written unchanged after `parse_skill` accepts it, so `.md` only and the same size/UTF-8 limits apply. A path, a non-`.md` name or a malformed skill is `422` |
 | `GET` | `/settings/skills/{name}` | query: `workspace_id` (required) | `{workspace_id, name, description, source, moves, notes, enabled, body}` — one skill's full instructions for the Settings preview. Read-only and on demand; it does not change the switch or reach the conductor. Unknown name/workspace is `404`; a missing id is `422` |
@@ -2069,6 +2069,16 @@ as another way to start the program. A person's *global* config is theirs and st
 is where a legitimate LFS filter belongs — but a workspace whose `.git/config` came from someone else
 is not made safe for a command the person runs themselves; this refusal covers the engine's own
 `status`, `diff`, `add` and `commit`, not the person's push (which runs no filter and keeps its hook).
+
+**The sandbox's git is the second door, and it asks the same question.** `SandboxService.run_command` runs the librarian's
+`read_only` git and the conductor's `run_command` before a plan is approved, without going through `GitService`, so a
+planted filter was started by a read-only `git status` or `git diff` (and, inside the jail, wrote into the workspace,
+the one place the jail leaves writable: `tests/test_sandbox_read_only_git.py`
+`TestRepositoryFiltersAreNotRunByTheSandboxEither`). `git_readonly.untrusted_config` now refuses any git there, in either
+mode, whose repository config names a `filter` section or `include`s another file (which could). It reads
+`<gitdir>/config`, `config.worktree` and, for a linked worktree, the main repository's `config` through `commondir`,
+from the files, so no new process is started to ask. It is conservative on purpose: a repository that uses Git LFS is
+refused in the same sentence, as `GitService` already refused it, and the person can run the command themselves.
 
 Proven by `tests/test_sandbox_read_only_git.py`, which runs real git against a real repository and
 asserts on the repository afterwards; its property tests are the ones that would have caught the class

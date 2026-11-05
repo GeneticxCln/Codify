@@ -397,6 +397,106 @@ class TestRepositoryConfigCannotRunAProgram(RealRepoCase):
         self.assertEqual(before, index.read_bytes(), "a read-only status rewrote the index")
 
 
+class TestRepositoryFiltersAreNotRunByTheSandboxEither(RealRepoCase):
+    """`filter.<name>.clean` is a program in `.git/config`, and `git status` and `git diff` start it.
+
+    `GitService` has refused a repository whose config names one since the audit of 2026-09-29, in the one door every
+    `git_history` and UI git command goes through. `SandboxService.run_command` is a second door (the librarian's
+    `read_only` git, and the conductor's `run_command` before a plan is approved) and did not ask: a file that looks
+    modified is run through the clean filter to compare it, so a read-only `git status` ran the program and, inside the
+    jail, wrote into the workspace (the one place the jail leaves writable). `runner_args` can disable `core.fsmonitor`
+    and the hooks; a filter has no switch, so the answer is the one `GitService` gives: refuse, and say why.
+    """
+
+    def plant_filter(self, key: str = "filter.evil.clean") -> None:
+        (self.root / ".gitattributes").write_text("*.txt filter=evil\n", encoding="utf-8")
+        script = Path(self.tmp.name) / "filter.sh"
+        script.write_text(f'#!/bin/sh\ntouch "{self.marker}"\ncat\n', encoding="utf-8")
+        script.chmod(0o755)
+        self.git("config", key, str(script))
+        os.utime(self.root / "a.txt", (1, 1))  # a stale stat is what makes git run the filter to compare
+
+    def test_the_control_fires_against_plain_git(self) -> None:
+        self.plant_filter()
+        self.marker.unlink(missing_ok=True)
+        self.git("--no-pager", "status", "--short")
+        self.assertTrue(self.marker.exists(), "the control did not fire: the tests below prove nothing")
+
+    def test_a_read_only_door_refuses_instead_of_starting_it(self) -> None:
+        self.plant_filter()
+        for argv in (["git", "status"], ["git", "status", "--short"], ["git", "diff"], ["git", "log", "-1"]):
+            with self.subTest(argv=argv):
+                self.marker.unlink(missing_ok=True)
+                os.utime(self.root / "a.txt", (1, 1))
+                with self.assertRaises(CommandNotAllowed) as caught:
+                    self.sandbox.run_command(str(self.root), argv, timeout_s=20, mode="read_only")
+                self.assertIn("filter", str(caught.exception))
+                self.assertFalse(self.marker.exists(), f"{argv} started the filter before refusing")
+
+    def test_test_mode_is_held_to_the_same_rule(self) -> None:
+        self.plant_filter()
+        with self.assertRaises(CommandNotAllowed):
+            self.sandbox.run_command(str(self.root), ["git", "status"], timeout_s=20, mode="test")
+        self.assertFalse(self.marker.exists())
+
+    def test_smudge_and_process_are_filters_too(self) -> None:
+        for key in ("filter.evil.smudge", "filter.evil.process"):
+            with self.subTest(key=key):
+                self.plant_filter(key)
+                with self.assertRaises(CommandNotAllowed):
+                    self.sandbox.run_command(str(self.root), ["git", "status"], timeout_s=20, mode="read_only")
+                self.git("config", "--unset-all", key)
+
+    def test_a_config_include_could_name_one_so_it_is_refused_unread(self) -> None:
+        other = Path(self.tmp.name) / "extra.cfg"
+        other.write_text('[filter "evil"]\n\tclean = touch X\n', encoding="utf-8")
+        self.git("config", "include.path", str(other))
+        with self.assertRaises(CommandNotAllowed) as caught:
+            self.sandbox.run_command(str(self.root), ["git", "status"], timeout_s=20, mode="read_only")
+        self.assertIn("include", str(caught.exception))
+
+    def test_a_linked_worktree_reads_the_shared_config_too(self) -> None:
+        """A worktree's `.git` is a file; its config is the main repository's, found through `commondir`."""
+        self.plant_filter()
+        linked = Path(self.tmp.name) / "linked"
+        self.git("worktree", "add", "-q", str(linked))
+        self.assertTrue((linked / ".git").is_file())
+        with self.assertRaises(CommandNotAllowed):
+            self.sandbox.run_command(str(linked), ["git", "status"], timeout_s=20, mode="read_only")
+
+    def test_an_ordinary_repository_is_untouched_by_the_rule(self) -> None:
+        for argv in (["git", "status"], ["git", "diff"], ["git", "log", "-1"]):
+            with self.subTest(argv=argv):
+                self.assertIsNotNone(self.attempt(*argv))
+
+    def test_a_repository_without_a_git_dir_is_left_for_git_to_report(self) -> None:
+        bare = Path(self.tmp.name) / "notarepo"
+        bare.mkdir()
+        result = self.sandbox.run_command(str(bare), ["git", "status"], timeout_s=20, mode="read_only")
+        self.assertNotEqual(0, result["exit_code"])  # git's own "not a git repository", not a refusal of ours
+
+    def test_the_jail_does_not_make_it_safe_to_run(self) -> None:
+        """The reproduction that made this a finding: with the real jail on, the filter wrote into the workspace."""
+
+        class Jailed:
+            def get_str(self, key: str) -> str:
+                return "auto" if key == "sandbox_isolation" else ""
+
+            def get_int(self, key: str) -> int:
+                return 0
+
+        inside = self.root / "WRITTEN-BY-THE-FILTER"
+        script = Path(self.tmp.name) / "inside.sh"
+        script.write_text(f'#!/bin/sh\ntouch "{inside}"\ncat\n', encoding="utf-8")
+        script.chmod(0o755)
+        (self.root / ".gitattributes").write_text("*.txt filter=evil\n", encoding="utf-8")
+        self.git("config", "filter.evil.clean", str(script))
+        os.utime(self.root / "a.txt", (1, 1))
+        with self.assertRaises(CommandNotAllowed):
+            SandboxService(settings=Jailed()).run_command(str(self.root), ["git", "status"], timeout_s=20, mode="read_only")
+        self.assertFalse(inside.exists(), "a read-only git wrote into the workspace")
+
+
 class TestTheWorkspaceIsTheCeiling(RealRepoCase):
     """A workspace that is not a repository must not read the history of one above it."""
 

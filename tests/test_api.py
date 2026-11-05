@@ -2646,6 +2646,30 @@ class TestApi(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(422, r.status_code, "a goal cannot choose its own containment")
 
+    async def test_the_skills_route_reads_the_directory_off_the_event_loop(self) -> None:
+        """`load_skills` walks a directory a cloned repository chose: on the loop, a big one stalls every request."""
+        import threading
+        from unittest import mock
+
+        import engine.app as engine_app
+        import engine.skills as skills_module
+
+        ws = await self.client.post(
+            "/workspaces", headers=self.headers, json={"name": "S", "root_path": self.temp_dir.name},
+        )
+        self.assertEqual(200, ws.status_code, ws.text)
+        seen: list[bool] = []
+        real = skills_module.load_skills
+
+        def spy(*args: Any, **kwargs: Any) -> Any:
+            seen.append(threading.current_thread() is threading.main_thread())
+            return real(*args, **kwargs)
+
+        with mock.patch.object(engine_app, "load_skills", spy):
+            r = await self.client.get(f"/settings/skills?workspace_id={ws.json()['id']}", headers=self.headers)
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertEqual([False], seen, "the route loaded skills on the event loop's own thread")
+
     async def test_review_deep_is_a_person_s_engine_switch_and_a_goal_cannot_carry_it(self) -> None:
         """Deep review costs extra model calls on every reviewed step, so only `PUT /settings/engine` turns it on.
 

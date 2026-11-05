@@ -414,6 +414,22 @@ def _clean(text: str) -> str:
 
 
 def extract(markup: str, url: str, selector: str | None, budget: int) -> Fetched:
+    """`_extract`, with a page too deeply nested to read answered as a refusal.
+
+    The reader walks the tree recursively and a page is a stranger's text: a few thousand unclosed `<div>`s is
+    a `RecursionError` (which is neither a `ValueError` nor a `FetchRefused`) from every walk below, on every
+    interpreter this project supports. It is a page the model cannot be given, so it is told so in a sentence.
+    """
+    try:
+        return _extract(markup, url, selector, budget)
+    except RecursionError as exc:
+        raise FetchRefused(
+            "that page is nested too deeply to read (thousands of elements inside one another); "
+            "it is not text a model can be given."
+        ) from exc
+
+
+def _extract(markup: str, url: str, selector: str | None, budget: int) -> Fetched:
     """The text, title and links of an HTML page, by the engine's own reader (`engine/html_text.py`).
 
     Synchronous and pure, so it can be tested on a string and run in a thread. The reader drops script, style,
