@@ -57,6 +57,8 @@ instructions the user thinks they are running.
 
 from __future__ import annotations
 
+import itertools
+import os
 import re
 from collections.abc import Collection
 from dataclasses import dataclass
@@ -85,6 +87,13 @@ MAX_DESCRIPTION_CHARS = 200
 # A cap on how many skills one workspace can contribute, so a directory of
 # ten thousand files cannot turn the menu into the whole prompt.
 MAX_WORKSPACE_SKILLS = 100
+#: How many entries of the skills directory are examined, and how many "ignored" sentences are told one by one. A
+#: cloned repository chooses what is in that directory, so neither may follow its size: 300,000 junk entries cost
+#: 16 s and 225 MB, and each sentence became its own logged event on every run. What was not examined is said once.
+MAX_SCANNED_ENTRIES = 2000
+MAX_REPORTED_PROBLEMS = 25
+#: The bundled files of one skill folder that are named; the rest are counted.
+MAX_EXTRAS_LISTED = 10
 
 # The header keys a skill may use, and the most moves one may declare. A list longer than there are moves is
 # not a longer list of moves.
@@ -366,9 +375,25 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[tupl
         ]
     files: list[tuple[Path, str]] = []
     problems: list[str] = []
-    for path in sorted(directory.iterdir(), key=lambda p: p.name):
+    told = 0
+    silent = 0
+
+    def say(sentence: str) -> None:
+        """Tell one problem, until the budget for telling them is spent; after that, count."""
+        nonlocal told, silent
+        if told < MAX_REPORTED_PROBLEMS:
+            problems.append(sentence)
+            told += 1
+        else:
+            silent += 1
+
+    # Names, not `Path` objects: a hostile directory can hold hundreds of thousands, and only the first
+    # `MAX_SCANNED_ENTRIES` by name are looked at.
+    names = sorted(os.listdir(directory))
+    not_examined = max(0, len(names) - MAX_SCANNED_ENTRIES)
+    for path in (directory / name for name in names[:MAX_SCANNED_ENTRIES]):
         if path.is_symlink():
-            problems.append(
+            say(
                 f"{path.name}: refused — a skill file or folder must be real, inside "
                 f"{SKILLS_DIRNAME}, not a link to one somewhere else"
             )
@@ -376,37 +401,46 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[tupl
         if path.is_dir():
             skill_file = path / "SKILL.md"
             if skill_file.is_symlink() or not skill_file.is_file():
-                problems.append(
-                    f"{path.name}/: ignored — a skill folder must contain a real SKILL.md file"
-                )
+                say(f"{path.name}/: ignored — a skill folder must contain a real SKILL.md file")
                 continue
             if skill_file.resolve().parent != path.resolve() or path.resolve().parent != root:
-                problems.append(
+                say(
                     f"{path.name}/SKILL.md: refused — a skill folder and its SKILL.md must be "
                     f"inside {SKILLS_DIRNAME}, not links to somewhere else"
                 )
                 continue
             files.append((skill_file, path.name.lower()))
-            for extra in sorted(path.iterdir(), key=lambda p: p.name):
-                if extra.name != "SKILL.md":
-                    problems.append(
-                        f"{path.name}/{extra.name}: ignored — a skill is its SKILL.md; "
-                        "bundled files are never read or run"
-                    )
+            extras = sorted(
+                (e for e in itertools.islice(path.iterdir(), MAX_SCANNED_ENTRIES + 1) if e.name != "SKILL.md"),
+                key=lambda p: p.name,
+            )
+            for extra in extras[:MAX_EXTRAS_LISTED]:
+                say(
+                    f"{path.name}/{extra.name}: ignored — a skill is its SKILL.md; "
+                    "bundled files are never read or run"
+                )
+            if len(extras) > MAX_EXTRAS_LISTED:
+                more = len(extras) - MAX_EXTRAS_LISTED
+                say(f"{path.name}/: {more}{'+' if len(extras) > MAX_SCANNED_ENTRIES else ''} more bundled files ignored")
             continue
         if path.suffix != ".md":
-            problems.append(
-                f"{path.name}: ignored — a skill is a .md file or a folder with a SKILL.md"
-            )
+            say(f"{path.name}: ignored — a skill is a .md file or a folder with a SKILL.md")
             continue
         if path.resolve().parent != root:
-            problems.append(
+            say(
                 f"{path.name}: refused — a skill file must be a real file inside "
                 f"{SKILLS_DIRNAME}, not a link to one somewhere else"
             )
             continue
         if path.is_file():
             files.append((path, path.stem.lower()))
+    if silent:
+        problems.append(f"{SKILLS_DIRNAME}: {silent} more entries were ignored or refused (not listed one by one)")
+    if not_examined:
+        problems.append(
+            f"{SKILLS_DIRNAME}: {not_examined} more entries were not examined; "
+            f"only the first {MAX_SCANNED_ENTRIES} (by name) were looked at"
+        )
     return files, problems
 
 

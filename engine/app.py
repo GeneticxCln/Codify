@@ -1677,7 +1677,8 @@ async def get_skills(
     """
     workspace = _skills_workspace(request, workspace_id)
     workspaces = request.app.state.workspaces
-    loaded = load_skills(workspace.root_path, ConductorTools.NAMES)
+    # Off the event loop: the directory is the cloned repository's, and walking a big one is slow and blocking.
+    loaded = await asyncio.to_thread(load_skills, workspace.root_path, ConductorTools.NAMES)
     disabled = workspaces.disabled_skills(workspace.id)
     return {
         "workspace_id": workspace.id,
@@ -1752,7 +1753,7 @@ async def get_skill(
         raise ApiError(422, "invalid_skill_name", "skill name is invalid")
     workspace = _skills_workspace(request, workspace_id)
     workspaces = request.app.state.workspaces
-    loaded = load_skills(workspace.root_path, ConductorTools.NAMES)
+    loaded = await asyncio.to_thread(load_skills, workspace.root_path, ConductorTools.NAMES)
     skill = loaded.get(clean)
     if skill is None:
         raise ApiError(404, "unknown_skill", f"no skill called {clean!r} is available here")
@@ -1788,7 +1789,8 @@ async def put_skill(
     # Both directions are checked. Enabling a typo would store a preference that can never be
     # satisfied; disabling one would store a dead name forever. The workspace is the scope:
     # the same skill may stay on in another repository.
-    available = {skill.name for skill in load_skills(workspace.root_path, ConductorTools.NAMES).skills}
+    loaded = await asyncio.to_thread(load_skills, workspace.root_path, ConductorTools.NAMES)
+    available = {skill.name for skill in loaded.skills}
     if clean not in available:
         raise ApiError(404, "unknown_skill", f"no skill called {clean!r} is available here")
     disabled = workspaces.set_skill_enabled(workspace.id, clean, enabled)
