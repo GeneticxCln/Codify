@@ -844,6 +844,22 @@ class TestWhatComesBack(unittest.IsolatedAsyncioTestCase):
         # reject, so it is the one that cost a request.
         self.assertEqual(len(calls), 1)
 
+    async def test_a_page_nested_past_the_interpreters_limit_is_a_sentence_not_a_crash(self) -> None:
+        """A page a stranger wrote can open a few thousand `<div>`s and never close one.
+
+        The reader walks the tree recursively, so it answers with `RecursionError`, which is not a `FetchRefused`.
+        The depth is 200 000 so it is over the limit on every interpreter this project supports (about 990 levels
+        of Python on 3.10, about 10 000 on 3.13); with a page that only just crosses one of them, the test would
+        pass on the other.
+        """
+        depth = 200_000
+        deep = "<html><body>" + "<div>" * depth + "x" + "</div>" * depth + "</body></html>"
+        for selector in (None, "div"):
+            with self.subTest(selector=selector):
+                with self.assertRaises(FetchRefused) as caught:
+                    await get("https://docs.example/", lambda request: html(deep), selector=selector)
+                self.assertIn("nested", str(caught.exception))
+
     async def test_a_document_with_nothing_to_parse_is_no_text_and_not_a_crash(self) -> None:
         # Only a comment, or only an XML declaration: lxml builds no root element, and the parser fails on its
         # first question. The page has no text, and that is what the model is told.
