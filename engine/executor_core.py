@@ -487,6 +487,14 @@ class _ExecutorCore:
                 f"Nothing was written: the goal was {goal.status.lower()} while the fixer was answering, "
                 "so its reply was not applied."
             )
+        if goal.status in ("PLANNING", "PENDING"):
+            # No approval exists yet, and the step runner is not the thing that grants one: only a person's Start
+            # does (`RUNNING`). Every caller today reaches here for a running goal, so this is the write gate
+            # standing on its own rather than on its callers (docs/00 section 6.9).
+            return (
+                f"Nothing was written: this goal is {goal.status.lower()}, so no plan has been approved to write "
+                "yet, and the fixer's reply was not applied."
+            )
         return None
 
     def _cancelled(self, goal_id: str) -> bool:
