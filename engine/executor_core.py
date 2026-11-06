@@ -498,12 +498,20 @@ class _ExecutorCore:
         return None
 
     def _cancelled(self, goal_id: str) -> bool:
-        """True when the goal was cancelled (or otherwise left RUNNING) mid-step. A pause is not that.
+        """True when the goal was stopped (cancelled, or otherwise left RUNNING) mid-step. A pause is not that, and
+        neither is a failure.
 
         Pause "asks for a stop between steps" (docs/04 section 1.2) and `POST /goals/{id}/cancel` says the
         same of itself: a paused goal's running step finishes, because its files are already on disk and
         throwing the review and the commit away would make Start call the fixer again over them. The one
         thing a pause does stop is a write that has not happened yet (`_approval_withdrawn`).
+
+        A goal that is `FAILED` is not stopped either. In a parallel batch a step that fails marks the goal
+        `FAILED` at once (`_fail`), while its healthy siblings are still running, and the batch is meant to let them
+        finish: docs/04 section 1.2 says so, and a sibling that was abandoned here after its write was left
+        `IN_PROGRESS`, unreviewed and uncommitted, in a log that blamed a cancel (docs/23, O2). Nothing else runs a
+        step in a goal that has already failed: the driver stops between steps and between batches, so a failed
+        goal's healthy step is the one case this admits.
 
         `_run_steps` only checks status *between* steps, so without this a cancel
         landing mid-step changed nothing: the step ran to the end — including the
@@ -511,7 +519,11 @@ class _ExecutorCore:
         to the user's repository is the one act a cancel must be able to prevent,
         so the stages that lead to it re-check before doing irreversible work.
         """
-        return self.goals.get(goal_id).status not in ("RUNNING", "PAUSED")
+        return self.goals.get(goal_id).status not in ("RUNNING", "PAUSED", "FAILED")
+
+    def _why_stopped(self, goal_id: str) -> str:
+        """The sentence that starts a log line about a step that was stopped: what the goal is, not what was guessed."""
+        return f"the goal is {self.goals.get(goal_id).status.lower()}"
 
     def _test_result(
         self,

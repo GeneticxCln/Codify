@@ -197,7 +197,7 @@ class _Steps(_Design):
                                 },
                             ))
                             if self._cancelled(goal_id):
-                                self._log(goal_id, step.id, "info", "cancelled — not running the fixer's next pass")
+                                self._log(goal_id, step.id, "info", f"{self._why_stopped(goal_id)} — not running the fixer's next pass")
                                 return
                             fixer_calls += 1
                             async with self._stage(
@@ -246,7 +246,7 @@ class _Steps(_Design):
                         # A cancel that lands while tests fail must still win —
                         # the retry is work, and work stops when the user says so.
                         if self._cancelled(goal_id):
-                            self._log(goal_id, step.id, "info", "cancelled — not retrying the failed step")
+                            self._log(goal_id, step.id, "info", f"{self._why_stopped(goal_id)} — not retrying the failed step")
                             return
                         continue
                     break
@@ -278,7 +278,7 @@ class _Steps(_Design):
             # cancel that arrives while tests run must stop the goal before the
             # scribe records changes the user asked not to make.
             if self._cancelled(goal_id):
-                self._log(goal_id, step.id, "info", "cancelled — skipping review and commit for this step")
+                self._log(goal_id, step.id, "info", f"{self._why_stopped(goal_id)} — skipping review and commit for this step")
                 return
             # Every path that reaches the review phase assigned them: the fixer
             # loop sets `summaries`, the replay branch sets it, and a failure
@@ -291,7 +291,7 @@ class _Steps(_Design):
                 await self._critic(goal_id, step, fs, summaries, evidence, outcome, ws_root=ws.root_path)
                 critic_stage.record("approve")
             if self._cancelled(goal_id):
-                self._log(goal_id, step.id, "info", "cancelled — skipping the summary for this step")
+                self._log(goal_id, step.id, "info", f"{self._why_stopped(goal_id)} — skipping the summary for this step")
                 return
             async with self._stage(goal_id, "scribe", "scribe", step.id) as scribe_stage:
                 recorded = await self._scribe(goal_id, step, summaries, ws.root_path, goal.dry_run, outcome)
@@ -1316,7 +1316,11 @@ class _Steps(_Design):
                     raise AgentOutputInvalid("critic request-changes requires >=1 reason", role="critic")
                 self._set_step(goal_id, step, "IN_PROGRESS", review_notes="\n".join(reasons), last_agent_role="critic")
                 self._log(goal_id, step.id, "warn", f"critic requested changes: {reasons}")
-                self._pause(goal_id, step.id, "critic_rejected")
+                # A goal that is already FAILED (a parallel sibling failed while this step was being reviewed) cannot be
+                # paused, and trying raised `illegal_status` into a step that had only been asked for changes. The step
+                # keeps its notes and stays IN_PROGRESS, which is what a Retry picks up.
+                if self.goals.get(goal_id).status != "FAILED":
+                    self._pause(goal_id, step.id, "critic_rejected")
                 raise CriticRejection("critic requested changes; human retry required", reasons)
             raise AgentOutputInvalid(f"critic decision invalid: {decision!r}", role="critic")
 
@@ -1528,7 +1532,7 @@ class _Steps(_Design):
         if self._cancelled(goal_id):
             self._log(
                 goal_id, step.id, "info",
-                "cancelled — skipping the commit for this step",
+                f"{self._why_stopped(goal_id)} — skipping the commit for this step",
             )
             return "cancelled"
         # Only what this step wrote. A bare `git add -A` would commit the

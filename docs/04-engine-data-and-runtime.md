@@ -173,6 +173,12 @@ so the step runner does not depend on its callers having checked), gets no write
 the model's failure (`WriteWithdrawn`, stage outcome `cancelled`). Narrower than the first check on purpose: a goal
 that is `FAILED` because a parallel sibling failed has not had its approval taken back, and the batch still lets
 its healthy steps finish.
+The same holds after the write. The checks before the critic, the summary and the commit (`_cancelled`) treat `FAILED`
+like `RUNNING` and `PAUSED`, so a healthy sibling is reviewed and committed even though the failed one has already
+marked the goal `FAILED`; only the person's Cancel (or a state a running goal cannot be in) stops it, and the log line
+says which (`the goal is cancelled`). A critic that asks for changes on a goal that is already `FAILED` cannot pause it,
+so the step keeps the critic's notes and stays `IN_PROGRESS` for a Retry, with no error of its own. The batch is
+retried at the failed step; the healthy one stays `COMPLETED` (`tests/test_sibling_failure.py`).
 
 ### 1.3 PlanStep
 
