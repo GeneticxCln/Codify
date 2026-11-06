@@ -2615,6 +2615,10 @@ class TestParallelStepExecution(unittest.IsolatedAsyncioTestCase):
             "UPDATE plan_steps SET suggested_paths = ? WHERE id = ?",
             (json.dumps(["b.txt"]), steps["a"].id),
         )
+        # b finished: a failed sibling no longer strands a healthy one (docs/23, O2), so the unfinished sibling this
+        # guard exists for is put back by hand, as a crash mid-step would have left it.
+        self.assertEqual("COMPLETED", self.goals.steps(self.goal.id)[1].status)
+        self.conn.execute("UPDATE plan_steps SET status = 'IN_PROGRESS' WHERE id = ?", (steps["b"].id,))
         self.conn.commit()
 
         with self.assertRaises(ApiError) as ctx:
