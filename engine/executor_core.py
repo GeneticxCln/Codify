@@ -19,7 +19,7 @@ from typing import Any
 
 from engine.agent_orchestrator import AgentOrchestrator
 from engine.compaction import CompactionService
-from engine.executor_support import AgentOutputInvalid, CriticRejection, TestsFailed, WriteWithdrawn
+from engine.executor_support import AgentOutputInvalid, CriticRejection, RunWithdrawn, TestsFailed, WriteWithdrawn
 from engine.git import GitService
 from engine.laya import LayaService
 from engine.models import PAUSE_REASONS, Event, EventType, PlanStep, ROLES
@@ -105,6 +105,7 @@ _STAGE_EXCEPTIONS: tuple[tuple[type[BaseException], str], ...] = (
     (TestsFailed, "fail"),
     (CriticRejection, "request_changes"),
     (WriteWithdrawn, "cancelled"),
+    (RunWithdrawn, "cancelled"),
     (AgentOutputInvalid, "invalid"),
 )
 

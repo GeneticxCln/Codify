@@ -12,6 +12,7 @@ import asyncio
 import os
 import subprocess
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +23,7 @@ from engine.executor_support import (
     CriticRejection,
     FixerFileMoved,
     PathRefused,
+    RunWithdrawn,
     TestsFailed,
     WriteWithdrawn,
     _verifier_outcome,
@@ -913,6 +915,7 @@ class _Steps(_Design):
     async def _verifier(
         self, goal_id: str, step: PlanStep, ws: Any, evidence: dict[str, Any] | None = None,
         prior_failure: dict[str, Any] | None = None, diffs: list[dict[str, Any]] | None = None,
+        still_approved: Callable[[], str] | None = None,
     ) -> dict[str, Any]:
         """Get a test verdict, treating a refused command as information.
 
@@ -935,6 +938,13 @@ class _Steps(_Design):
         executes nothing so it does not consume that budget, and refusals are
         capped — after `MAX_REFUSED_TEST_COMMANDS` the verifier must answer with a
         verdict.
+
+        `still_approved` is the conductor's question (see `conductor_tools.verify`): it answers "" while the goal may
+        still run the project's code and otherwise the sentence saying why not. It is asked once the sandbox lock is
+        held, immediately before the process starts, because that is after both slow waits (the verifier's model call
+        and the lock) and nothing stands between the answer and the command. A withdrawal raises `RunWithdrawn` and
+        nothing runs. The recipe passes none: there a Pause stops the goal between steps and a running step finishes
+        (`_cancelled`).
         """
         # DRAFT RECONSTRUCTION (docs/04 §4.0a.1, §4.0a.2). The mechanical brand
         # check is the engine's own finding about the bytes on disk, not the
@@ -1048,6 +1058,10 @@ class _Steps(_Design):
                 # The sandbox is shared: under a parallel goal another step's
                 # test must not run in the tree this command is measuring.
                 async with self.sandbox_lock(ws.root_path):
+                    if still_approved is not None:
+                        withdrawn = still_approved()
+                        if withdrawn:
+                            raise RunWithdrawn(withdrawn)
                     result = await asyncio.to_thread(
                         self.sandbox.run_command, ws.root_path, proposed, timeout_s=timeout_s,
                         cancel=self.cancel_signal(goal_id),

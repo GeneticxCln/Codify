@@ -62,6 +62,17 @@ class WriteWithdrawn(Exception):
     """
 
 
+class RunWithdrawn(Exception):
+    """The goal stopped being approved to run the project's code while the verifier was answering or its command was
+    waiting its turn, so the command was not started.
+
+    The same kind of event as `WriteWithdrawn`, for the other power an approval grants: a person pressed Pause or
+    Cancel, which takes back the right to run the project's own tests (docs/03 section 1.4). Nothing ran. It is not a
+    failure of the model or the engine, so it is not re-asked and not handed to a fallback, hence a class of its own
+    outside `AgentOutputInvalid`. The message is what the conductor is told.
+    """
+
+
 class TestsFailed(AgentOutputInvalid):
     """The verifier ran and reported a failure.
 
