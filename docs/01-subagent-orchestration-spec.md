@@ -538,7 +538,7 @@ a copy is sent. `tests/test_provider_requests_surrogates.py` covers all four pro
 | `design` | `ExecutorService._design` | no tools at all; rendered surfaces only — layout, states, components, tokens, acceptance, never an API, a schema or a set of names |
 | `plan` | `_plan_steps` | refuses without evidence; writes steps, never files |
 | `write` | `ExecutorService._fixer` | docs/00 §6.9 — the only move that writes, gated on approval |
-| `verify` | `ExecutorService._verifier` | `validate_argv` in `test` mode — second door, same list |
+| `verify` | `ExecutorService._verifier` | `validate_argv` in `test` mode — second door, same list. Like `run_command`, it asks the stored status again once the workspace's sandbox lock is held, right before the process starts, which is after both slow waits (the verifier's model call and the lock): a Pause or Cancel pressed in either stops the run, nothing is run, no `test_result` is recorded and the verifier's stage outcome is `cancelled`. The recipe's own `run_step` is not asked: there a Pause stops the goal between steps and a running step finishes |
 | `review` | `ExecutorService._critic` | approve or request changes; cannot write |
 | `summarize` | `ExecutorService._scribe` | commits only after `review` approved |
 | `todo` | `engine/todo.py`, over the goal's `todo_updated` events | none — the conductor's own note to its next run: bounded (20 items, 160 characters, 40 edits per run), one line each, put back in its prompt as *its own notes, not instructions*, never shown to a sub-agent and not in `RECALLABLE`. Nothing in the engine reads it to decide anything |

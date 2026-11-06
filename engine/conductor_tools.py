@@ -19,6 +19,7 @@ from engine.executor_support import (
     AgentNotConfigured,
     AgentOutputInvalid,
     CriticRejection,
+    RunWithdrawn,
     TestsFailed,
     WriteWithdrawn,
     _verifier_outcome,
@@ -1312,13 +1313,28 @@ class ConductorTools:
                 "running may do that; this goal is paused, not yet approved, plan-only, or over. A paused goal is "
                 "resumed only by the user, with Start. Tell them what is waiting for them and stop."
             )
+
+        def approval_taken_back() -> str:
+            # Asked again by the verifier once the lock is held, right before the process starts: the status read
+            # above is minutes old by then (a local model's answer, another goal's tests holding the lock), which is
+            # when a person presses Pause or Cancel. "" means the goal may still run the project's code.
+            still, why = self.service._write_allowed(self.goal_id)
+            if still:
+                return ""
+            return (
+                "Nothing was run: the goal's approval was taken back while the verifier was answering or its "
+                f"command waited its turn ({why.removeprefix('Nothing was written. ')}"
+            )
+
         try:
             async with self.service._stage(self.goal_id, "verifier", "verifier", step.id) as v:
                 outcome = await self.service._verifier(
                     self.goal_id, step, self.ws, self.service._evidence_for(self.goal_id),
-                    diffs=state.summaries(),
+                    diffs=state.summaries(), still_approved=approval_taken_back,
                 )
                 v.record(_verifier_outcome(outcome))
+        except RunWithdrawn as exc:
+            return str(exc)
         except TestsFailed as exc:
             # The verifier's own contract: a failed run is the verdict, and
             # it raises it as control flow inside `run_step`. Here it is a
