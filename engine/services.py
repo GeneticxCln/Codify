@@ -667,10 +667,23 @@ REOPENED_BY: dict[str, frozenset[str]] = {
 }
 
 
+# Two moves nothing legitimate makes. `RUNNING -> PENDING` would send a started goal back to waiting for the approval it
+# already has (a stale planning write), and `PAUSED -> COMPLETED` would finish a goal a person paused (a runner's final
+# write landing after their Pause). Nothing moves back into `PLANNING` either: a goal is planned once. The rule is
+# deliberately no wider: the whole suite, run with every status write recorded, showed tests and the benchmark harness
+# approving a goal straight from `PLANNING` to `RUNNING` (the `start` route refuses that in production), and a stricter
+# table would have meant rewriting those. See `tests/test_goal_lifecycle.py::TestAGoalNeverGoesBackwards`.
+BACKWARD_MOVES = frozenset({("RUNNING", "PENDING"), ("PAUSED", "COMPLETED")})
+
+
 def may_change_status(current: str, target: str) -> bool:
-    if current not in TERMINAL_STATUSES or target == current:
+    if target == current:
         return True
-    return target in REOPENED_BY.get(current, frozenset())
+    if current in TERMINAL_STATUSES:
+        return target in REOPENED_BY.get(current, frozenset())
+    if target == "PLANNING":
+        return False
+    return (current, target) not in BACKWARD_MOVES
 
 
 class WorkspaceService:
