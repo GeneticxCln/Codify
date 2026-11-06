@@ -115,8 +115,13 @@ class TestADiscoveryErrorNeverCarriesTheKey(unittest.IsolatedAsyncioTestCase):
         """httpx names the whole header value when it will not send one; a key with a newline is that."""
 
         async def hold(_reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-            await asyncio.sleep(1)
-            writer.close()
+            # Closed in a `finally`: the test ends while this is still sleeping, the runner cancels the task, and a
+            # `close()` after the sleep never ran, so each accepted connection was an unclosed transport that Python
+            # 3.10 reported (six of them, one per subtest) when it was garbage collected.
+            try:
+                await asyncio.sleep(1)
+            finally:
+                writer.close()
 
         server = await asyncio.start_server(hold, "127.0.0.1", 0)
         port = server.sockets[0].getsockname()[1]

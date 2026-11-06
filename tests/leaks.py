@@ -14,6 +14,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import gc
+import inspect
 import unittest
 import warnings
 from collections.abc import Callable, Iterator
@@ -38,6 +39,13 @@ def leak_checked(cls: _T) -> _T:
     """Run every `test_*` method of `cls` inside `no_unclosed_resources`."""
 
     def wrap(method: Callable[..., Any]) -> Callable[..., Any]:
+        if inspect.iscoroutinefunction(method):
+            # A sync wrapper would return the un-awaited coroutine and leave the context before the test ran, which
+            # checks nothing and says nothing. An async test's transports are also only finalised when the runner
+            # closes its loop, after the test body, so this cannot see them: use a per-module run with every
+            # `ResourceWarning` shown (`python -W always::ResourceWarning -m unittest tests.test_x`) for those.
+            raise TypeError(f"leak_checked cannot check an async test: {method.__qualname__}")
+
         @functools.wraps(method)
         def checked(self: unittest.TestCase, *args: Any, **kwargs: Any) -> Any:
             with no_unclosed_resources():
