@@ -23,6 +23,7 @@ from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/herm
 import json
 import tempfile
 import time
+import types
 import typing
 import unittest
 from pathlib import Path
@@ -286,10 +287,23 @@ class TestTablesMatchTheEngine(unittest.IsolatedAsyncioTestCase):
         self.goals = GoalService(conn)
         self.workspaces = WorkspaceService(conn)
         # Only `goals` and the boot token are on the refusal path; anything further
-        # and the fixture would be asserting against its own stubs.
-        app.state.goals = self.goals
-        app.state.workspaces = self.workspaces
-        app.state.token = BOOT_TOKEN
+        # and the fixture would be asserting against its own stubs. `/apply` also reads
+        # `app.state.executor` before its first guard (it only *uses* it past the version
+        # check), and this class never provided one: it passed in the full suite only
+        # because an earlier test had left one on the shared `app`, and failed 11 times
+        # when run alone. The stand-in below is this test's own. `/start` asks `is_driving` (a read)
+        # before its version check, so that answers "no"; `claim_driver` is what takes the goal, and
+        # it fails loudly if a probe ever gets that far, which would mean the stale version it quotes
+        # no longer stops the request first.
+        self._borrow_app_state(
+            goals=self.goals,
+            workspaces=self.workspaces,
+            token=BOOT_TOKEN,
+            executor=types.SimpleNamespace(
+                claim_driver=self._the_probe_must_not_reach_the_executor,
+                is_driving=lambda goal_id: False,
+            ),
+        )
         self.client = httpx.AsyncClient(
             transport=ASGITransport(app=app), base_url="http://test"
         )
@@ -302,6 +316,25 @@ class TestTablesMatchTheEngine(unittest.IsolatedAsyncioTestCase):
         self.ws_id = str(
             self.workspaces.create(WorkspaceCreate(name="ws", root_path=str(ws_root))).id
         )
+
+    def _borrow_app_state(self, **values: Any) -> None:
+        """Set attributes on the shared `app.state` for this test, and put back what was there.
+
+        `app` is one global object for the whole run. Assigning to it and never restoring is how a test comes to
+        depend on, or to leave behind, what another test set.
+        """
+        missing = object()
+        for name, value in values.items():
+            previous = getattr(app.state, name, missing)
+            setattr(app.state, name, value)
+            self.addCleanup(
+                (lambda n: lambda: delattr(app.state, n))(name) if previous is missing
+                else (lambda n, p: lambda: setattr(app.state, n, p))(name, previous)
+            )
+
+    @staticmethod
+    def _the_probe_must_not_reach_the_executor(*_: Any, **__: Any) -> typing.NoReturn:
+        raise AssertionError("a probe reached the executor: the stale version should have refused it first")
 
     def _goal_in(self, status: str, *, dry_run: bool = False) -> str:
         """A fresh goal forced into `status`, by the same service the route reads."""
