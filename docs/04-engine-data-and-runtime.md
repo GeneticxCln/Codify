@@ -167,8 +167,9 @@ sequence over it.
 
 **The write gate is asked at the write.** The conductor's `write` and the step runner check approval before the
 fixer's model call, and a local model takes minutes to answer. `_fixer` asks again immediately before `fs.apply`
-(`_approval_withdrawn`): a goal the person has `CANCELLED` or `PAUSED`, deleted, or switched back to plan-only
-gets no write — the reply is discarded, nothing is written, the step stays as it was, and it is not reported as
+(`_approval_withdrawn`): a goal the person has `CANCELLED` or `PAUSED`, deleted, or switched back to plan-only,
+and a goal that is still `PLANNING` or `PENDING` (no approval exists yet: only a person's Start makes it `RUNNING`,
+so the step runner does not depend on its callers having checked), gets no write — the reply is discarded, nothing is written, the step stays as it was, and it is not reported as
 the model's failure (`WriteWithdrawn`, stage outcome `cancelled`). Narrower than the first check on purpose: a goal
 that is `FAILED` because a parallel sibling failed has not had its approval taken back, and the batch still lets
 its healthy steps finish.
