@@ -11,22 +11,29 @@ display and a display's failures belong.
 
 from __future__ import annotations
 
+import gc
+import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+import weakref
 from io import StringIO
 from pathlib import Path
+from typing import Any
+from unittest import mock
 
 # `scripts` is a package (`scripts/__init__.py`), imported the way
 # `tests/test_embed_probe.py` imports `scripts.embed_smoke` — a plain package
 # import, no sys.path surgery and no `# type: ignore[import-not-found]`, which
 # this repo treats as a config problem (pyproject.toml says why).
 from scripts import tabs_smoke
+from tests.leaks import leak_checked
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
+@leak_checked
 class VerdictTestCase(unittest.TestCase):
     """`run_smoke` against a fake child: the decision and the diagnosis."""
 
@@ -62,6 +69,49 @@ class VerdictTestCase(unittest.TestCase):
                 tabs_smoke.ENGAGE_TIMEOUT_S = original_engage
                 tabs_smoke.GUARD_RETRIES = original_retries
                 tabs_smoke.GUARD_BACKOFF_S = original_backoff
+
+    PASSING_CHILD = """
+        #!/usr/bin/env python3
+        print("tabs-smoke: mode engaged")
+        print("tabs-smoke: engine is up on 7430")
+        print("tabs-smoke: seeded k_tabs_smoke_seed")
+        print("tabs-smoke: restored browser k_tabs_smoke_seed")
+        print("tabs-smoke: PASS")
+        raise SystemExit(0)
+        """
+
+    def children_started_by(self, body: str) -> tuple[list[subprocess.Popen[str]], list[Any]]:
+        """Run the harness and return the shell processes it started (strongly held) and weak references to them."""
+        strong: list[subprocess.Popen[str]] = []
+        weak: list[Any] = []
+        real = subprocess.Popen
+
+        def recording(*args: Any, **kwargs: Any) -> subprocess.Popen[str]:
+            child = real(*args, **kwargs)
+            strong.append(child)
+            weak.append(weakref.ref(child))
+            return child
+
+        with mock.patch.object(subprocess, "Popen", recording):
+            code, output = self.run_script(body)
+        self.assertEqual(code, 0, output)
+        return strong, weak
+
+    def test_the_childs_pipes_are_closed_when_the_run_is_over(self) -> None:
+        """`run_smoke` opened the child's stdout and stderr, and nothing closed them: 26 `ResourceWarning`s at exit."""
+        children, _ = self.children_started_by(self.PASSING_CHILD)
+        self.assertTrue(children, "the harness started no child")
+        for child in children:
+            self.assertTrue(child.stdout is not None and child.stdout.closed, "the child's stdout was left open")
+            self.assertTrue(child.stderr is not None and child.stderr.closed, "the child's stderr was left open")
+
+    def test_a_finished_run_does_not_keep_its_child_alive(self) -> None:
+        """An `atexit` callback and two signal handlers closed over the child, so every run's process object, with
+        its pipes, lived until the interpreter exited, which is why the warnings were stamped `<sys>:0`."""
+        children, weak = self.children_started_by(self.PASSING_CHILD)
+        children.clear()
+        gc.collect()
+        self.assertEqual([], [ref for ref in weak if ref() is not None], "a finished run's child is still referenced")
 
     def test_a_pass_is_engaged_passed_seeded_and_exited_zero(self) -> None:
         code, output = self.run_script(

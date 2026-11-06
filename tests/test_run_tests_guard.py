@@ -25,6 +25,7 @@ import unittest
 from pathlib import Path
 
 from scripts.run_tests import completed, escaped_exceptions, leaked_connections
+from tests.leaks import leak_checked
 
 REPO = Path(__file__).resolve().parent.parent
 WRAPPER = REPO / "scripts" / "run_tests.py"
@@ -310,6 +311,7 @@ class RunnerRefusesALeakedConnectionTest(unittest.TestCase):
         self.assertNotIn("FATAL", result.stderr)
 
 
+@leak_checked
 class RunnerKillsItsChildTest(unittest.TestCase):
     """A SIGTERM to the wrapper must not leave unittest running behind it."""
 
@@ -365,6 +367,11 @@ class RunnerKillsItsChildTest(unittest.TestCase):
                         os.kill(child, signal.SIGKILL)
                     except ProcessLookupError:
                         pass
+                # The pipes the test asked for are the test's to close: left open they were two `ResourceWarning`s
+                # at garbage collection, reported against whichever line happened to run then.
+                for stream in (wrapper.stdout, wrapper.stderr):
+                    if stream is not None:
+                        stream.close()
 
 
 if __name__ == "__main__":
