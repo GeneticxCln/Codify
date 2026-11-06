@@ -165,6 +165,37 @@ class StatusFreeze(unittest.TestCase):
         )
 
 
+class EveryCodeIsDocumented(unittest.TestCase):
+    """A `code` the engine raises is a contract a client may branch on, so some document must name it.
+
+    The status freeze above stops an undeclared *status*. Nothing stopped an undocumented *code*, and 39 of the 91
+    the engine raises had no mention anywhere (the 2026-11-06 coherence audit): a client author could only learn
+    `unknown_setting` or `mcp_limit` by reading `engine/`. `docs/04` §3.2 now holds the ones the route tables do not
+    name; a new code fails here until it is in a document, as a backticked word.
+    """
+
+    CODE = re.compile(r'ApiError\(\s*\d{3}\s*,\s*"([a-z][a-z0-9_]*)"')
+
+    @classmethod
+    def raised(cls) -> set[str]:
+        found: set[str] = set()
+        for path in sorted((ROOT / "engine").glob("*.py")):
+            found |= set(cls.CODE.findall(path.read_text(encoding="utf-8")))
+        return found
+
+    def test_the_scan_found_the_bulk_of_them(self) -> None:
+        self.assertGreater(len(self.raised()), 80, "the code scan found almost nothing; the pattern is stale")
+
+    def test_every_raised_code_is_named_in_a_document(self) -> None:
+        docs = "\n".join(p.read_text(encoding="utf-8") for p in sorted((ROOT / "docs").glob("*.md")))
+        undocumented = sorted(c for c in self.raised() if f"`{c}`" not in docs)
+        self.assertEqual(
+            [], undocumented,
+            "the engine raises these error codes and no document names them: add each to docs/04 §3.2 (or the "
+            "route's own row)",
+        )
+
+
 class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
     """The declared shape, over real HTTP, from the real handler."""
 

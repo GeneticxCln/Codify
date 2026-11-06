@@ -908,9 +908,9 @@ async def surfaces_answer(request: Request, body: SurfaceAnswer) -> dict[str, An
 async def bridge_state(request: Request) -> dict[str, Any]:
     """Whether a shell is polling, and what is in flight.
 
-    Read-only and cheap, and it exists so the shell can decide whether to
-    start polling at all rather than discovering on its first long poll that
-    the engine it just restarted is not the one it thought.
+    Read-only and cheap: a diagnostic for a person or a test asking whether the shell has attached. The shell itself
+    does not call it (it long-polls `/bridge/next` and learns the same thing from the first answer), which is why
+    `tests/test_ui_engine_wiring.py` lists it as having no caller.
     """
     return _bridge(request).state()
 

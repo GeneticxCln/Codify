@@ -331,8 +331,6 @@ export interface Goal {
   /** Is this run's model calls being recorded? Optional for the same reason. */
   trace?: boolean;
   version: number;
-  /** Optional: older engines omit this; the UI derives startability from status. */
-  canStart?: boolean;
   created_at: number;
   updated_at: number;
   steps?: PlanStep[];
