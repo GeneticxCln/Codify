@@ -62,6 +62,12 @@ export interface ProviderRowProps {
   /** Every role's current provider, for the apply step's blast radius. */
   roleProviders: { role: AgentRole; provider: string; model_name?: string }[];
   onSaveKey: (provider: string, apiKey: string) => Promise<void>;
+  /**
+   * Forget the key Codify saved for this provider. Absent, the row offers no Remove (an engine or a caller that
+   * cannot). `removed: false` means nothing was saved: a key that still shows as configured then comes from the
+   * environment, which Codify does not touch.
+   */
+  onRemoveKey?: (provider: string) => Promise<{ removed: boolean }>;
   onApplyModel: (provider: string, model: string, roles: AgentRole[]) => Promise<void>;
   onRefresh?: (provider: string) => void;
   refreshing?: boolean;
@@ -76,6 +82,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
   newIds = [],
   roleProviders,
   onSaveKey,
+  onRemoveKey,
   onApplyModel,
   onRefresh,
   refreshing = false,
@@ -88,6 +95,9 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
   const [applying, setApplying] = useState(false);
   const [applied, setApplied] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const [confirmingRemove, setConfirmingRemove] = useState(false);
+  const [removing, setRemoving] = useState(false);
+  const [removeNote, setRemoveNote] = useState<string | null>(null);
 
   const { provider, needs_key: needsKey, has_key: hasKey } = keyStatus;
   /**
@@ -115,6 +125,26 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
       setKey("");
     } catch (err: any) {
       setError(err?.message || `Could not save the ${provider} key`);
+    }
+  };
+
+  const remove = async () => {
+    if (!onRemoveKey) return;
+    setError(null);
+    setRemoveNote(null);
+    setRemoving(true);
+    try {
+      const { removed } = await onRemoveKey(provider);
+      setConfirmingRemove(false);
+      setRemoveNote(
+        removed
+          ? `The saved ${provider} key was removed.`
+          : `Codify had no saved ${provider} key to remove. If this provider still shows as configured, its key comes from an environment variable, which Codify does not change.`,
+      );
+    } catch (err: any) {
+      setError(err?.message || `Could not remove the ${provider} key`);
+    } finally {
+      setRemoving(false);
     }
   };
 
@@ -248,6 +278,47 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
               <HardDrive className="w-3 h-3 shrink-0" />
               Runs on your own machine at <span className="font-mono">{keyStatus.base_url}</span> — no
               key to paste.
+            </p>
+          )}
+          {needsKey && hasKey && onRemoveKey && (
+            <div className="flex items-center gap-2 flex-wrap">
+              {confirmingRemove ? (
+                <>
+                  <span className="text-2xs text-codify-secondary">Remove the saved {provider} key?</span>
+                  <button
+                    type="button"
+                    onClick={() => void remove()}
+                    disabled={removing}
+                    className="px-2 py-0.5 rounded-md text-2xs font-semibold bg-codify-danger text-codify-bg disabled:opacity-40"
+                  >
+                    {removing ? "Removing..." : "Yes, remove it"}
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingRemove(false)}
+                    disabled={removing}
+                    className="px-2 py-0.5 rounded-md text-2xs text-codify-muted hover:text-codify-secondary disabled:opacity-40"
+                  >
+                    Keep it
+                  </button>
+                </>
+              ) : (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setRemoveNote(null);
+                    setConfirmingRemove(true);
+                  }}
+                  className="text-2xs text-codify-muted hover:text-codify-danger underline-offset-2 hover:underline"
+                >
+                  Remove saved key
+                </button>
+              )}
+            </div>
+          )}
+          {removeNote && (
+            <p className="text-2xs text-codify-muted" role="status">
+              {removeNote}
             </p>
           )}
         </div>

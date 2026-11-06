@@ -2,6 +2,7 @@ import React, { useEffect, useState } from "react";
 import { getEngineSettings, saveEngineSettings } from "../api";
 import { readRejection } from "../rejection.ts";
 import { Checkbox } from "./ui/Checkbox";
+import { NumberSetting } from "./NumberSetting";
 
 /**
  * The inbox's switches (docs/09 §10.22, docs/02 §3.0a): whether the engine looks for things worth a person's
@@ -14,6 +15,7 @@ import { Checkbox } from "./ui/Checkbox";
 export const SuggestionsCard: React.FC = () => {
   const [looking, setLooking] = useState<boolean | null>(null);
   const [ci, setCi] = useState(false);
+  const [pausedHours, setPausedHours] = useState<{ value: number; min: number; max: number } | null>(null);
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
 
@@ -24,6 +26,7 @@ export const SuggestionsCard: React.FC = () => {
         if (cancelled || !settings?.suggestions) return;
         setLooking(settings.suggestions.value === 1);
         setCi(settings.suggest_ci?.value === 1);
+        setPausedHours(settings.suggest_paused_hours ?? null);
       })
       .catch(() => {
         // An engine without the settings has nothing to switch; the card stays absent.
@@ -66,6 +69,19 @@ export const SuggestionsCard: React.FC = () => {
         due, and lists them in Notifications. It reads what Codify already stores, makes no model call and never starts
         anything: a suggestion only does something when you press Send to chat.
       </p>
+      {pausedHours !== null && (
+        <NumberSetting
+          id="suggest-paused-hours"
+          label="Raise a paused goal after (hours)"
+          value={pausedHours.value}
+          min={pausedHours.min}
+          max={pausedHours.max}
+          disabled={!looking}
+          save={async (hours) => Number((await saveEngineSettings({ suggest_paused_hours: hours })).saved.suggest_paused_hours)}
+          saved={(hours) => `Saved — a goal paused for ${hours} hours or more is raised.`}
+          refusal="Could not save how long a paused goal waits."
+        />
+      )}
       <Checkbox checked={ci} disabled={saving || !looking} onChange={(next) => void save({ suggest_ci: next })}>
         Also check GitHub for a failing CI run
       </Checkbox>

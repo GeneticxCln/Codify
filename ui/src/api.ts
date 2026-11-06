@@ -55,8 +55,10 @@ import type {
   WorkspaceGit,
   WorkspacePush,
   SurfaceRequest,
+  StandingNote,
   Suggestion,
   SuggestionList,
+  NotesListing,
 } from "./types.ts";
 
 /**
@@ -667,6 +669,8 @@ export async function saveEngineSettings(
     suggestions?: boolean;
     suggest_ci?: boolean;
     suggest_paused_hours?: number;
+    cross_workspace_notes?: boolean;
+    event_retention_days?: number;
     session_compact_auto?: boolean;
     session_compact_keep_turns?: number;
   }
@@ -860,6 +864,18 @@ export async function fetchProviderKeys(): Promise<ProviderKeyStatus[]> {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw await engineError(res, "Failed to fetch provider keys");
+  return res.json();
+}
+
+/**
+ * Forget a provider's saved key (`DELETE /settings/keys/{provider}`).
+ *
+ * Idempotent on the engine's side: a key that was not there answers `removed: false`, which is the state the caller
+ * asked for. A role's own key reference is a separate credential and is left alone, and so is an environment variable.
+ */
+export async function deleteProviderKey(provider: string): Promise<{ removed: boolean }> {
+  const res = await engineFetch(`/settings/keys/${encodeURIComponent(provider)}`, { method: "DELETE" });
+  if (!res.ok) throw new Error(sentenceOf(await res.text().catch(() => "")) || `HTTP ${res.status}`);
   return res.json();
 }
 
@@ -2306,4 +2322,42 @@ export async function cancelDictation(): Promise<{ cancelled: boolean }> {
 /** The read-aloud provider's WAV for `text`. */
 export async function speak(text: string): Promise<Blob> {
   return (await audioPost("/audio/speak", "Could not read this aloud", { text })).blob();
+}
+
+// ── standing notes (docs/10 §8) ───────────────────────────────────────────────────────────────────────────────────
+// What a person writes once and wants every project to see. They reach a run only while `cross_workspace_notes` is on,
+// and only a person writes them: the routes need the boot token, and no tool the assistant holds can call them.
+
+async function engineFetch(path: string, init: RequestInit = {}): Promise<Response> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  return fetch(`${base}${path}`, {
+    ...init,
+    headers: {
+      Authorization: `Bearer ${currentEngine.token}`,
+      ...(init.body ? { "Content-Type": "application/json" } : {}),
+    },
+  });
+}
+
+async function refusalOf(res: Response): Promise<Error> {
+  return new Error(sentenceOf(await res.text().catch(() => "")) || `HTTP ${res.status}`);
+}
+
+/** The notes, whether they are switched on, and how many the engine keeps. */
+export async function listNotes(): Promise<NotesListing> {
+  const res = await engineFetch("/settings/notes");
+  if (!res.ok) throw await refusalOf(res);
+  return res.json();
+}
+
+/** Keep one note. The engine refuses an empty one, a duplicate, one over its length, and a 51st, each in a sentence. */
+export async function addNote(text: string): Promise<StandingNote> {
+  const res = await engineFetch("/settings/notes", { method: "POST", body: JSON.stringify({ text }) });
+  if (!res.ok) throw await refusalOf(res);
+  return res.json();
+}
+
+export async function deleteNote(id: string): Promise<void> {
+  const res = await engineFetch(`/settings/notes/${encodeURIComponent(id)}`, { method: "DELETE" });
+  if (!res.ok) throw await refusalOf(res);
 }

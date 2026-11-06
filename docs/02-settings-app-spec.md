@@ -163,7 +163,7 @@ drawn by `ReviewReport.tsx` in the goal's timeline and as a "Deep review" sectio
 ### 3.0a The inbox switches
 
 Three engine settings behind the suggestions inbox (`docs/09` §10.22), written through `PUT /settings/engine`. `SuggestionsCard.tsx`
-in Settings → Engine writes `suggestions` and `suggest_ci`; `suggest_paused_hours` has no field yet and is set by calling the route. **`suggestions`** (default on) lets the engine look for a command that keeps
+in Settings → Agent Roles writes all three: the two switches and, through the shared `NumberSetting.tsx` field, the number of hours. **`suggestions`** (default on) lets the engine look for a command that keeps
 failing, a goal paused for hours and a stale health review; it reads rows it already holds, makes no model call and
 starts nothing. **`suggest_paused_hours`** (default 6, 1 to 168) is how long a paused goal waits before it is raised.
 **`suggest_ci`** (default **off**) lets it also ask GitHub whether the workspace's current commit is red. It is the only
@@ -173,12 +173,23 @@ that did something that day. `POST /goals` and `POST /conversations/{id}/turns` 
 
 ### 3.0c Notes and the profile file
 
-Two person-only features with an API and a command line, and **no Settings screen yet** (the CLI is their surface:
-`codify-cli notes` and `codify-cli profile`, `docs/09` §10.23). **`cross_workspace_notes`** (default off) is the switch
-that lets the standing notes (`docs/10` §8) reach a run; it is not written by a profile and `PUT /settings/engine` is its
-only door. The profile (`docs/09` §10.24) is exported and imported through `GET /profile/export` and
-`POST /profile/import`. An import applies a role's tuning and its model name only while the provider stays the same; it never
-changes a provider, the conductor's routing or a system prompt, and the report lists each one it left. A screen for either would be a thin card over these routes, in the style of §3.0a; it is not built.
+Two person-only features with an API and a command line (`codify-cli notes` and `codify-cli profile`, `docs/09` §10.23).
+**Standing notes** have a screen: `NotesCard.tsx` in Settings → Agent Roles holds the switch and the list. **`cross_workspace_notes`**
+(default off) is the switch that lets the notes (`docs/10` §8) reach a run; it is not written by a profile, and the card is its
+only door in the app (`PUT /settings/engine` is the same door by hand). The card lists the notes (one a profile brought is marked),
+adds one (refused when empty, a duplicate, over 500 characters, or a 51st: the engine's sentence is shown and the text stays in the
+box), and deletes one. **The profile** (`docs/09` §10.24) is still API and CLI only: `GET /profile/export` and `POST /profile/import`.
+An import applies a role's tuning and its model name only while the provider stays the same; it never changes a provider, the
+conductor's routing or a system prompt, and the report lists each one it left. A screen for the profile would be a thin card over
+these routes, in the style of §3.0a; it is not built.
+
+### 3.0d Goal timelines and saved keys
+
+`EventRetentionCard.tsx` (Settings → Agent Roles, *Goal timelines*) writes **`event_retention_days`** (default 365, 0 to 3650, `0`
+keeps everything): how long the timeline of an *ended* goal, which is the store's copy of its prompts, diffs and command output, is
+kept before Codify deletes it at the next start (`docs/04` §8.3). The card says what is deleted and what never is. The provider row
+(Settings → Provider Keys) has **Remove saved key**, which asks first and then calls `DELETE /settings/keys/{provider}`; when the
+engine had nothing saved the row says the key comes from an environment variable, which Codify does not change.
 
 ### 3.0b The fail-closed gate switch
 

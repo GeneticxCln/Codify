@@ -20,6 +20,8 @@ import { BrowserActionsCard } from "./BrowserActionsCard";
 import { SandboxCard } from "./SandboxCard";
 import { LayaRequiredToggle } from "./LayaRequiredToggle";
 import { DeepReviewCard } from "./DeepReviewCard";
+import { NotesCard } from "./NotesCard";
+import { EventRetentionCard } from "./EventRetentionCard";
 import { SuggestionsCard } from "./SuggestionsCard";
 import { EngineRuntimeCard } from "./EngineRuntimeCard";
 import { SelectMenu } from "./SelectMenu";
@@ -788,6 +790,8 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
       <BrowserActionsCard />
       <SandboxCard />
       <DeepReviewCard />
+      <NotesCard />
+      <EventRetentionCard />
       <SuggestionsCard />
 
       <div className="flex flex-col gap-2.5 bg-codify-bg border border-codify-border rounded-xl p-3.5">

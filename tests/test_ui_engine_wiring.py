@@ -42,20 +42,10 @@ UI_SRC = ROOT / "ui" / "src"
 
 #: Engine settings no component names, and why a person has no control for each. An entry whose key *is* named by a
 #: component is stale and fails.
-NO_CONTROL: dict[str, str] = {
-    "cross_workspace_notes": "GAP: the switch for standing notes (docs/10 §8) has no control, so nothing but a hand-written "
-                             "PUT /settings/engine turns the feature on. The Notes card removes this entry",
-    "event_retention_days": "GAP: deletes the timelines of ended goals at boot (docs/04 §8.3) and has no control. "
-                            "The retention field removes this entry",
-    "suggest_paused_hours": "GAP: docs/02 §3.0a says the suggestions card writes it; the card writes only `suggestions` "
-                            "and `suggest_ci`. The card's new field removes this entry",
-}
+NO_CONTROL: dict[str, str] = {}
 
 #: Routes no UI call, Rust call or CLI command names, and why that is right. An entry that gains a caller is stale.
 NO_CALLER: dict[str, str] = {
-    "DELETE /settings/keys/{provider}": "GAP: forgets a saved provider API key, and nothing in the app, the shell or the CLI "
-                                        "calls it, so a saved key can only be overwritten. The provider row's Remove action "
-                                        "removes this entry",
     "GET /bridge/state": "a diagnostic: whether a shell is polling. The Rust shell only calls /bridge/next and /bridge/answer",
     "GET /surfaces/state": "a diagnostic: whether the window is polling and what is in flight; the window uses /surfaces/next",
 }
