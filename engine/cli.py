@@ -211,7 +211,7 @@ async def cmd_suggestions(engine: Engine, args: argparse.Namespace, out: TextIO)
 async def cmd_notes(engine: Engine, args: argparse.Namespace, out: TextIO) -> None:
     if args.action == "list":
         got = await engine.call("GET", "/settings/notes")
-        state = "on" if got["enabled"] else "off (the assistant is not shown them; set cross_workspace_notes to 1 with PUT /settings/engine)"
+        state = "on" if got["enabled"] else "off (the assistant is not shown them; turn them on in Settings → Agent Roles → Standing notes)"
         lines = [f"{n['id']}  {n['text']}" + ("  [imported]" if n["source"] == "imported" else "") for n in got["notes"]]
         _emit(out, got, args.json, "\n".join([f"notes are {state}", *lines]))
     elif args.action == "add":

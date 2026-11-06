@@ -9,7 +9,7 @@ import {
   RecentRunModel,
   SettingsTab,
 } from "../types";
-import { fetchModelCatalog, fetchProviderKeys, saveProviderKey } from "../api";
+import { deleteProviderKey, fetchModelCatalog, fetchProviderKeys, saveProviderKey } from "../api";
 import { SettingsPanel } from "./SettingsPanel";
 import { AppearancePane } from "./AppearancePane";
 import { AudioPane } from "./AudioPane";
@@ -602,6 +602,14 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       } finally {
                         setSaving((prev) => ({ ...prev, [provider]: false }));
                       }
+                    }}
+                    onRemoveKey={async (provider) => {
+                      setError(null);
+                      const result = await deleteProviderKey(provider);
+                      await loadKeys();
+                      // The provider's model list can change with its credential; ask again, as a save does.
+                      await loadCatalog(true);
+                      return result;
                     }}
                     onApplyModel={applyModel}
                     onRefresh={() => loadCatalog(true)}

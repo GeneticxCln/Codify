@@ -701,6 +701,10 @@ export interface EngineSettings {
   suggest_ci?: EngineSettingValue;
   /** Hours a paused goal waits before the inbox raises it. */
   suggest_paused_hours?: EngineSettingValue;
+  /** Whether standing notes reach a run (docs/10 §8). Off on a fresh install. */
+  cross_workspace_notes?: EngineSettingValue;
+  /** Days an ended goal's timeline is kept; 0 keeps everything (docs/04 §8.3). */
+  event_retention_days?: EngineSettingValue;
   /** 1 = summarise older thread turns automatically before answering. */
   session_compact_auto?: EngineSettingValue;
   /** How many recent turns stay verbatim beside the summary. */
@@ -1195,4 +1199,20 @@ export interface SuggestionList {
   suggestions: Suggestion[];
   /** How many open offers are asleep, so the inbox can say there are more without showing them. */
   snoozed: number;
+}
+
+/** One standing note: a preference a person wrote once for every project (`engine/notes.py`). */
+export interface StandingNote {
+  id: string;
+  text: string;
+  /** `imported` when a profile brought it, so it is never mistaken for the person's own. */
+  source: "person" | "imported";
+  created_at: number;
+}
+
+export interface NotesListing {
+  notes: StandingNote[];
+  /** `cross_workspace_notes`: with it off the assistant is not shown any of them. */
+  enabled: boolean;
+  max_notes: number;
 }

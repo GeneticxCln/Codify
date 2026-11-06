@@ -205,3 +205,85 @@ test("a refused save does not leave a switch the engine did not store", async ()
     },
   );
 });
+
+// ── how long a paused goal waits (`suggest_paused_hours`) ────────────────────────────────────────────────────────
+// docs/02 §3.0a said this card writes it; the card wrote only the two switches, so the number had no control.
+
+const HOURS = "Raise a paused goal after (hours)";
+const HOURS_SETTINGS = {
+  suggestions: { value: 1, min: 0, max: 1 },
+  suggest_ci: { value: 0, min: 0, max: 1 },
+  suggest_paused_hours: { value: 6, min: 1, max: 168 },
+};
+const hoursField = (dom: Dom): HTMLInputElement => dom.byField(HOURS) as HTMLInputElement;
+const saveHours = (dom: Dom): HTMLElement => dom.byLabel(`Save ${HOURS}`);
+
+test("the card has a field for how long a paused goal waits, and saves only that number", async () => {
+  await card(HOURS_SETTINGS, (body) => json({ saved: body }), async (dom, calls) => {
+    assert.equal(hoursField(dom).value, "6");
+    assert.equal(saveHours(dom).hasAttribute("disabled"), true, "Save was live with nothing changed");
+
+    await dom.fill(hoursField(dom), "24");
+    await dom.click(saveHours(dom));
+    await dom.settle();
+
+    assert.deepEqual(
+      calls.filter((call) => call.method === "PUT").map((call) => call.body),
+      [{ suggest_paused_hours: 24 }],
+    );
+    assert.match(dom.text(), /a goal paused for 24 hours or more is raised/);
+  });
+});
+
+test("a number the engine clamps is shown as what was stored, and said so", async () => {
+  await card(HOURS_SETTINGS, () => json({ saved: { suggest_paused_hours: 168 } }), async (dom) => {
+    await dom.fill(hoursField(dom), "9999");
+    await dom.click(saveHours(dom));
+    await dom.settle();
+
+    assert.equal(hoursField(dom).value, "168");
+    assert.match(dom.text(), /Clamped to 168 \(allowed 1–168\)/);
+  });
+});
+
+test("something that is not a whole number is refused before anything is sent", async () => {
+  await card(HOURS_SETTINGS, (body) => json({ saved: body }), async (dom, calls) => {
+    await dom.fill(hoursField(dom), "1.5");
+    await dom.click(saveHours(dom));
+    await dom.settle();
+
+    assert.match(dom.text(), /Enter a whole number from 1 to 168/);
+    assert.deepEqual(calls.filter((call) => call.method === "PUT"), []);
+  });
+});
+
+test("a refused save of the number says why and keeps the stored value as the one in force", async () => {
+  await card(HOURS_SETTINGS, () => json({ message: "settings unavailable" }, 503), async (dom) => {
+    await dom.fill(hoursField(dom), "12");
+    await dom.click(saveHours(dom));
+    await dom.settle();
+
+    assert.match(dom.text(), /settings unavailable/);
+    assert.equal(saveHours(dom).hasAttribute("disabled"), false, "a refused save looked as if it had been stored");
+  });
+});
+
+test("with suggestions switched off the number cannot be changed", async () => {
+  await card(
+    { ...HOURS_SETTINGS, suggestions: { value: 0, min: 0, max: 1 } },
+    (body) => json({ saved: body }),
+    async (dom) => {
+      assert.equal(hoursField(dom).hasAttribute("disabled"), true);
+    },
+  );
+});
+
+test("an engine that predates the number has the switches and no field", async () => {
+  await card(
+    { suggestions: { value: 1, min: 0, max: 1 }, suggest_ci: { value: 0, min: 0, max: 1 } },
+    (body) => json({ saved: body }),
+    async (dom) => {
+      assert.doesNotMatch(dom.text(), /Raise a paused goal after/);
+    },
+  );
+});
