@@ -749,6 +749,14 @@ is a 400 on each. OpenAI and Ollama take an empty string and keep it.
   and answers the other three that the budget is spent), and a call to a tool
   that is not on the current menu is refused rather than dispatched from the
   table, so a model cannot run a move it was never offered by naming it.
+- **One reply is bounded too.** Neither budget above counted the tool calls *inside* a reply, so one reply of 20,000
+  `read_file` calls under `conductor_max_turns` of 3 ran all 20,000 (about 350 MB at its peak, each result being appended
+  before the next call could trim it). `MAX_CALLS_PER_REPLY` (16) is applied where the reply arrives, before the usage
+  ledger books it and before the transcript holds it: the calls past it are dropped without running and are in neither
+  the history nor the trace, and the last result the model receives says how many were run and how many were dropped, so
+  it can ask again for what it still needs. It is a constant, not a setting; a reply of exactly 16 is untouched
+  (`tests/test_conductor_reply_cap.py`). `bound_replay` still counts a reply's text and tool results but not its
+  tool-call arguments, which are now at most 16 per reply.
 - **What is replayed is bounded too.** A turn of fourteen calls used to re-send every tool result it had ever
   collected, each clipped at 12,000 characters: a hundred thousand characters of evidence in a local model's
   32k-token window. `bound_replay` runs before every model call and replaces the *oldest* tool results with a

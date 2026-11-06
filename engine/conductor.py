@@ -193,6 +193,12 @@ CALL_MAX_TOKENS = 2048
 CONCURRENT_READ_TOOLS: frozenset[str] = frozenset({"read_file", "search_code", "git_history", "recall"})
 MAX_CONCURRENT_READS = 4
 
+# How many tool calls ONE model reply may have run. `max_turns` bounds model calls and `max_moves` bounds stage moves,
+# and nothing else bounded a reply: 20,000 `read_file` calls in one reply under `max_turns=3` all ran (about 350 MB at
+# peak, every result being appended before the next call can trim it). A turn needs a handful of reads at a time and a
+# model that wants more asks again; the calls past this are dropped before they enter the transcript or the trace.
+MAX_CALLS_PER_REPLY = 16
+
 
 def _batches(calls: list[Any]) -> list[list[Any]]:
     """Split one reply's calls into runs: consecutive read-only calls together, anything else alone.
@@ -496,6 +502,8 @@ class Conductor:
         self._last_call: tuple[str, str] | None = None
         # Set when a tool ended the run (`EndTurn`): the loop stops there and its answer is the tool's reply.
         self.ended: EndTurn | None = None
+        # (kept, asked for) when the last reply asked for more calls than `MAX_CALLS_PER_REPLY`, until `run` has said so.
+        self._dropped_calls: tuple[int, int] | None = None
 
     def _swap_to_fallback(self, exc: ProviderError) -> bool:
         """Move the loop onto its fallback target, once. True when it moved.
@@ -553,12 +561,26 @@ class Conductor:
                 if exc.code not in FALLBACK_TRIGGER_CODES or not self._swap_to_fallback(exc):
                     raise
             else:
+                reply = self._capped(reply)
                 if books is not None:
                     books.succeeded(reply)
                 return reply
             finally:
                 if books is not None:
                     books.close()
+
+    def _capped(self, reply: ToolReply) -> ToolReply:
+        """`reply` with no more than `MAX_CALLS_PER_REPLY` calls; what was dropped is remembered for `run` to say.
+
+        Done where the reply arrives, before the ledger books it and before the transcript holds it, so a reply of
+        thousands of calls costs the trace and the history only the calls that run. Every call kept still gets its
+        result, which the providers require, and the ones past the cap are not in the history at all.
+        """
+        extra = len(reply.tool_calls) - MAX_CALLS_PER_REPLY
+        if extra <= 0:
+            return reply
+        self._dropped_calls = (MAX_CALLS_PER_REPLY, len(reply.tool_calls))
+        return ToolReply(text=reply.text, tool_calls=reply.tool_calls[:MAX_CALLS_PER_REPLY])
 
     def _refresh_menu(self) -> None:
         """Rebuild the offered set, and drop the stage moves once they are spent.
@@ -690,6 +712,16 @@ class Conductor:
                     return self.ended.reply
                 if None in contents:
                     return ""
+            if self._dropped_calls is not None:
+                kept, asked = self._dropped_calls
+                self._dropped_calls = None
+                # In the last result the model receives, which is the one it reads next. The calls past the cap were
+                # never run and are not in the history, so this is the only place they exist.
+                messages[-1]["content"] = (
+                    f"{messages[-1]['content']}\n\n(Only the first {kept} of the {asked} calls in that reply were run; "
+                    f"the other {asked - kept} were dropped without running. Ask again, in a later reply, for any of "
+                    "them you still need.)"
+                )
 
     async def _run_batch(self, batch: list[Any], messages: list[dict[str, Any]]) -> list[str | None]:
         """The results of one batch, in call order; None for a call a cancel stopped before it began.
