@@ -90,6 +90,9 @@ Transitions:
 | — | `PLANNING` | `POST /goals` |
 | `PLANNING` | `PENDING` | planner succeeded |
 | `PLANNING` | `FAILED` | planner invalid/error |
+| `PLANNING` | `COMPLETED` | a turn answered with no plan |
+| `PAUSED` | `PENDING` | `POST /goals/{id}/enable-execution` on a plan-only goal |
+| `PAUSED` | `FAILED` | a step failed (a parallel sibling's critic had already paused the goal) |
 | `PENDING` | `RUNNING` | `POST /goals/{id}/start` |
 | `RUNNING` | `COMPLETED` | all steps terminal success |
 | `RUNNING` | `FAILED` | unrecoverable step / agent error |
@@ -98,6 +101,16 @@ Transitions:
 | `RUNNING`/`PAUSED`/`PENDING` | `CANCELLED` | `POST /goals/{id}/cancel` |
 
 Illegal transition → `409` `illegal_status`.
+
+**No move runs backwards.** Beyond the terminal rule below, `GoalService.update_status` (through `may_change_status`) refuses
+three things nothing legitimate does: a move back into `PLANNING` (a goal is planned once), `RUNNING → PENDING` (a started
+goal does not go back to waiting for the approval it has) and `PAUSED → COMPLETED` (a runner's final write must not finish a
+goal a person paused: the write is refused and the pause stays). The rule is deliberately narrow, and the reason is
+recorded where it was found: running the whole suite with every status write recorded showed tests and the benchmark
+harness approving a goal straight from `PLANNING` to `RUNNING` (the `start` route refuses that), so a table of only the
+production moves would have meant rewriting about 200 fixtures for a race no one has staged (the check and the write run
+synchronously on one event loop). `tests/test_goal_lifecycle.py::TestAGoalNeverGoesBackwards` pins all 49 moves against a rule it
+states itself, and that every move the engine made across the suite still works.
 
 **A terminal status is final, with two documented exceptions.** `GoalService.update_status` refuses to move a
 goal out of `COMPLETED`, `FAILED` or `CANCELLED` — except `COMPLETED → RUNNING` and `FAILED → RUNNING`, which

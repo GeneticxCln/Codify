@@ -49,6 +49,8 @@ class TestDbAndServices(unittest.TestCase):
         root.mkdir(exist_ok=True)
         ws = self.workspaces.create(WorkspaceCreate(name=name, root_path=str(root)))
         goal = self.goals.create(GoalCreate(workspace_id=ws.id, title="g"))
+        if status == "PLANNING":
+            return ws, goal  # a new goal is already PLANNING, and nothing moves back into it
         self.goals.update_status(goal.id, 0, "PENDING")
         # Re-read: update_status returns a new object, so the local handle would
         # still be the PLANNING snapshot it was created as.

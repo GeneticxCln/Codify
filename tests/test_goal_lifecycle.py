@@ -86,6 +86,106 @@ class TestOnlyDocumentedMovesOutOfATerminalStatus(LifecycleCase):
         self.assertEqual("CANCELLED", self.status())
 
 
+class TestAGoalNeverGoesBackwards(LifecycleCase):
+    """The service refuses the moves that run against a goal's life, not only the ones out of a terminal status.
+
+    Only terminal statuses were guarded, so a stale write could do anything between the live ones: send a started goal
+    back to waiting for approval, plan it again, or finish a paused one. The audit of 2026-11-06 could not construct such
+    a race (the check and the write run synchronously on one event loop), so this is a guard on the service, not the fix
+    for an observed fault. The rule is deliberately narrow. Running the whole suite with `update_status` recorded showed
+    that tests and the benchmark harness approve a goal straight from `PLANNING` to `RUNNING` (the `start` route refuses
+    that in production), so that shortcut is left alone and only the moves nothing legitimate makes are refused.
+    """
+
+    STATUSES = ("PLANNING", "PENDING", "RUNNING", "PAUSED", "COMPLETED", "FAILED", "CANCELLED")
+    TERMINAL = {"COMPLETED", "FAILED", "CANCELLED"}
+    #: Written out here, not imported, so the test is the rule's second statement and not a copy of the first.
+    BACKWARD = {("RUNNING", "PENDING"), ("PAUSED", "COMPLETED")}
+
+    def allowed(self, current: str, target: str) -> bool:
+        if current == target:
+            return True
+        if current in self.TERMINAL:
+            return current in ("COMPLETED", "FAILED") and target == "RUNNING"
+        if target == "PLANNING":
+            return False
+        return (current, target) not in self.BACKWARD
+
+    def put_in(self, status: str) -> None:
+        # Fixture setup: the point under test is the move out of `status`, not how the goal got there.
+        self.conn.execute("UPDATE goals SET status=? WHERE id=?", (status, self.goal.id))
+        self.conn.commit()
+
+    def test_every_move_is_allowed_or_refused_exactly_as_the_rule_says(self) -> None:
+        for current in self.STATUSES:
+            for target in self.STATUSES:
+                with self.subTest(move=f"{current} -> {target}"):
+                    self.put_in(current)
+                    if self.allowed(current, target):
+                        self.move(target)
+                        self.assertEqual(target, self.status())
+                    else:
+                        before = self.events()
+                        with self.assertRaises(ApiError) as caught:
+                            self.move(target)
+                        self.assertEqual("illegal_status", caught.exception.code)
+                        self.assertEqual(current, self.status(), "a refused move changed the status")
+                        self.assertEqual(before, self.events(), "a refused move published an event")
+
+    def test_a_started_goal_is_not_sent_back_to_waiting_for_approval(self) -> None:
+        self.put_in("RUNNING")
+        with self.assertRaises(ApiError):
+            self.move("PENDING")
+        self.assertEqual("RUNNING", self.status())
+
+    def test_no_goal_is_planned_again(self) -> None:
+        for status in ("PENDING", "RUNNING", "PAUSED"):
+            with self.subTest(status=status):
+                self.put_in(status)
+                with self.assertRaises(ApiError):
+                    self.move("PLANNING")
+                self.assertEqual(status, self.status())
+
+    def test_a_paused_goal_is_not_finished_by_a_status_write(self) -> None:
+        self.put_in("PAUSED")
+        with self.assertRaises(ApiError):
+            self.move("COMPLETED")
+        self.assertEqual("PAUSED", self.status())
+
+    def test_the_moves_the_engine_really_makes_still_work(self) -> None:
+        """Every move engine code made across the whole suite (the observation this rule was built from)."""
+        real = [
+            ("PLANNING", "PENDING"), ("PLANNING", "FAILED"), ("PLANNING", "CANCELLED"), ("PLANNING", "COMPLETED"),
+            ("PENDING", "PENDING"), ("PENDING", "RUNNING"), ("PENDING", "CANCELLED"),
+            ("RUNNING", "PAUSED"), ("RUNNING", "COMPLETED"), ("RUNNING", "FAILED"), ("RUNNING", "CANCELLED"),
+            ("PAUSED", "RUNNING"), ("PAUSED", "CANCELLED"), ("PAUSED", "PENDING"), ("PAUSED", "FAILED"),
+            ("COMPLETED", "RUNNING"), ("FAILED", "RUNNING"), ("FAILED", "FAILED"),
+        ]
+        for current, target in real:
+            with self.subTest(move=f"{current} -> {target}"):
+                self.put_in(current)
+                self.move(target)
+                self.assertEqual(target, self.status())
+
+    def test_the_runners_write_after_a_pause_landed_is_refused_and_leaves_the_pause(self) -> None:
+        """The race the audit could not stage: the person pauses, then the runner writes COMPLETED over it."""
+        from engine.executor import ExecutorService
+
+        self.put_in("RUNNING")
+        runner = ExecutorService.__new__(ExecutorService)
+        runner.goals = self.goals
+        runner.settings = None
+        runner.orchestrator = types.SimpleNamespace(tracer=None)  # type: ignore[assignment]
+        runner._consolidate = lambda goal_id: 0  # type: ignore[method-assign]
+
+        self.move("PAUSED")  # the person's Pause, landing before the runner's write
+        with self.assertRaises(ApiError) as caught:
+            runner._set_status(self.goal.id, "COMPLETED", None)
+
+        self.assertEqual("illegal_status", caught.exception.code)
+        self.assertEqual("PAUSED", self.status(), "the runner's COMPLETED overwrote the person's Pause")
+
+
 class TestTheStepDriverDoesNotStartAConductorForACancelledGoal(unittest.IsolatedAsyncioTestCase):
     async def test_a_goal_cancelled_during_a_retried_step_gets_no_conductor_run(self) -> None:
         """M2: `_run_steps_locked` never re-checked status before `run_conductor_resume`.
