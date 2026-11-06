@@ -1,6 +1,6 @@
 ---
 name: docs-contract-keeper
-description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00–22 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
+description: Checks whether a change altered a documented contract and therefore requires the matching doc in docs/00–23 to be updated in the same change. Use when a PR touches engine/, ui/, src-tauri/ or the Makefile, and before any change described as "internal" or "no behaviour change".
 tools: Read, Grep, Glob
 ---
 
@@ -39,6 +39,7 @@ Each row names the doc that owns a subject and the change that invalidates it.
 | The 24 native recipes and which actions stay with a person | `docs/19` | A built-in skill, a person-only action |
 | MCP admission: remote-only, per-tool Read/Act, invariant 10 | `docs/20` | A transport, an admitted address, a call bound, a tool's authority |
 | The improvement plan: review lenses, project health, cache diagnostics, the size budget, skill contracts, and each phase's status | `docs/21` | A phase built or dropped without its status line changing; a decision reversed; a number the plan quotes |
+| Standing decisions: the owner's calls, the working defaults for an agent, and the open decisions | `docs/23` | A decision made, overruled or answered; an ask-first or act-freely rule changed; an open row closed |
 | The six motion and film recipes, what was refused from the eight audited repositories, and the open decisions | `docs/22` | A built-in skill added to or dropped from that set; a refusal reversed; an open decision made |
 
 Not every code change is a contract change. Renaming a local variable, restructuring
