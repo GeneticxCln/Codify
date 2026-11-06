@@ -70,7 +70,7 @@ import threading
 import time
 from pathlib import Path
 from types import FrameType
-from typing import NamedTuple
+from typing import Any, NamedTuple
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 SRC_TAURI = PROJECT_ROOT / "src-tauri"
@@ -181,9 +181,12 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
         stream = child.stderr
         if stream is None:  # pragma: no cover — PIPE above guarantees a pipe
             return
-        for raw in stream:
-            sys.stderr.write(raw)
-            sys.stderr.flush()
+        try:
+            for raw in stream:
+                sys.stderr.write(raw)
+                sys.stderr.flush()
+        except (ValueError, OSError):
+            return  # the run is over and the pipe was closed under the reader: nothing is left to relay
 
     stderr_thread = threading.Thread(target=relay_stderr, daemon=True)
     stderr_thread.start()
@@ -226,10 +229,11 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
     engage_timer = threading.Timer(ENGAGE_TIMEOUT_S, engagement_deadline)
     engage_timer.daemon = True
     engage_timer.start()
+    previous_handlers: dict[int, Any] = {}
     for name in ("SIGINT", "SIGTERM"):
         number = getattr(signal, name, None)
         if number is not None:
-            signal.signal(number, stop)
+            previous_handlers[number] = signal.signal(number, stop)
     atexit.register(terminate_if_running)
 
     pipe = child.stdout
@@ -268,6 +272,18 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
                 child.wait()
         else:
             child.wait()
+        # What this run opened is closed, and what it registered is taken back. Without that, the callback and the
+        # two signal handlers held `child` (and its pipes) until the interpreter exited, which printed one
+        # `ResourceWarning` per pipe per run at shutdown. The relay thread reads `stderr` until the child's end
+        # closes, so it is given a moment to finish before the pipe goes.
+        stderr_thread.join(timeout=2)
+        for stream in (child.stdout, child.stderr, child.stdin):
+            if stream is not None:
+                stream.close()
+        atexit.unregister(terminate_if_running)
+        for number, handler in previous_handlers.items():
+            if handler is not None:
+                signal.signal(number, handler)
 
     engaged = state["engaged"] is True
     passed = state["passed"] is True
