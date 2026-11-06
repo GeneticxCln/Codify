@@ -639,7 +639,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/workspaces/{id}/file?path=` | — | `{path, content, version, size}`. 400 `file_escape` / `workspace_protected`, 404 `file_missing`, 422 `file_binary` / `file_not_text` / `file_too_large` / `file_access`. See §3.0.3 |
 | `PUT` | `/workspaces/{id}/file` | `{path, content, base_version}` extra=forbid | `{path, version, size}` — **a person's Save, the one writer besides the fixer** (`00` §6.9). Replaces a file that exists; never creates or deletes one. 409 `file_changed` (carries `current_version`) when the file is not the version that was opened; the same 400/404/422 refusals as the read. Refused means untouched. Commits nothing |
 | `DELETE` | `/workspaces/{id}?delete_goals={bool}` | — | forgets the folder; **never touches `root_path`**. 409 `workspace_not_empty` (with the goal count) unless the cascade is requested, 409 `workspace_has_active_goals` if anything is PLANNING/RUNNING **or a live driver holds it** — a turn's `plan` move leaves the goal PENDING while its conductor still runs, so the status column alone was not enough |
-| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, allow_network?, mode?, provider?, model?, trace?}` extra=forbid — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
+| `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, allow_network?, mode?, provider?, model?, trace?}` extra=forbid (`allow_network` is API-only: no app control sends it) — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
 | `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
@@ -667,7 +667,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/settings/runtime` | — | the engine's self-check (`engine/capabilities.py`): which interpreter is running, whether *it* can import the gate's SDK, and any warnings. Separate from `/settings/laya` because that route also honours `CODIFY_LAYA_SDK` and this one is a fact about the interpreter — a gate can be off because it was told to be or because the package is not there, and those need different fixes. Names filesystem paths, so it is behind the boot token like everything else |
 | `GET` | `/settings/keys` | — | per-provider key status + `storage`/`storage_detail`/`storage_reason` (`04` §7) |
 | `POST` | `/settings/keys` | `{provider, api_key}` (surrounding whitespace is stripped; whitespace or a control character inside is `422`, because an HTTP client would refuse the header later and put its value in the message) | `{ok, provider, storage}` |
-| `DELETE` | `/settings/keys/{provider}` | — | `{ok, provider, removed}`. Forgets the provider-scoped key `POST /settings/keys` wrote, **idempotently** (`removed: false` for a key that was not there is the state the caller asked for, not an error); 422 `invalid_provider` for a name that is not a provider slug. A role's own key reference is a separate credential and is left alone. The provider's cached model list is dropped, because it can change when its credential does |
+| `DELETE` | `/settings/keys/{provider}` | — | `{ok, provider, removed}`. Forgets the provider-scoped key `POST /settings/keys` wrote, **idempotently** (`removed: false` for a key that was not there is the state the caller asked for, not an error); 422 `invalid_provider` for a name that is not a provider slug. A role's own key reference is a separate credential and is left alone. The app has no Remove control for it yet: a saved key can be overwritten from Settings and forgotten only by calling this route. The provider's cached model list is dropped, because it can change when its credential does |
 | `GET` | `/settings/agents` | — | `AgentConfig[]`, fixed role order |
 | `GET` | `/settings/agents/stats` | query: `limit` | per-role last call / last error / counts, from the event log, plus `runs` / `success_rate` / `outcomes` / `tokens` measured over every run the log holds (§4.7). The rate is about the *role* — did it do its job — not about the goal, which is the other question and is answered by `/stats/overview` |
 | `POST` | `/settings/agents/repair` | — | `RepairReport` (`04` §3.1) |
@@ -1152,6 +1152,44 @@ bug it was written to fix.
 `tests/test_role_preflight.py` covers the rule, the line, the silence, and the
 agreement with the repair plan on the same database — one rule and two screens is
 exactly the arrangement that drifts.
+
+### 3.2 Refusal codes the route tables above do not name
+
+Every `ApiError` the engine raises carries a stable `code`, and `tests/test_error_contract.py` fails when one appears
+in `engine/` that no document names. These are the ones whose route rows do not say so. The status is the HTTP status;
+the sentence in the response is the engine's own and is what a person reads.
+
+| Code | Status | Raised when |
+|---|---|---|
+| `duplicate_workspace` | 409 | a workspace already exists for that root path |
+| `workspace_unavailable`, `mcp_unavailable` | 503 | the service behind the route was not built (a test engine, or a failed start) |
+| `unknown_role` | 404 | `POST /settings/agents/{role}/test` names a role that is not one of the eight |
+| `unknown_setting` | 400 | `PUT /settings/engine` carries a key that is not an engine setting |
+| `invalid_config` | 422 | a merged agent config does not validate after a partial update |
+| `invalid_status` | 422 | a goal list is filtered by a status that does not exist |
+| `invalid_tab_payload` | 422 | a shell tab's payload is not JSON |
+| `empty_prompt` | 422 | a turn has nothing to say |
+| `empty_patch` | 422 | a plan-step edit carries no editable field |
+| `unknown_step` | 404 | a step id is not in that goal |
+| `step_vanished`, `batch_no_longer_disjoint` | 409 | a parallel batch was invalidated between batching and dispatch (the driver re-batches; neither is a failure) |
+| `unknown_suggestion` | 404 | a suggestion id does not exist |
+| `invalid_skill_name`, `invalid_skill_description`, `invalid_skill_body`, `invalid_skill_filename`, `invalid_skill_moves`, `invalid_skill` | 422 | a skill a person is creating or importing is refused, each naming the field; `invalid_skill` carries the loader's own problem |
+| `unknown_skill` | 404 | no skill of that name is available in that workspace |
+| `skill_directory_refused` | 422 | `.codify/skills/` cannot be read, or resolves outside the workspace |
+| `unknown_mcp_server`, `unknown_mcp_tool` | 404 | the server or tool is not one a person added |
+| `mcp_limit` | 409 | the server count is at `MAX_SERVERS` |
+| `mcp_secret_required`, `mcp_header_required` | 422 | a bearer server has no token, or a custom-header server has no header name |
+| `mcp_authority_required` | 422 | a tool is enabled with neither `read` nor `act` chosen |
+| `compaction_unavailable` | 503 | the engine has no compaction service |
+| `nothing_to_compact` | 409 | the thread has no turns to compact |
+| `compaction_failed` | 502 | the model returned no usable summary; nothing was changed |
+| `no_audio` | 422 | a dictation recorded nothing |
+| `not_recording` | 409 | `stop` with no dictation under way |
+| `recorder_unavailable` | 503 | `pw-record` is not installed |
+| `speech_key_missing`, `speech_provider_unknown`, `speech_protocol_unsupported`, `tts_not_configured` | 409 | the speech provider is not usable, each with the Settings → Audio step that fixes it |
+| `text_empty` | 400 | read-aloud was given nothing to read |
+| `invalid_provider` | 400 or 422 | 400 when a custom provider's *body* is refused (missing protocol or base URL, bad slug); 422 when the provider *name in the path* is not a slug (`DELETE /settings/keys/{provider}`) |
+| `invalid_base_url` | 400 or 409 | 400 for a custom provider's address in a settings body; 409 when the speech provider's stored address is refused at the moment of use. A client branches on the `code`, never the status |
 
 ## 4. Agent JSON contracts
 
@@ -2466,7 +2504,7 @@ per model call of every recorded run.
 Deleting a goal deletes its recording through `ON DELETE CASCADE`, so a recording never outlives the
 run it describes.
 
-`event_retention_days` (Settings → Engine, default **365**, band 0–3650; `0` keeps everything) bounds how long a
+`event_retention_days` (default **365**, band 0–3650; `0` keeps everything; set with `PUT /settings/engine`, the Settings screen has no field for it yet) bounds how long a
 goal's **timeline** lives. The `events` table is the store's copy of prompts, diffs and command output, so it is the
 most sensitive thing the engine keeps and the retention policy covers it. `GoalService.prune_events` runs at **boot**
 and deletes the events of a goal that has *ended* (`COMPLETED`, `FAILED`, `CANCELLED`) and whose `updated_at` is older
@@ -2531,7 +2569,7 @@ it cannot land a frame on anybody's event stream.
 
 | Route | Who calls it | What it is |
 |---|---|---|
-| `GET /bridge/state` | shell | `{attached, inflight, claimed, timeout_s, max_chars}` — read-only, so the shell can decide whether to start polling at all |
+| `GET /bridge/state` | nobody yet (a diagnostic) | `{attached, inflight, claimed, timeout_s, max_chars}` — read-only: whether a shell has attached. The shell does not call it |
 | `GET /bridge/next?wait=<s>` | shell | the oldest unanswered question, or `{"id": null}` when `wait` seconds pass with none. `op` is `read_page` or `navigate`; `navigate` carries `url` |
 | `POST /bridge/answer` | shell | `{"id", "ok", "result" \| "error"}` extra=forbid (422 for any other field); `{"accepted": false}` for an id nobody issued |
 
@@ -2568,7 +2606,7 @@ surface to surface is `engine/surfaces.py`:
 
 | Route | Who calls it | What it is |
 |---|---|---|
-| `GET /surfaces/state` | window | `{attached, inflight, timeout_s, surfaces: {name: [ops]}}` |
+| `GET /surfaces/state` | nobody yet (a diagnostic) | `{attached, inflight, timeout_s, surfaces: {name: [ops]}}` — whether the window is polling |
 | `GET /surfaces/next?wait=<s>` | window | the oldest question not yet handed out, `{id, surface, op, workspace_id, args}`, or `{"id": null}` after `wait` seconds (0–60) |
 | `POST /surfaces/answer` | window | `{id, ok, result? \| error?}` **`extra: forbid`** (the browser bridge's answer ignores extras; this one does not); `{"accepted": false}` for an id nobody issued, a second answer, or one after the timeout |
 | `POST /surfaces/window` | window | `{machines: [workspace_id]}` **`extra: forbid`** — which workspaces have a machine open; a menu input that grants nothing, not a poll |

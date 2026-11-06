@@ -150,7 +150,7 @@ The copy keeps the limit: the jail bounds what a command can reach outside the w
 command still runs the repository's own code. It is not a permission to trust a repository.
 
 The engine-wide network permission is separate from a goal's per-run `allow_network`: the setting
-says commands may use the network at all, the goal says this run may.
+says commands may use the network at all, the goal says this run may. The per-goal flag is a field of `POST /goals` and nothing else: the app has no control that sends it, so the person's own switch is the engine-wide one.
 
 ### 3.0a Deep review
 
@@ -162,8 +162,8 @@ drawn by `ReviewReport.tsx` in the goal's timeline and as a "Deep review" sectio
 
 ### 3.0a The inbox switches
 
-Three engine settings behind the suggestions inbox (`docs/09` §10.22), written through `PUT /settings/engine` by
-`SuggestionsCard.tsx` in Settings → Engine. **`suggestions`** (default on) lets the engine look for a command that keeps
+Three engine settings behind the suggestions inbox (`docs/09` §10.22), written through `PUT /settings/engine`. `SuggestionsCard.tsx`
+in Settings → Engine writes `suggestions` and `suggest_ci`; `suggest_paused_hours` has no field yet and is set by calling the route. **`suggestions`** (default on) lets the engine look for a command that keeps
 failing, a goal paused for hours and a stale health review; it reads rows it already holds, makes no model call and
 starts nothing. **`suggest_paused_hours`** (default 6, 1 to 168) is how long a paused goal waits before it is raised.
 **`suggest_ci`** (default **off**) lets it also ask GitHub whether the workspace's current commit is red. It is the only

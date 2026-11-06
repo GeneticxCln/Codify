@@ -186,10 +186,6 @@ def _is_plain_file(path: Path) -> bool:
         return False
 
 
-class ReadResult(dict[str, Any]):
-    """A dict, but named, so callers cannot pass the wrong shape by accident."""
-
-
 _TOO_EXPENSIVE = "regex took over {seconds:.1f}s — pattern too expensive"
 
 

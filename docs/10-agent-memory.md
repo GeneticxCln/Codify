@@ -289,7 +289,7 @@ being a hole in it (`engine/notes.py`):
   cannot return a note; `read_notes` reads notes and cannot return an observation. `tests/test_profile.py` writes a
   distinctive string into each and asserts neither tool ever returns the other's.
 * **Off by default.** `cross_workspace_notes` is 0 on a fresh install, and with it off the tool is not offered at all; if
-  it is turned off mid-run the handler refuses. A profile cannot turn it on.
+  it is turned off mid-run the handler refuses. A profile cannot turn it on. Today only `PUT /settings/engine` with `{"cross_workspace_notes": 1}` does: neither the Settings screen nor `codify-cli` has a control for it yet, so the feature is unreachable for a person who does not call the route.
 * **Preferences, not commands.** The tool's text and the prompt say so, and the request and the engine's rules come first.
   A note imported from a profile is marked, so a note from somewhere else is never mistaken for the person's own.
 * **Short on purpose.** At most 50 notes of 500 characters, refused rather than cut.
