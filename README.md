@@ -442,6 +442,7 @@ The specifications are the source of truth; the README summarises them.
 | [`docs/19`](docs/19-deepseek-stack-audit.md) | The deepseek-stack audit: 29 skills read in full, the 24 native recipes built from them, what each does, and which actions stay with a person (push, merge, comments, screenshots, parallel models) |
 | [`docs/20`](docs/20-mcp-admission-design.md) | The MCP admission design: invariant 10, remote-only transport, per-tool Read/Act authority, and the tests that hold it. Phase 3 is built (per-tool Read/Act authority, `list_mcp_tools`, `call_mcp`); act is gated on the goal's stored `RUNNING` status |
 | [`docs/21`](docs/21-improvement-plan.md) | The improvement plan: goldfish review lenses, person-recorded project health, content-free cache diagnostics, a size budget, skill contracts, and the status of each |
+| [`docs/23`](docs/23-decisions.md) | Standing decisions: what the owner decided and where the repository already decided, the working defaults an agent follows, and the open decisions with a recommendation each |
 | [`docs/22`](docs/22-motion-and-film-audit.md) | The motion and film audit: eight repositories about agents that make motion, video and sound as code, the six native recipes built from them (reference matching, interface motion, scoped fixes, claims, tuning to a number, films as code), and what was refused |
 
 ## 📂 Layout
@@ -455,7 +456,7 @@ src-tauri/  Tauri v2 Rust shell — lib.rs (supervisor + IPC), browser/ (the emb
 tests/      Python suite; hermetic.py is the shared isolation bootstrap
 scripts/    fake_ollama.py, drive_a_turn.py, replay_trace.py, make_logo.py, check_history.py, check_budgets.py
 benchmarks/ the tiered harness: smoke, repo_scale and the review tier
-docs/       00–22, the specifications this README summarises
+docs/       00–23, the specifications this README summarises
 ```
 
 ## 📄 License

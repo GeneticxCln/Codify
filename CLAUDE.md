@@ -31,9 +31,9 @@ a built-in.
 
 | Target | What it runs |
 |---|---|
-| `make setup` / `make doctor` | Fresh clone: make `.venv` and install / check the machine and `.venv` against `pyproject.toml` |
+| `make setup` / `make doctor` | Fresh clone: make `.venv` and install / check it against `pyproject.toml` |
 | `make check` | Everything below on the interpreter you have, including `bench-smoke` |
-| `make ci` | `make check`, then the same Python legs on the declared 3.10 floor (`make ci-python-floor` is that leg alone) |
+| `make ci` | `make check`, then the same Python legs on the declared 3.10 floor (`make ci-python-floor`: that leg alone) |
 | `make lint` / `make typecheck` | `ruff` / `mypy`; config pinned in `pyproject.toml` |
 | `make test` / `make test-streams` | Python suite via `unittest` / stream-isolation tests **by name** |
 | `make bench-smoke` | Hermetic benchmark tier, both drivers: no network, models or spend |
@@ -41,7 +41,7 @@ a built-in.
 | `make build-ui` | TypeScript check (`src` only) + Vite build; `make budgets` then checks its size (`ui/budgets.json`) |
 | `make check-tauri` | `cargo check`/`test` (jail tests need `bwrap`, `unshare`, an unprivileged overlay mount; `make doctor` says which), clippy `-D warnings`, `scripts/check_msrv.py`, `cargo fmt --check` |
 | `make check-history` | Every commit in `HISTORY_RANGE`, not just the tip; pre-push runs it second |
-| `make ci-report`, `make check-ghidra` | `make ci`'s verdict as a GitHub status / the Ghidra fallback on a real install. Neither is in `check` or `ci` |
+| `make ci-report`, `make check-ghidra` | `make ci`'s verdict as a GitHub status / the Ghidra fallback. Neither is in `check` or `ci` |
 
 `make ci` is the real gate; `.github/workflows/check.yml` runs the same targets on a clean machine.
 `make hooks` installs `.githooks/` (`pre-commit`: `make lint typecheck`; `pre-push`: `make ci`).
@@ -77,7 +77,7 @@ src-tauri/      Tauri v2 Rust shell
 tests/          Python suite; stream_isolation.py is the shared isolation helper
 scripts/        fake_ollama.py (drive a goal with no API keys)
 benchmarks/     tiered harness; see benchmarks/manifest.json before trusting a number
-docs/           00–22, below
+docs/           00–23, below
 ```
 
 ## Working rules
@@ -131,8 +131,9 @@ docs/           00–22, below
 | `docs/18` | Release and updates |
 | `docs/19` | deepseek-stack audit: native recipes |
 | `docs/20` | MCP admission design: invariant 10 |
-| `docs/21` | Improvement plan: review lenses, budgets, skill contracts |
+| `docs/21` | Improvement plan |
 | `docs/22` | Motion and film audit: six native recipes |
+| `docs/23` | Decisions: settled, default, open. Read before asking |
 
 If your change alters a documented contract, update the matching doc in the same
 change. The docs have lied before; don't add to it.
