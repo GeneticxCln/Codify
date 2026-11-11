@@ -488,7 +488,9 @@ so the spike measures what the gate is worth before anything is built on it.
 latency is a sleep in every scripted model call). It drives the engine's own `_run_steps_locked`, the loop
 `POST /goals/{id}/start` runs, over four configurations: **A** recipe sequential, **B** recipe parallel with disjoint
 declared paths, **C** recipe parallel with overlapping declared paths (the gate's refusal), **D** conductor sequential.
-`tests/test_parallel_spike.py` keeps it honest; it is not part of `make bench-smoke` and gates nothing.
+`tests/test_parallel_spike.py` keeps it honest; it is not part of `make bench-smoke` and gates nothing. It reports
+each scenario's peak concurrent model calls (**1** for A and for C, up to the width for B), and that is what the test
+asserts a refusal on: a wall-clock ratio a loaded runner can bend is not proof that two steps ran at once.
 
 **What it measured** (one machine, width 4, one run each; a ratio, not a benchmark):
 

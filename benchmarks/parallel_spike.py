@@ -57,6 +57,10 @@ class _Script:
         self.overlapping = overlapping
         self.conductor = conductor
         self.calls = 0
+        # How many model calls are in flight at once, and the most that ever were. This is the direct proof the
+        # gate works: a refused plan never has two in flight, whatever the wall clock did on a loaded machine.
+        self.in_flight = 0
+        self.peak = 0
         # The conductor script is stateless (it rebuilds its next move from the transcript), so one instance serves.
         self.conductor_script = CannedProvider([], conductor=True)
         self.other = CannedProvider([])
@@ -68,6 +72,10 @@ class _Script:
         """The path the plan *declares* for step i. The gate batches on this, so overlapping plans all name one file
         while each step still writes a file of its own: the run stays checkable and the gate is what is measured."""
         return "shared.txt" if self.overlapping else self.path(i)
+
+    def reset_peak(self) -> None:
+        """Count overlap afresh. Called between phases, when nothing is in flight."""
+        self.peak = 0
 
     def reply(self, role: str, user_prompt: str) -> dict[str, Any]:
         if role == "planner":
@@ -94,12 +102,22 @@ class _RoleProvider(BaseProvider):
     def supports_tools(self) -> bool:
         return self.script.conductor
 
+    async def _latency(self) -> None:
+        """One model call's sleep, counted: the peak is how many were in flight at once."""
+        script = self.script
+        script.in_flight += 1
+        script.peak = max(script.peak, script.in_flight)
+        try:
+            await asyncio.sleep(script.latency)
+        finally:
+            script.in_flight -= 1
+
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str, temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
         json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
     ) -> str:
-        await asyncio.sleep(self.script.latency)
+        await self._latency()
         self.script.calls += 1
         if self.usage_sink is not None:
             self.usage_sink({"input_tokens": 100, "output_tokens": 40, "total_tokens": 140})
@@ -110,7 +128,7 @@ class _RoleProvider(BaseProvider):
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
     ) -> ToolReply:
-        await asyncio.sleep(self.script.latency)
+        await self._latency()
         self.script.calls += 1
         inner = self.script.conductor_script
         inner.usage_sink = self.usage_sink
@@ -158,6 +176,7 @@ async def run_scenario(
             goals.update_status(goal.id, goals.get(goal.id).version, "RUNNING")
         planned = len(goals.steps(goal.id))
         calls_before = script.calls
+        script.reset_peak()
 
         app = SimpleNamespace(state=SimpleNamespace(executor=executor, goals=goals))
         began = time.monotonic()
@@ -173,6 +192,7 @@ async def run_scenario(
             "scenario": label, "driver": driver, "parallel": parallel, "overlapping": overlapping,
             "wall_s": round(wall, 3), "steps_planned": planned, "steps_completed": len(done),
             "goal_status": goals.get(goal.id).status, "model_calls": script.calls - calls_before,
+            "max_concurrency": script.peak,
             # +1 for the fixture commit `_start_repository` makes.
             "commits_by_run": commits - 1, "files_written": written,
         }
@@ -207,11 +227,11 @@ async def run_spike(steps: int, latency: float) -> dict[str, Any]:
 
 def render(report: dict[str, Any]) -> str:
     lines = [f"parallel-steps spike: {report['steps']} steps, {report['latency_s']}s per model call", ""]
-    lines.append(f"{'scenario':34} {'wall':>8} {'steps':>7} {'calls':>6} {'commits':>8}  status")
+    lines.append(f"{'scenario':34} {'wall':>8} {'steps':>7} {'calls':>6} {'peak':>5} {'commits':>8}  status")
     for r in report["scenarios"]:
         lines.append(
             f"{r['scenario']:34} {r['wall_s']:>7.2f}s {r['steps_completed']:>3}/{r['steps_planned']:<3} "
-            f"{r['model_calls']:>6} {r['commits_by_run']:>8}  {r['goal_status']}"
+            f"{r['model_calls']:>6} {r['max_concurrency']:>5} {r['commits_by_run']:>8}  {r['goal_status']}"
         )
     lines += [
         "",

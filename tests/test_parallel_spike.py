@@ -4,7 +4,9 @@ The spike exists so that nobody builds conductor-driven parallel steps on a gues
 the engine's own step loop, a plan the batching gate refuses really does run as slowly as a sequential one, and
 running steps together never changes the outcome (every step completed, one commit each, the same files).
 
-Timings use a latency large enough to dwarf the fixed cost of a commit, so the ratios hold on a loaded machine.
+Timings use a latency large enough to dwarf the fixed cost of a commit, so the ratios hold on a loaded machine. The
+gate's refusal is also *counted*: `max_concurrency` is the most model calls in flight at once, so a shared runner's
+clock cannot make a serialized run look parallel (A is measured first, and pays a cold disk's one-time cost).
 """
 
 from __future__ import annotations
@@ -60,12 +62,28 @@ class TestParallelSpike(unittest.TestCase):
         self.assertEqual(self.a["model_calls"], self.b["model_calls"], "the same work, not less of it")
 
     def test_disjoint_steps_run_in_parallel(self) -> None:
+        self.assertGreater(
+            self.b["max_concurrency"], 1,
+            "no two steps were ever in flight together: the disjoint batch never ran in parallel",
+        )
         a, b = float(str(self.a["wall_s"])), float(str(self.b["wall_s"]))
         self.assertLess(b, a * 0.8, f"3 disjoint steps took {b:.2f}s against {a:.2f}s sequentially")
 
     def test_overlapping_steps_are_refused_by_the_gate_and_cost_what_sequential_costs(self) -> None:
+        # The proof is the overlap itself, not the clock. A wall-clock ratio could not tell a real overlap from A
+        # running cold first: both make C look faster than A. One call in flight at the peak is the gate refusing.
+        self.assertEqual(
+            1, self.a["max_concurrency"],
+            "the sequential baseline had two model calls in flight at once: the counter measures nothing",
+        )
+        self.assertEqual(
+            1, self.c["max_concurrency"],
+            f"two steps' model calls were in flight at once ({self.c['max_concurrency']} at the peak): "
+            "the gate let overlapping paths overlap",
+        )
         a, c = float(str(self.a["wall_s"])), float(str(self.c["wall_s"]))
-        self.assertGreater(c, a * 0.85, f"overlapping steps ran in {c:.2f}s against {a:.2f}s: the gate let them overlap")
+        self.assertLess(c, a * 2, f"overlapping steps took {c:.2f}s against {a:.2f}s: the refusal must degrade to "
+                                  "sequential, not to something slower")
 
     def test_the_conductor_driver_is_what_runs_when_asked_for(self) -> None:
         async def go() -> dict[str, Any]:
