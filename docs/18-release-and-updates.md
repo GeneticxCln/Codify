@@ -133,10 +133,10 @@ otherwise have to be rediscovered:
   repositories. Built on 24.04, the same files refuse to start on 22.04 with
   `GLIBC_2.39 not found`, which is a failure that appears on someone else's machine after the
   release is out. Bumping this line is a decision about who can install Codify, not upkeep.
-* **`dtolnay/rust-toolchain@stable`, not the 1.88 in `Cargo.toml`.** `rust-version` is a real
+* **`dtolnay/rust-toolchain@stable`, not the 1.90 in `Cargo.toml`.** `rust-version` is a real
   promise and the *gate* is where it is kept (`scripts/check_msrv.py` against the locked dependency
-  graph, run by `make check-tauri`). Pinning the release build to 1.88 would instead make
-  `cargo install tauri-cli` fail the day the CLI's own MSRV passes 1.88 — a build tool's
+  graph, run by `make check-tauri`). Pinning the release build to 1.90 would instead make
+  `cargo install tauri-cli` fail the day the CLI's own MSRV passes 1.90 — a build tool's
   requirement blocking the artefact, in a workflow whose entire job is to produce one.
 * **It is not a second gate.** `make ci` is the gate, and it runs before a commit reaches master
   (`make hooks` installs the pre-push hook; `check.yml` runs the same targets on GitHub's runners

@@ -22,10 +22,10 @@ name: release
 # the release is out, and which no amount of testing here would catch. So the version is
 # pinned deliberately, and bumping it is a decision about who can install this, not upkeep.
 #
-# **Why the stable Rust toolchain and not the 1.88 in Cargo.toml.** `rust-version` is a real
+# **Why the stable Rust toolchain and not the 1.90 in Cargo.toml.** `rust-version` is a real
 # promise and the gate checks it against the locked dependency graph
 # (`scripts/check_msrv.py`, run by `make check-tauri`). This workflow is not the place that
-# promise is kept, and pinning the release build to 1.88 would make `cargo install tauri-cli`
+# promise is kept, and pinning the release build to 1.90 would make `cargo install tauri-cli`
 # fail the day the CLI's own MSRV moves past it, in a workflow whose whole job is to produce
 # a file. `cargo install` takes its toolchain where it is run, so stable keeps a release from
 # being blocked by a build tool's requirements.
