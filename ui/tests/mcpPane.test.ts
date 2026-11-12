@@ -53,7 +53,10 @@ const server = {
   updated_at: 1,
 };
 
-async function withPane(body: (dom: Dom, calls: Call[]) => Promise<void>): Promise<void> {
+async function withPane(
+  body: (dom: Dom, calls: Call[]) => Promise<void>,
+  options: { createFailsAfterStoring?: boolean } = {},
+): Promise<void> {
   await withDom(async (dom) => {
     let stored = false;
     const calls: Call[] = [];
@@ -63,10 +66,18 @@ async function withPane(body: (dom: Dom, calls: Call[]) => Promise<void>): Promi
       const payload = typeof init?.body === "string" ? JSON.parse(init.body) : null;
       calls.push({ method, path: url.pathname, body: payload });
       if (method === "GET" && url.pathname === "/settings/mcp") {
-        return json(stored ? [server] : []);
+        // A row whose probe failed carries the failure, which is how the pane shows it after the re-read.
+        const row = options.createFailsAfterStoring
+          ? { ...server, last_probe_error: "93.184.216.34 answered 503" }
+          : server;
+        return json(stored ? [row] : []);
       }
       if (method === "POST" && url.pathname === "/settings/mcp") {
         stored = true;
+        if (options.createFailsAfterStoring) {
+          // The engine stores the row, then the probe fails: a 502 with the server already saved.
+          return json({ code: "mcp_http_error", message: "93.184.216.34 answered 503" }, 502);
+        }
         return json(server, 201);
       }
       if (method === "POST" && url.pathname === "/settings/mcp/mcp-1/probe") {
@@ -189,4 +200,19 @@ test("Probe now and Remove address that one server", async () => {
     );
     assert.match(dom.text(), /No MCP servers yet/);
   });
+});
+
+test("a probe that fails after the row was stored closes the form, so Save cannot add a second copy", async () => {
+  await withPane(async (dom, calls) => {
+    await dom.click(dom.byButton("Add server"));
+    await dom.fill(dom.byField("Server name") as HTMLInputElement, "Issues");
+    await dom.fill(dom.byField("Server URL") as HTMLInputElement, "https://93.184.216.34/mcp");
+    await dom.click(dom.byButton("Save and probe"));
+    await dom.settle();
+
+    assert.match(dom.text(), /answered 503/, "the probe's failure must be shown");
+    assert.match(dom.text(), /Issues/, "the stored server must be listed");
+    assert.throws(() => dom.byField("Server name"), "the add form must close: its draft is now a saved server");
+    assert.equal(calls.filter((call) => call.method === "POST" && call.path === "/settings/mcp").length, 1);
+  }, { createFailsAfterStoring: true });
 });

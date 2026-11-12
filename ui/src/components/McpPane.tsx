@@ -84,7 +84,14 @@ export const McpPane: React.FC = () => {
     } catch (err) {
       setError(readRejection(err, "Could not save the MCP server."));
       // The engine stores a server before probing it, so a failed probe still
-      // leaves a row. Re-read rather than pretending the save vanished.
+      // leaves a row (it answers 502, and a refused body is a 4xx before any row
+      // exists). Re-read rather than pretending the save vanished, and close the
+      // form for the 502: its draft is now a saved server, and pressing Save again
+      // would add a second copy of it.
+      if ((err as { status?: number } | null)?.status === 502) {
+        setAdding(false);
+        setDraft(EMPTY);
+      }
       await load();
     } finally {
       setSaving(false);
