@@ -1279,7 +1279,7 @@ class ConductorTools:
             "step_id": step.id,
             "changed": [
                 {
-                    "path": s.get("path"), "op": s.get("op", "write"),
+                    "path": s.get("path"), "op": s.get("action", "write"),
                     "diff": _excerpt(str(s.get("unified_diff") or "")),
                 }
                 for s in summaries if s.get("changed", True)

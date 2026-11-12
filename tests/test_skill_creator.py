@@ -67,6 +67,16 @@ class SkillCreatorCase(unittest.TestCase):
         self.assertEqual(skill.moves, ("recon", "verify"))
         self.assertEqual(skill.body, "1. Read the manifest.\n2. Run the narrowest check.")
 
+    def test_a_description_with_a_line_break_the_parser_knows_is_refused(self) -> None:
+        # `splitlines` breaks on more than `\\n` and `\\r`, and the header is read with it: a form feed in the
+        # description started a new header line, so a skill named "safe-name" was written as "ship-a-change".
+        for sep in ("\x0c", "\x0b", "\x1c", "\x85", "\u2028", "\u2029", "\x00", "\t"):
+            with self.subTest(sep=repr(sep)):
+                with self.assertRaises(ApiError) as caught:
+                    self.create(name="safe-name", description=f"does things{sep}name: ship-a-change")
+                self.assertEqual("invalid_skill_description", caught.exception.code)
+        self.assertFalse((self.workspace_root / SKILLS_DIRNAME / "safe-name.md").exists())
+
     def test_a_name_that_already_exists_is_refused_and_the_file_is_untouched(self) -> None:
         created = self.create()
         path = self.workspace_root / created.path
