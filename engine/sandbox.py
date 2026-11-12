@@ -31,6 +31,11 @@ CARGO_LINT_FLAGS = {"--lib", "--bins", "--all-targets", "--quiet"}
 MAKE_TARGETS = ("lint", "typecheck")
 # The programs `rustup` installs in `~/.cargo/bin` as proxies for a toolchain's own binaries.
 RUSTUP_TOOLS = frozenset({"cargo", "rustc", "rustup", "rustfmt", "rustdoc", "cargo-clippy", "clippy-driver"})
+# Where the jail shows the person's Go module download cache. Not at its real path: `go` treats
+# `$GOMODCACHE/cache/download` as its own cache and takes a lock file in it even to read, which fails on a read-only
+# mount. As a *proxy* (`GOPROXY=file://...`) it is only read, and `go` unpacks what it needs into the jail's own
+# writable module cache.
+GO_PROXY_DEST = "/run/codify-go-proxy"
 
 
 class CommandNotAllowed(Exception):
@@ -95,7 +100,7 @@ def _workspace_env() -> dict[str, str]:
     """
     env = {
         key: os.environ[key]
-        for key in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONHOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN")
+        for key in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONHOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN", "CARGO_HOME")
         if key in os.environ
     }
     if ENV_USER_PYTHONPATH in os.environ:
@@ -493,6 +498,42 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
     raise CommandNotAllowed(f"binary not allowed: {cmd}")
 
 
+def _go_download_cache(real_home: Path) -> Path | None:
+    """The person's Go module download cache (`$GOMODCACHE/cache/download`) when it exists inside the home."""
+    if os.environ.get("GOMODCACHE"):
+        base = Path(os.environ["GOMODCACHE"])
+    elif os.environ.get("GOPATH"):
+        base = Path(os.environ["GOPATH"].split(os.pathsep)[0]) / "pkg" / "mod"
+    else:
+        base = real_home / "go" / "pkg" / "mod"
+    try:
+        found = (base / "cache" / "download").resolve()
+    except OSError:
+        return None
+    if found.is_dir() and found != real_home and found.is_relative_to(real_home):
+        return found
+    return None
+
+
+def _go_proxy_value() -> str:
+    """`GOPROXY` for a jailed `go`: the read-only download cache first, then whatever the person had set.
+
+    A module that is in the cache never needs the network; one that is not falls through to the person's own
+    proxy list (the default, or `off`), so a run with network authority still downloads what is missing.
+    """
+    theirs = os.environ.get("GOPROXY") or "https://proxy.golang.org,direct"
+    return f"file://{GO_PROXY_DEST},{theirs}"
+
+
+
+def _jail_env(jail_argv: list[str]) -> dict[str, str]:
+    """What a jailed command's environment gains because of what the jail shows it.
+
+    `go` is pointed at the download cache the jail mounted at `GO_PROXY_DEST`; nothing else changes.
+    """
+    return {"GOPROXY": _go_proxy_value()} if GO_PROXY_DEST in jail_argv else {}
+
+
 class SandboxService:
     def __init__(self, settings: Any | None = None) -> None:
         # The engine passes its SettingsService; a bare `SandboxService()` (a test harness, the read-only
@@ -659,6 +700,13 @@ class SandboxService:
         # itself is not: it holds `credentials.toml`, the crates.io token. Only its `bin/` is bound, above.
         if real.name in RUSTUP_TOOLS or executable.name in RUSTUP_TOOLS:
             add(Path(os.environ.get("RUSTUP_HOME") or real_home / ".rustup"))
+            # The crates already downloaded, so an offline run builds what the person has built before. Only the
+            # index and the downloaded `.crate` files: `registry/src` is left out, so `cargo` unpacks what it
+            # needs into the jail's own writable `~/.cargo` (a read-only `src` failed "failed to unpack package"),
+            # and `credentials.toml` and `config.toml` beside them stay absent.
+            cargo_home = Path(os.environ.get("CARGO_HOME") or real_home / ".cargo")
+            for part in ("index", "cache"):
+                add(cargo_home / "registry" / part)
         for entry in os.environ.get("PATH", "").split(os.pathsep):
             if entry:
                 add(Path(entry))
@@ -676,6 +724,10 @@ class SandboxService:
             out += ["--dir", str(root)]
         for root in roots:
             out += ["--ro-bind", str(root), str(root)]
+        if executable.name == "go" or real.name == "go":
+            download = _go_download_cache(real_home)
+            if download is not None:
+                out += ["--ro-bind", str(download), GO_PROXY_DEST]
         return out
 
     def run_command(
@@ -732,6 +784,7 @@ class SandboxService:
         isolation = "bwrap" if jail_argv is not None else "off"
         if jail_argv is not None:
             child_argv = jail_argv
+            env.update(_jail_env(jail_argv))
         try:
             proc = subprocess.Popen(  # noqa: S603 — the argv passed `validate_argv` above; guarded, own session, no shell
                 # One process deeper than the command itself: the guard leads the new
