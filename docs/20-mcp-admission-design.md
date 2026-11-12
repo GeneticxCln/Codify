@@ -109,6 +109,7 @@ A re-probe is a diff, not a replacement:
 * a tool whose name is unchanged but whose input schema changed is **disabled** and marked changed — the same
   name may now mean something else;
 * a tool that disappeared is disabled and marked gone;
+* a tool whose name is not `[A-Za-z0-9_.:/-]{1,128}` is not listed at all: its name is printed into the model's menu on a line of its own, and a newline in it is a way to write instructions there;
 * a tool whose description changed but whose schema did not keeps its authority, because authority is about
   what the engine will let it reach, not about the prose around it.
 
@@ -230,7 +231,7 @@ mcp_tool
 |---|---|
 | `GET /settings/mcp` | Servers and tools, secrets redacted |
 | `POST /settings/mcp` | Add a server, validate, probe; tools start disabled |
-| `PUT /settings/mcp/{id}` | Edit name/URL/auth/enabled; a changed URL is revalidated |
+| `PUT /settings/mcp/{id}` | Edit name/URL/auth/enabled; a changed URL is revalidated, every tool of the server goes back to unadmitted (`authority = null`, disabled, `new`), and a change of host or port is refused (`mcp_secret_required`) unless the request carries the credential for the new host |
 | `DELETE /settings/mcp/{id}` | Remove the server, its tools and its secret |
 | `POST /settings/mcp/{id}/probe` | `initialize` + tools/list; diff, never call a tool |
 | `PUT /settings/mcp/{id}/tools/{tool}` | Set `authority` (`read`, `act` or null) and `enabled` for one tool. An `act` tool is callable only while the goal's stored status is `RUNNING` |
