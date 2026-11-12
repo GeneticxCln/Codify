@@ -363,6 +363,18 @@ class TestACompletedStepStaysCompleted(MovesCase):
         self.assertEqual(on_disk, (self.root / "a.py").read_text(encoding="utf-8"))
 
 
+class TestTheWriteMoveSaysWhatItDidToEachFile(MovesCase):
+    async def test_the_reported_op_is_the_files_real_action(self) -> None:
+        self.build(A_V2)
+        step_id = self.approve()
+        table = self.table()
+
+        out = await table["write"]({"step_id": step_id, "instructions": "go"})
+
+        ops = {entry["path"]: entry["op"] for entry in json.loads(out)["changed"]}
+        self.assertEqual({"a.py": "update"}, ops, "every change was reported as a plain write")
+
+
 class TestADryRunKeepsItsFirstProposal(MovesCase):
     async def test_a_second_write_is_refused_because_it_would_replace_the_first_proposal(self) -> None:
         self.build(A_V2, B_V1)

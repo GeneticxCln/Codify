@@ -39,6 +39,7 @@ from engine.models import (
     McpServerCreate,
     McpServerUpdate,
     McpToolUpdate,
+    scrub_surrogates,
     strip_invisible,
 )
 from engine.providers import Keychain
@@ -326,6 +327,22 @@ async def _post(
     raise McpError(f"{target.host} could not be reached ({name}).", "mcp_unreachable")
 
 
+def _clean(text: str) -> str:
+    """A server's words made safe to store and show: no invisible characters and no lone surrogates.
+
+    A server is third-party. `\\ud800` in JSON becomes a `str` that Python holds and SQLite, `json` and the
+    event stream cannot encode, so a tool description holding one failed the probe with an uncaught
+    `UnicodeEncodeError` (a 500, and no `last_probe_error`).
+    """
+    return str(scrub_surrogates(strip_invisible(text)))
+
+
+#: What a tool name may be. The spec asks for letters, digits and `_ - .`; `:` and `/` are accepted because
+#: namespaced servers use them. Anything else — a space, a newline, an instruction — is not a name, and the
+#: tool is not listed: its name is printed into the model's menu on a line of its own.
+TOOL_NAME_RE = re.compile(r"^[A-Za-z0-9_.:/-]{1,128}$")
+
+
 def _json_message(reply: _Reply, request_id: int) -> dict[str, Any]:
     """The JSON-RPC object for `request_id`, from JSON or a single SSE response."""
     if reply.content_type == "text/event-stream":
@@ -355,7 +372,7 @@ def _result(reply: _Reply, request_id: int) -> dict[str, Any]:
     message = _json_message(reply, request_id)
     error = message.get("error")
     if isinstance(error, dict):
-        text = strip_invisible(str(error.get("message") or "the server refused the request."))[:500]
+        text = _clean(str(error.get("message") or "the server refused the request."))[:500]
         raise McpError(f"the server refused the request: {text}", "mcp_server_error")
     result = message.get("result")
     if not isinstance(result, dict):
@@ -388,7 +405,7 @@ def _call_result(reply: _Reply, request_id: int) -> str:
                 "mcp_unsupported_content",
             )
         parts.append(str(item["text"]))
-    text = strip_invisible("\n\n".join(parts)).strip()
+    text = _clean("\n\n".join(parts)).strip()
     if len(text) > MAX_RESULT_CHARS:
         return (
             text[:MAX_RESULT_CHARS]
@@ -413,17 +430,16 @@ def _tools_from(result: dict[str, Any]) -> tuple[list[dict[str, Any]], str | Non
         if not isinstance(item, dict):
             continue
         name = str(item.get("name") or "").strip()
-        if not name:
+        if not TOOL_NAME_RE.fullmatch(name):
             continue
         schema = item.get("inputSchema")
-        if not isinstance(schema, dict):
-            schema = {}
+        schema = scrub_surrogates(schema) if isinstance(schema, dict) else {}
         encoded = json.dumps(schema, sort_keys=True, separators=(",", ":")).encode("utf-8")
         if len(encoded) > MAX_TOOL_SCHEMA_BYTES:
             raise McpError(f"tool {name!r} has an input schema larger than {MAX_TOOL_SCHEMA_BYTES} bytes.", "mcp_tool_too_large")
         tools.append({
-            "name": name[:200],
-            "description": strip_invisible(str(item.get("description") or ""))[:MAX_TOOL_DESCRIPTION],
+            "name": name,
+            "description": _clean(str(item.get("description") or ""))[:MAX_TOOL_DESCRIPTION],
             "input_schema": schema,
             "schema_hash": hashlib.sha256(encoded).hexdigest(),
         })
@@ -463,7 +479,7 @@ async def probe_server(
     server_info = init_result.get("serverInfo")
     server_name = ""
     if isinstance(server_info, dict):
-        server_name = strip_invisible(str(server_info.get("name") or ""))[:200]
+        server_name = _clean(str(server_info.get("name") or ""))[:200]
     session = init.session_id or None
     # The initialized notification has no id and no result; a server may answer
     # 202 or 204. It is sent once, with the session the handshake returned.
@@ -956,18 +972,36 @@ class McpService:
         if clear:
             existing = ""
         auth_header, secret = self._check_auth(auth_kind, auth_header, secret, existing=existing)
+        moved = False
         if url != current["url"]:
             try:
                 target, _ = await resolve_target(url, self._resolve)
             except McpError as exc:
                 raise ApiError(400, exc.code, str(exc)) from exc
             url = target.url
+            # A server is its address. The tools a person admitted were admitted on the old one, and the stored
+            # credential was given to it: a changed address starts both over.
+            before = parse_url(str(current["url"]))
+            moved = (before.host, before.port) != (target.host, target.port)
+            if moved and auth_kind != "none" and not secret:
+                raise ApiError(
+                    422, "mcp_secret_required",
+                    "the address moved to another host, so the stored credential is not sent to it; "
+                    "enter the credential for the new host, or choose no credential",
+                )
         api_key_ref = f"mcp/{server_id}" if auth_kind != "none" else ""
         self._db.execute(
             "UPDATE mcp_servers SET name = ?, url = ?, auth_kind = ?, auth_header = ?, "
             "api_key_ref = ?, enabled = ?, updated_at = ? WHERE id = ?",
             (name, url, auth_kind, auth_header, api_key_ref, int(enabled), time.time(), server_id),
         )
+        if url != current["url"]:
+            # Not admitted again until a person chooses an authority for each tool once more; the next probe
+            # (`probe`) lists what the new address offers.
+            self._db.execute(
+                "UPDATE mcp_tools SET authority = NULL, enabled = 0, state = 'new' WHERE server_id = ? AND state != 'gone'",
+                (server_id,),
+            )
         self._db.commit()
         if clear or auth_kind == "none":
             self._keychain.delete_secret(f"mcp/{server_id}")

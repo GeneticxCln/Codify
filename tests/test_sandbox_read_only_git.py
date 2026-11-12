@@ -630,6 +630,35 @@ class TestFormatsThatWouldRunGpg(RealRepoCase):
                 self.assertIsNotNone(self.attempt(*argv), f"{argv} is an ordinary format and was refused")
 
 
+class TestARepositoryCannotNameTheProgramThatVerifiesASignature(RealRepoCase):
+    """`gpg.program` is the OpenPGP program only. An x509 or ssh signature header is verified by its own."""
+
+    def _signed_commit_with_config(self, key: str) -> None:
+        tree = self.git("rev-parse", "HEAD^{tree}").strip()
+        parent = self.git("rev-parse", "HEAD").strip()
+        body = (
+            f"tree {tree}\nparent {parent}\nauthor t <a@b.c> 1700000000 +0000\n"
+            "committer t <a@b.c> 1700000000 +0000\n"
+            "gpgsig -----BEGIN SIGNED MESSAGE-----\n MIIB\n -----END SIGNED MESSAGE-----\n\nsigned\n"
+        )
+        (self.root.parent / "commit.txt").write_text(body, encoding="utf-8")
+        new = self.git("hash-object", "-t", "commit", "-w", str(self.root.parent / "commit.txt")).strip()
+        self.git("update-ref", "HEAD", new)
+        program = self.root.parent / "verify.sh"
+        program.write_text(f"#!/bin/sh\necho ran > {self.marker}\nexit 1\n", encoding="utf-8")
+        program.chmod(0o755)
+        self.git("config", "log.showSignature", "true")
+        self.git("config", key, str(program))
+
+    def test_no_signature_verifier_named_by_the_repository_is_started(self) -> None:
+        for key in ("gpg.x509.program", "gpg.openpgp.program", "gpg.ssh.program"):
+            with self.subTest(key=key):
+                self.marker.unlink(missing_ok=True)
+                self._signed_commit_with_config(key)
+                self.attempt("git", "log", "-1")
+                self.assertFalse(self.marker.exists(), f"git ran the program named by {key}")
+
+
 class TestAHostilePathIsNotAWorkspacePath(unittest.TestCase):
     def test_a_path_that_makes_resolve_raise_is_refused_not_a_crash(self) -> None:
         from engine.sandbox import _is_workspace_path

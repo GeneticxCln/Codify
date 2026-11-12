@@ -1029,17 +1029,32 @@ def format_search(result: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def format_command(result: dict[str, Any]) -> str:
+def format_command(result: dict[str, Any], *, keep: str = "head") -> str:
+    """A command's result as text a model reads.
+
+    `keep="head"` (the default) is for output whose start is the point: a `git log`, an `ls`, a search. `keep="tail"`
+    is for a command that runs something, which prints its reason for failing last: a test runner's failed assertion,
+    a traceback's final frame, the summary line. The conductor's `run_command` asks for the tail; it used to get the
+    first 2,500 characters of a long run, which are progress dots (see `command_tail`).
+    """
     argv = " ".join(result.get("argv") or [])
     out = (result.get("stdout") or "").strip()
     err = (result.get("stderr") or "").strip()
+    cut = _end if keep == "tail" else _head
     if out and err:
         # Both, labelled. This used to print stdout *or* stderr, so a run that printed a banner on stdout and
         # its traceback on stderr showed the banner and hid the reason it failed.
-        body = f"stdout:\n{_head(out, 2_500)}\nstderr:\n{_head(err, 1_500)}"
+        body = f"stdout:\n{cut(out, 2_500)}\nstderr:\n{cut(err, 1_500)}"
     else:
-        body = _head(out or err, 4_000)
+        body = cut(out or err, 4_000)
     return f"--- $ {argv} (exit {result.get('exit_code')})\n{body}"
+
+
+def _end(text: str, limit: int) -> str:
+    """The last `limit` characters, with a first line that says the start was cut."""
+    if len(text) <= limit:
+        return text
+    return "… (output truncated; the end follows)\n" + text[-limit:]
 
 
 def _head(text: str, limit: int) -> str:

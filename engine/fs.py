@@ -325,7 +325,14 @@ class FileSystemService:
         # property of the filesystem rather than of the path.
         if any(part.casefold() == GIT_DIRNAME for part in Path(rel).parts):
             raise GitMetadataError(rel)
-        target = (self.root / rel).resolve()
+        try:
+            target = (self.root / rel).resolve()
+        except RuntimeError:
+            # A symbolic-link loop. Before Python 3.13 `Path.resolve` raises this where later versions return the
+            # path, and none of the callers (`validate_argv`, `read_text_or_none`, `apply`, `read_editable`, the
+            # skill and git doors) catch it: a cloned repository holding `loop -> loop` crashed a step on 3.10-3.12.
+            # A path that cannot be resolved is not a place inside the workspace.
+            raise PathEscapeError(rel) from None
         if target != self.root and self.root not in target.parents:
             raise PathEscapeError(rel)
         # A symlink inside the workspace points at git's metadata without ever

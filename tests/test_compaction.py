@@ -166,6 +166,38 @@ class CompactionTestCase(unittest.IsolatedAsyncioTestCase):
             await self.executor.compact_thread(self.thread.id)
         self.assertIsNone(self.compactions.latest(self.thread.id))
 
+    async def test_a_model_failure_is_a_sentence_not_a_500(self) -> None:
+        from engine.executor_support import AgentNotConfigured
+        from engine.providers import ProviderError
+
+        for n in range(6):
+            self._turn(f"turn {n}")
+        self.settings.set_int("session_compact_keep_turns", 3)
+        for failure in (
+            AgentNotConfigured("scribe", "no model is configured for the scribe role."),
+            ProviderError("rate_limited", "the provider refused"),
+        ):
+            with self.subTest(failure=type(failure).__name__):
+                cast(Any, self.executor.orchestrator).run_agent = AsyncMock(side_effect=failure)
+                with self.assertRaises(ApiError) as caught:
+                    await self.executor.compact_thread(self.thread.id)
+                self.assertEqual(502, caught.exception.status)
+                self.assertIn("nothing was changed", caught.exception.message)
+                self.assertIsNone(self.compactions.latest(self.thread.id))
+
+    def test_a_summary_in_any_script_is_prose(self) -> None:
+        for text in (
+            "Пользователь попросил добавить форму входа, и помощник составил план из трёх шагов для её создания.",
+            "用户要求添加登录表单，助手制定了三个步骤的计划来实现它，并且已经完成了第一步的代码修改。",
+            "ユーザーはログインフォームの追加を依頼し、アシスタントは三つのステップからなる計画を立てました。",
+            "طلب المستخدم إضافة نموذج تسجيل الدخول ووضع المساعد خطة من ثلاث خطوات لبنائه.",
+        ):
+            with self.subTest(text=text[:12]):
+                self.assertTrue(summary_is_usable(text))
+        for text in ("{}", "用户", "#}" * 300, "ab " * 3, "ж" * 200):
+            with self.subTest(text=text[:12]):
+                self.assertFalse(summary_is_usable(text))
+
     def test_a_summary_must_look_like_prose_not_json_or_a_loop(self) -> None:
         self.assertTrue(summary_is_usable("The thread chose SQLite and finished the parser."))
         self.assertFalse(summary_is_usable("{}"))

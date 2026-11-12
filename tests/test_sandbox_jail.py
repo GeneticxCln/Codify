@@ -31,6 +31,7 @@ from engine.models import GoalCreate, WorkspaceCreate
 from engine.sandbox import (
     JAIL_HOME,
     JAIL_HOME_TMPFS_BYTES,
+    JAIL_SHM_TMPFS_BYTES,
     JAIL_TMP_TMPFS_BYTES,
     CommandNotAllowed,
     SandboxService,
@@ -105,6 +106,8 @@ print("HOME=" + os.environ.get("HOME", ""))
 print("TMP=" + tempfile.gettempdir())
 print("TMP_TOTAL=" + str(shutil.disk_usage(tempfile.gettempdir()).total))
 print("HOME_TOTAL=" + str(shutil.disk_usage(os.environ["HOME"]).total))
+print("SHM_TOTAL=" + str(shutil.disk_usage("/dev/shm").total))
+check("DEV_WRITE", lambda: open("/dev/codify-probe", "w").close())
 """
 
 
@@ -203,6 +206,11 @@ class SandboxJailTests(unittest.TestCase):
             int(totals["HOME_TOTAL"]), JAIL_HOME_TMPFS_BYTES,
             "the fresh home is RAM with no bound",
         )
+        self.assertLessEqual(
+            int(totals["SHM_TOTAL"]), JAIL_SHM_TMPFS_BYTES,
+            "/dev/shm is RAM with no bound; a runaway test can exhaust memory through it",
+        )
+        self.assertIn("DEV_WRITE=no", output, "the jail could create files in /dev, which is RAM with no bound")
         self.assertEqual("bwrap", result["isolation"])
         self.assertIsNone(result["isolation_warning"])
         self.assertFalse(self.outside.exists())

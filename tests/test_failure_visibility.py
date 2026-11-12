@@ -36,6 +36,7 @@ class _VerifierScript(_Counting):
     def __init__(self, fixer_replies: list[Any]) -> None:
         super().__init__(fixer_replies)
         self.verifier_replies: list[dict[str, Any]] = []
+        self.verifier_prompts: list[str] = []
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str, temperature: float, max_tokens: int,
@@ -43,6 +44,7 @@ class _VerifierScript(_Counting):
     ) -> str:
         if "You are Codify Verifier" in system_prompt and self.verifier_replies:
             self.asked["verifier"] = self.asked.get("verifier", 0) + 1
+            self.verifier_prompts.append(user_prompt)
             reply = self.verifier_replies.pop(0) if len(self.verifier_replies) > 1 else self.verifier_replies[0]
             return json.dumps(reply)
         return await super().complete(
@@ -74,6 +76,38 @@ class FailureCase(MovesCase):
         ]
         (self.root / "t.py").write_text(FAILING_SCRIPT, encoding="utf-8")
         return provider
+
+
+NOISY_SCRIPT = (
+    "import sys\n"
+    "print('progress ' * 40000)\n"          # 360,000 characters of progress on stdout
+    f"print('{MARKER}', file=sys.stderr)\n"
+    "sys.exit(1)\n"
+)
+
+
+class TestALongRunIsBoundedAndKeepsItsReason(FailureCase):
+    async def test_the_verifier_is_shown_the_end_of_a_long_run_not_all_of_it(self) -> None:
+        provider = self.build(A_V2)
+        (self.root / "t.py").write_text(NOISY_SCRIPT, encoding="utf-8")
+        step_id = self.approve()
+        table = self.table()
+        await table["write"]({"step_id": step_id, "instructions": "go"})
+
+        await table["verify"]({"step_id": step_id})
+
+        # The second verifier call carries the command's output.
+        prompt = provider.verifier_prompts[1]
+        self.assertLess(len(prompt), 20_000, "the whole of a verbose run went into the verifier's prompt")
+        self.assertIn(MARKER, prompt, "the reason the run failed was cut off")
+
+    def test_the_conductors_run_command_keeps_the_end_of_a_long_output(self) -> None:
+        result = {"argv": ["pytest"], "exit_code": 1, "stdout": "." * 9000, "stderr": "E   " + MARKER}
+        text = format_command(result, keep="tail")
+        self.assertIn(MARKER, text)
+        both = {"argv": ["pytest"], "exit_code": 1, "stdout": "." * 9000 + "\nFAILED the-last-line", "stderr": ""}
+        self.assertIn("FAILED the-last-line", format_command(both, keep="tail"))
+        self.assertNotIn("FAILED the-last-line", format_command(both), "the default still keeps the head")
 
 
 class TestACommandShowsBothStreams(MovesCase):

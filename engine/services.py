@@ -825,7 +825,10 @@ class WorkspaceService:
                 "a skill name is lowercase letters, digits and dashes, starting with a letter or digit",
             )
         description = body.description.strip()
-        if not description or "\n" in description or "\r" in description:
+        # One line by the parser's own rule: `splitlines` also breaks on a form feed, a vertical tab, the
+        # file/group/record separators, NEL and U+2028/9, and `parse_skill` reads the header with it. A `\n` and
+        # `\r` check let `x\x0cname: ship-a-change` through, and the file then loaded as a different skill.
+        if not description or len(description.splitlines()) != 1 or any(ord(ch) < 32 or ord(ch) == 127 for ch in description):
             raise ApiError(422, "invalid_skill_description", "a skill needs a one-line description")
         if len(description) > MAX_DESCRIPTION_CHARS:
             raise ApiError(

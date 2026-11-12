@@ -87,7 +87,7 @@ _DIFF_FORMAT = """
 --ignore-space-change -b --ignore-all-space -w --ignore-blank-lines --ignore-space-at-eol
 --ignore-cr-at-eol --word-diff[=] --unified= -U[=] --inter-hunk-context= --find-renames[=]
 -M[=] --find-copies[=] -C[=] --no-renames --diff-filter= --full-index --abbrev[=] --text
---function-context -W --no-color --color[=] --ignore-submodules[=] -S=+ -G=+
+--function-context -W --no-color --color[=] -S=+ -G=+
 --pickaxe-regex --pickaxe-all -R -z --src-prefix= --dst-prefix= --no-prefix --exit-code
 --quiet
 """
@@ -335,7 +335,14 @@ def runner_env(base: Mapping[str, str], root: str | None = None) -> dict[str, st
 # Diff-shaped commands run a configured external diff driver and textconv filter unless
 # told not to. Both are programs named in repository config.
 _NO_DRIVERS: dict[str, tuple[str, ...]] = {
-    "diff": ("--no-ext-diff", "--no-textconv"),
+    # `--ignore-submodules=dirty` is the one setting that stops `status` and `diff` from looking inside a submodule's
+    # working tree. A submodule is a repository of its own with a config of its own, and its `.git` can be replaced by
+    # a command the jail ran (a gitfile pointing into the top-level `.git` is writable workspace, even when `.git`
+    # itself is read-only). Comparing its files runs the clean filter that config names, outside the jail, as the
+    # person. `dirty` still reports a submodule whose checked-out commit moved; it does not report edits inside one.
+    # The option is not in the table above, so a caller cannot put `--ignore-submodules=none` after this one.
+    "status": ("--ignore-submodules=dirty",),
+    "diff": ("--no-ext-diff", "--no-textconv", "--ignore-submodules=dirty"),
     "log": ("--no-ext-diff", "--no-textconv"),
     "show": ("--no-ext-diff", "--no-textconv"),
     "blame": ("--no-textconv",),
@@ -366,6 +373,15 @@ def runner_args(args: Sequence[str]) -> list[str]:
         # not get to start one: the empty program makes git fail instead of exec'ing the named one.
         "-c", "commit.gpgsign=false",
         "-c", "gpg.program=",
+        # `gpg.program` is only the OpenPGP one. A commit that carries an x509 or ssh signature header is
+        # verified by `gpg.x509.program` / `gpg.ssh.program` (and `gpg.openpgp.program`, which takes
+        # precedence over `gpg.program`) when `log.showSignature` is on or a format asks for `%G`, and a
+        # repository's own config can set all of them. Each is emptied so git fails instead of starting
+        # the named program, and `log.showSignature` is switched off so a plain `git log` does not verify.
+        "-c", "gpg.openpgp.program=",
+        "-c", "gpg.x509.program=",
+        "-c", "gpg.ssh.program=",
+        "-c", "log.showSignature=false",
         sub,
         *_NO_DRIVERS.get(sub, ()),
         *rest,
