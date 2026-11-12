@@ -202,7 +202,7 @@ def _jail_base(bwrap: str, network: bool) -> list[str]:
         # `--dev` is a tmpfs sized at half of RAM, and `/dev/shm` inside it is the POSIX shared-memory area. Every
         # other mount here is bounded; these two were not, so a runaway writer filled memory through them. `shm`
         # gets a bound of its own, and `/dev` goes read-only after it (a nested mount stays writable).
-        "--size", str(JAIL_SHM_TMPFS_BYTES), "--tmpfs", "/dev/shm",
+        "--size", str(JAIL_SHM_TMPFS_BYTES), "--tmpfs", "/dev/shm",  # noqa: S108 — a mount destination, not a file the engine makes
         "--remount-ro", "/dev",
         "--proc", "/proc",
         # The host's PIDs and its SysV/POSIX IPC namespace are not the jail's: a command
