@@ -232,6 +232,9 @@ check-tauri:
 	  echo "check-tauri: no display and no xvfb-run, so the one GTK test will fail — run 'make doctor'" >&2; \
 	fi
 	cd src-tauri && $(XVFB) cargo test
+	# Tauri's build script regenerates these from the locked dependencies. A dependency bump that adds a permission
+	# (the Rust group bump of #113 added `core:app:allow-exit`) left them stale, and the next build dirtied the tree.
+	@git diff --exit-code --stat -- src-tauri/gen/schemas || { echo "check-tauri: src-tauri/gen/schemas is stale — commit what the build regenerated" >&2; exit 1; }
 	# Clippy with every warning an error, on the tests too: a lint nobody can fail on is a lint nobody reads.
 	cd src-tauri && cargo clippy --all-targets -- -D warnings
 	# `rust-version` is a promise the locked dependency graph can contradict (it said 1.77.2 while `darling` needed
