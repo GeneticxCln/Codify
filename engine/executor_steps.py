@@ -42,6 +42,8 @@ from engine.executor_design import _Design
 # the single-run budget — but it must stay bounded, since each retry is another
 # model call.
 MAX_REFUSED_TEST_COMMANDS = 2
+#: How much of a command's output the verifier is shown: the end of each stream, split between them (`command_tail`).
+VERIFIER_OUTPUT_CHARS = 8_000
 
 
 def verdict_contradicts_exit(exit_code: int) -> str:
@@ -1114,10 +1116,13 @@ class _Steps(_Design):
             # Same statelessness rule as the refusal path: the run feedback
             # rides on the step context, so the verdict call can still name
             # what it judged.
+            # The end of each stream, bounded: a stored result is capped at 200,000 characters a stream, and a
+            # verbose suite put all of it in this prompt. The reason a command failed is printed last.
             prompt = (
                 f"{base_prompt}\n\n--- Command output ---\n"
-                f"Command ran. exit_code={result['exit_code']}\nstdout:\n{result['stdout']}\n"
-                f"stderr:\n{result['stderr']}\nNow return the verdict with argv null."
+                f"Command ran. exit_code={result['exit_code']}\n"
+                f"{command_tail(result, VERIFIER_OUTPUT_CHARS) or '(it printed nothing)'}\n"
+                "Now return the verdict with argv null."
             )
 
     async def _verifier_deliverable(

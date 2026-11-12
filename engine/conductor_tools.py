@@ -691,7 +691,7 @@ class ConductorTools:
                 network=self.service.goals.get(self.goal_id).allow_network or self.service._sandbox_network(),
             )
         warning = result.get("isolation_warning")
-        return format_command(result) + (f"\n(isolation: {warning})" if warning else "") + (f"\n(reason given: {reason})" if reason else "")
+        return format_command(result, keep="tail") + (f"\n(isolation: {warning})" if warning else "") + (f"\n(reason given: {reason})" if reason else "")
 
     async def read_page(self, args: dict[str, Any]) -> str:
         """What the browser tab the user is looking at is showing.
