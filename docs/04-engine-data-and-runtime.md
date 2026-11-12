@@ -2005,15 +2005,15 @@ binds the workspace's `.git` back read-only before it `chdir`s there **when `.gi
 may edit the working tree; it cannot install a post-commit hook or name a `core.fsmonitor` that the engine's own
 commit would later run outside the jail with the person's real home. A fresh workspace has no metadata to bind, so a
 jailed `git init` could still plant `filter.<name>.clean` or `gpg.program`: the engine's own git forces
-`--no-gpg-sign` (with `-c commit.gpgsign=false -c gpg.program=`) on every command, and refuses to commit a repository
+`--no-gpg-sign` (with `-c commit.gpgsign=false -c gpg.program= -c gpg.openpgp.program= -c gpg.x509.program= -c gpg.ssh.program= -c log.showSignature=false`) on every command, `--ignore-submodules=dirty` on `status` and `diff` (a submodule's `.git` is writable workspace, and its own config could name a clean filter that comparing its files would run outside the jail), and refuses to commit a repository
 whose config names a clean, smudge or process filter and refuses it before the command runs (see "Read-only git").
 `/run` and `/tmp` are fresh, size-bounded tmpfs (`--size`: 64 MiB and 1 GiB): the host's session bus, gnupg, keyring,
 PipeWire, Wayland, X11, tmux and ssh-agent sockets all live at those paths, a read-only `/` still leaves them
 connectable, and `--unshare-net` does not hide them, so they are absent rather than merely unwritable, and a runaway
-writer meets a full filesystem instead of consuming RAM until the kernel's OOM killer acts. A pid namespace and an IPC namespace of the jail's own mean a test cannot signal, trace
+writer meets a full filesystem instead of consuming RAM until the kernel's OOM killer acts. `/dev/shm` is a 64 MiB tmpfs of its own and `/dev` is remounted read-only after it, because `--dev` alone is a tmpfs of half of RAM. A pid namespace and an IPC namespace of the jail's own mean a test cannot signal, trace
 or kill the engine, the shell or the desktop. A fresh tmpfs (2 GiB) is also mounted over the person's
 real home at that same path, so `~/.ssh`, `~/.codify` and everything beside them are absent rather than unreadable,
-while an absolute path a build tool prints still reads the same. The executable's own directory, a virtualenv root and the `PATH` entries under the home are rebound read-only,
+while an absolute path a build tool prints still reads the same. The executable's own directory, a virtualenv root, the `bin/`, `lib/` and `lib64/` of an interpreter's prefix (never the prefix itself: for a script in `~/.local/bin` that would be `~/.local`, whose `share/` holds keyrings), the rustup toolchains (`~/.rustup`, for `cargo`, `rustc` and the other rustup proxies; `~/.cargo` is not bound beyond `bin/`, because `credentials.toml` is there) and the `PATH` entries under the home are rebound read-only,
 because a fresh home would otherwise hide the venv the command was started from; nothing else of the home is visible. A
 redirected `CODIFY_HOME` outside the home gets its own tmpfs, so this run's database, secrets and boot token are absent too. `--unshare-net` is added unless the command has network authority: the goal's stored `allow_network`, or the
 engine's `sandbox_network` switch, default off. `HOME` is the tmpfs path, so a build's cache writes are discarded with

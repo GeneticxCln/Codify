@@ -29,6 +29,8 @@ MYPY_FLAGS = {"--strict", "--ignore-missing-imports"}
 # No `--`: the engine appends `-- -D warnings` to clippy, and a second `--` would override it.
 CARGO_LINT_FLAGS = {"--lib", "--bins", "--all-targets", "--quiet"}
 MAKE_TARGETS = ("lint", "typecheck")
+# The programs `rustup` installs in `~/.cargo/bin` as proxies for a toolchain's own binaries.
+RUSTUP_TOOLS = frozenset({"cargo", "rustc", "rustup", "rustfmt", "rustdoc", "cargo-clippy", "clippy-driver"})
 
 
 class CommandNotAllowed(Exception):
@@ -93,7 +95,7 @@ def _workspace_env() -> dict[str, str]:
     """
     env = {
         key: os.environ[key]
-        for key in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONHOME")
+        for key in ("PATH", "HOME", "LANG", "TERM", "VIRTUAL_ENV", "PYTHONHOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN")
         if key in os.environ
     }
     if ENV_USER_PYTHONPATH in os.environ:
@@ -138,6 +140,7 @@ JAIL_HOME = str(Path.home().resolve())
 # scratch: a runaway writer should meet a full filesystem before the kernel meets an OOM killer. `--size`
 # applies to the next `--tmpfs` only, so each mount carries its own bound.
 JAIL_RUN_TMPFS_BYTES = 64 * 1024**2
+JAIL_SHM_TMPFS_BYTES = 64 * 1024**2
 JAIL_TMP_TMPFS_BYTES = 1024 * 1024**2
 JAIL_HOME_TMPFS_BYTES = 2 * 1024**3
 
@@ -195,7 +198,13 @@ def _jail_base(bwrap: str, network: bool) -> list[str]:
         "--size", str(JAIL_TMP_TMPFS_BYTES),
         "--tmpfs", "/tmp",  # noqa: S108 — a mount destination, not a temp file the engine makes:
         # the host's /tmp is replaced by an empty tmpfs so its pathname sockets cannot be reached.
-        "--dev", "/dev", "--proc", "/proc",
+        "--dev", "/dev",
+        # `--dev` is a tmpfs sized at half of RAM, and `/dev/shm` inside it is the POSIX shared-memory area. Every
+        # other mount here is bounded; these two were not, so a runaway writer filled memory through them. `shm`
+        # gets a bound of its own, and `/dev` goes read-only after it (a nested mount stays writable).
+        "--size", str(JAIL_SHM_TMPFS_BYTES), "--tmpfs", "/dev/shm",
+        "--remount-ro", "/dev",
+        "--proc", "/proc",
         # The host's PIDs and its SysV/POSIX IPC namespace are not the jail's: a command
         # must not be able to signal, trace or kill the engine, the shell or the desktop.
         # The fresh `/proc` above is the view that goes with the new pid namespace.
@@ -628,8 +637,13 @@ class SandboxService:
         except OSError:
             real = executable
         add(real.parent)
-        if (real.parent.parent / "lib").is_dir():
-            add(real.parent.parent)
+        prefix = real.parent.parent
+        if (prefix / "lib").is_dir():
+            # The directories an interpreter or a user-installed script needs, and not the prefix itself: for a
+            # script in `~/.local/bin` the prefix is `~/.local`, which also holds `share/` (keyrings, application
+            # data, the embedded browser's profile), and binding it made all of that readable inside the jail.
+            for name in ("bin", "lib", "lib64"):
+                add(prefix / name)
         # uv's provisioning chain is `venv/bin/python -> cpython-3.10-linux.../bin/python3.10`, and that
         # intermediate name is itself a symlink to `cpython-3.10.22...`. Binding only the resolved directory
         # leaves the intermediate link missing, so bind the directory that holds both names.
@@ -639,6 +653,12 @@ class SandboxService:
         # interpreter but lose the packages installed beside it.
         if (executable.parent.parent / "pyvenv.cfg").exists():
             add(executable.parent.parent)
+        # `cargo`, `rustc` and `rustfmt` in `~/.cargo/bin` are rustup proxies: they pick the toolchain from
+        # `$RUSTUP_HOME` (`~/.rustup`), which the fresh home hides, and fail with "rustup could not choose a
+        # version of cargo to run". The toolchains hold no secret, so that directory is bound read-only. `~/.cargo`
+        # itself is not: it holds `credentials.toml`, the crates.io token. Only its `bin/` is bound, above.
+        if real.name in RUSTUP_TOOLS or executable.name in RUSTUP_TOOLS:
+            add(Path(os.environ.get("RUSTUP_HOME") or real_home / ".rustup"))
         for entry in os.environ.get("PATH", "").split(os.pathsep):
             if entry:
                 add(Path(entry))
