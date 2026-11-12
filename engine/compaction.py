@@ -68,7 +68,12 @@ def summary_is_usable(summary: str) -> bool:
         return False
     if text.startswith(("{", "[", "```")):
         return False
-    if len(re.findall(r"[A-Za-z0-9]{2,}", text)) < 6:
+    # Words in any script, not ASCII ones: this used to count `[A-Za-z0-9]{2,}`, which finds nothing in a Russian,
+    # Greek, Arabic, Chinese or Japanese summary, so a thread in those languages could never be compacted (every
+    # attempt cost two model calls and stored nothing). Chinese and Japanese have no spaces, so a run of thirty
+    # letters counts for as much as six words.
+    words = re.findall(r"[^\W_]{2,}", text)
+    if len(words) < 6 and sum(len(word) for word in words) < 30:
         return False
     letters = sum(char.isalpha() for char in text)
     if letters / len(text) < 0.45:

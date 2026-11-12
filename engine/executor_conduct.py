@@ -34,7 +34,7 @@ from engine.conductor import (
     without_browser_actions,
 )
 from engine.conductor_tools import ConductorTools, _Conducted
-from engine.executor_support import AgentNotConfigured
+from engine.executor_support import AgentNotConfigured, AgentOutputInvalid
 from engine.laya import LayaDecision, build_state
 from engine.models import AgentConfig, AgentRole, BUILTIN_PROVIDERS, CompactionStatus, Goal, PlanStep
 from engine.providers import ProviderError
@@ -1408,7 +1408,15 @@ class _Conduct(_Plan):
                 409, "nothing_to_compact",
                 f"nothing older than the {keep} kept turns is waiting for a summary",
             )
-        await self._store_compaction(goal, plan, automatic=automatic)
+        try:
+            await self._store_compaction(goal, plan, automatic=automatic)
+        except (ProviderError, AgentOutputInvalid) as exc:
+            # A person pressed a button and is owed a sentence, not a 500: no model is configured for the role, the
+            # provider is down or the key was refused. `_auto_compact` already treats the same failures as a warning.
+            raise ApiError(
+                502, getattr(exc, "code", None) or "compaction_failed",
+                f"the summary could not be written, and nothing was changed: {exc}",
+            ) from exc
         return self.compactions.status(conversation_id, self.settings)
 
     async def _store_compaction(
