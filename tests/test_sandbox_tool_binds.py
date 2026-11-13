@@ -22,12 +22,20 @@ from unittest import mock
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
-from engine.sandbox import SandboxService
+from engine.sandbox import GO_PROXY_DEST, SandboxService, _go_proxy_value, _jail_env
 
 
 def _bound(args: list[str]) -> list[Path]:
     """The read-only bind sources in a `_tool_binds` argument list."""
     return [Path(args[i + 1]) for i, word in enumerate(args) if word == "--ro-bind"]
+
+
+def _dest_of(args: list[str], source: Path) -> str | None:
+    """Where the jail shows `source`, or None when it is not bound."""
+    for i, word in enumerate(args):
+        if word == "--ro-bind" and Path(args[i + 1]) == source:
+            return args[i + 2]
+    return None
 
 
 class TestToolBinds(unittest.TestCase):
@@ -41,10 +49,13 @@ class TestToolBinds(unittest.TestCase):
         return any(path == root or root in path.parents for root in bound)
 
     def binds_for(self, executable: Path) -> list[Path]:
+        return _bound(self.args_for(executable))
+
+    def args_for(self, executable: Path) -> list[str]:
         with mock.patch.dict(os.environ, {"PATH": "/usr/bin:/bin"}, clear=False):
-            for name in ("VIRTUAL_ENV", "PYTHONHOME", "RUSTUP_HOME"):
+            for name in ("VIRTUAL_ENV", "PYTHONHOME", "RUSTUP_HOME", "CARGO_HOME", "GOMODCACHE", "GOPATH", "GOPROXY"):
                 os.environ.pop(name, None)
-            return _bound(SandboxService._tool_binds(executable, self.home))
+            return SandboxService._tool_binds(executable, self.home)
 
     def test_a_script_in_dot_local_bin_does_not_expose_dot_local_share(self) -> None:
         script = self.home / ".local" / "bin" / "pytest"
@@ -72,6 +83,47 @@ class TestToolBinds(unittest.TestCase):
         bound = self.binds_for(proxy)
         self.assertTrue(self.covers(bound, toolchain), "rustup cannot find a toolchain inside the jail")
         self.assertFalse(self.covers(bound, token), "the crates.io token is visible inside the jail")
+
+    def test_cargo_sees_the_downloaded_crates_but_not_the_sources_or_the_credentials(self) -> None:
+        proxy = self.home / ".cargo" / "bin" / "cargo"
+        proxy.parent.mkdir(parents=True)
+        proxy.write_text("#!/bin/sh\n", encoding="utf-8")
+        for part in ("index", "cache", "src"):
+            (self.home / ".cargo" / "registry" / part / "index.crates.io-x").mkdir(parents=True)
+        (self.home / ".rustup").mkdir()
+        (self.home / ".cargo" / "credentials.toml").write_text("token", encoding="utf-8")
+        (self.home / ".cargo" / "config.toml").write_text("[registries]", encoding="utf-8")
+        bound = self.binds_for(proxy)
+        registry = self.home / ".cargo" / "registry"
+        self.assertTrue(self.covers(bound, registry / "index" / "index.crates.io-x"))
+        self.assertTrue(self.covers(bound, registry / "cache" / "index.crates.io-x"))
+        # `src` is what `cargo` unpacks into, so it must stay writable (not bound): a read-only one failed
+        # "failed to unpack package" for any crate the person had downloaded but not yet built.
+        self.assertFalse(self.covers(bound, registry / "src" / "index.crates.io-x"))
+        self.assertFalse(self.covers(bound, self.home / ".cargo" / "credentials.toml"))
+        self.assertFalse(self.covers(bound, self.home / ".cargo" / "config.toml"))
+
+    def test_go_gets_its_download_cache_as_a_proxy_and_not_at_its_own_path(self) -> None:
+        go = self.home / "sdk" / "go" / "bin" / "go"
+        go.parent.mkdir(parents=True)
+        go.write_text("", encoding="utf-8")
+        download = self.home / "go" / "pkg" / "mod" / "cache" / "download"
+        download.mkdir(parents=True)
+        extracted = self.home / "go" / "pkg" / "mod" / "github.com" / "google" / "uuid@v1.6.0"
+        extracted.mkdir(parents=True)
+        args = self.args_for(go)
+        # At its own path `go` would take a lock file in it, and a read-only mount refuses that.
+        self.assertEqual(GO_PROXY_DEST, _dest_of(args, download))
+        self.assertFalse(self.covers(_bound(args), extracted))
+
+    def test_a_jailed_go_asks_the_cache_first_and_then_the_persons_own_proxy(self) -> None:
+        with mock.patch.dict(os.environ, {"GOPROXY": "off"}):
+            self.assertEqual(f"file://{GO_PROXY_DEST},off", _go_proxy_value())
+        with mock.patch.dict(os.environ, {}, clear=False):
+            os.environ.pop("GOPROXY", None)
+            self.assertEqual(f"file://{GO_PROXY_DEST},https://proxy.golang.org,direct", _go_proxy_value())
+        self.assertEqual({}, _jail_env(["bwrap", "--", "pytest"]))
+        self.assertIn("GOPROXY", _jail_env(["bwrap", "--ro-bind", "/x", GO_PROXY_DEST, "--", "go"]))
 
     def test_an_interpreter_prefix_still_gets_its_libraries(self) -> None:
         interpreter = self.home / "pyenv" / "3.10" / "bin" / "python3"
