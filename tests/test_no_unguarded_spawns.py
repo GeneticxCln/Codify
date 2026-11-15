@@ -90,7 +90,7 @@ GUARDED_SPAWN_SITES: dict[str, dict[str, str]] = {
     },
     "scripts/smoke_bundle.py": {
         "Popen": "the bundle smoke (`make check-bundle`, and the release before it publishes): the bundle's own `python/bin/python3 -m engine`, started from the bundle the way the shell starts it, with a throwaway CODIFY_HOME and this script as the engine's watched parent (`CODIFY_PARENT_PID`), stopped with SIGTERM then SIGKILL on every path out. Not routed through SandboxService or spawn_guard: the argv is the engine's entry point in a directory a developer or the release named, there is no model-proposed request to validate, and like preview_engine.py this script has to be the engine's parent. Pinned by tests/test_smoke_bundle.py",
-        "run": "unpacking the package under test, never installing or running it: `dpkg-deb -x <deb> <tempdir>`, or the AppImage's own `--appimage-extract` in a temp directory. Fixed argv lists, no shell, a timeout. Pinned by tests/test_smoke_bundle.py (the verdicts) and the release workflow (the packages)",
+        "run": "unpacking the package under test, never installing or running it: `dpkg-deb -x <deb> <tempdir>`, the AppImage's own `--appimage-extract`, or `bsdtar -xf` for the rpm, portable tar and Arch package. Fixed argv lists, no shell, a timeout. Pinned by tests/test_smoke_bundle.py (the verdicts) and the release workflow (the packages)",
     },
     "scripts/run_tests.py": {
         "Popen": "the suite runner `make test-engine` goes through, which starts `sys.executable -m unittest` with the caller's arguments appended, and drains both pipes on their own threads so output is streamed while the copy its summary, leak and escaped-exception checks read is kept. A fixed argv prefix, no shell, and the arguments are a developer's or CI's rather than anything a model produced. Not routed through SandboxService for the reason check_history.py gives, and with an extra one: the thing being spawned IS the thing that spawns everything else, so a guard around it would be a guard around the guard. Its whole job is to notice that the suite died part-way and say so, which it cannot do from inside the process it is watching. Pinned by tests/test_run_tests_guard.py",
@@ -199,7 +199,7 @@ DIRECT_OS_SPAWN_CALLS = {
 # already has a justified one is a new decision, and it is made by raising a number here.
 SPAWN_SITE_COUNTS: dict[tuple[str, str], int] = {
     # Two unpackers, one per package format: `dpkg-deb -x` and the AppImage's own `--appimage-extract`.
-    ("scripts/smoke_bundle.py", "run"): 2,
+    ("scripts/smoke_bundle.py", "run"): 3,
     # The command and the bwrap usability probe. Both are guarded and session-led; the
     # probe is fixed argv, and a definite answer is cached per binary and network choice
     # (a timeout is not). tests/test_sandbox_jail.py pins its auto/required behavior

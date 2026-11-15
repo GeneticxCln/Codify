@@ -8,7 +8,7 @@ re-uploaded after the release page was read. The release workflow writes `sha256
 
     python3 scripts/verify_package.py                       # what is in ~/Downloads
     python3 scripts/verify_package.py ~/Downloads/Codify_1.0.0_amd64.deb
-    python3 scripts/verify_package.py --sums SHA256SUMS dist/Codify_*.deb
+    python3 scripts/verify_package.py --sums SHA256SUMS dist/Codify_*
     python3 scripts/verify_package.py --tag v1.0.0
 
 **What a pass claims, and what it does not.** It claims the bytes on disk are the bytes that
@@ -48,9 +48,17 @@ TAG = re.compile(r"\Av?[0-9][0-9A-Za-z._-]*\Z")
 # One line of `sha256sum` output: a digest, two spaces (or a `*` for binary mode), and a name.
 SUMS_LINE = re.compile(r"\A([0-9a-fA-F]{64}) [ *](.+)\Z")
 
-# What this repository publishes: Tauri names the bundles, and nothing else in a downloads folder is
-# this app's to check. `PACKAGE_GLOBS` is what "no package named" looks for.
-PACKAGE_GLOBS = ("Codify_*.deb", "Codify_*.AppImage")
+# What this repository publishes: Tauri names the native bundles, the workflow adds the portable
+# tar and the Arch package, and nothing else in a downloads folder is this app's to check.
+# `PACKAGE_GLOBS` is what "no package named" looks for.
+PACKAGE_GLOBS = (
+    "Codify_*.deb",
+    "Codify_*.rpm",
+    "Codify_*.tar.gz",
+    "Codify_*.AppImage",
+    "Codify_*.pkg.tar.zst",
+    "Codify_*.PKGBUILD",
+)
 
 # The read size for hashing a file. A package is tens of megabytes, and there is no reason to hold
 # one in memory to take its digest.

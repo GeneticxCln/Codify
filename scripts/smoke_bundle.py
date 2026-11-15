@@ -2,13 +2,17 @@
 
     python3 scripts/smoke_bundle.py build/engine-bundle             # what `make bundle-engine` built
     python3 scripts/smoke_bundle.py --deb dist/Codify_1.3.0_amd64.deb
+    python3 scripts/smoke_bundle.py --rpm dist/Codify_1.3.0_amd64.rpm
+    python3 scripts/smoke_bundle.py --tar dist/Codify_1.3.0_amd64.tar.gz
     python3 scripts/smoke_bundle.py --appimage dist/Codify_1.3.0_amd64.AppImage --version 1.3.0
+    python3 scripts/smoke_bundle.py --arch dist/Codify_1.3.0_amd64.pkg.tar.zst
 
-The release runs it on both packages before it publishes them (`docs/18` §3), because it is the
+The release runs it on every package before it publishes them (`docs/18` §3), because it is the
 only place the question can be answered: the gate never builds a package, and a package whose
 engine cannot start is a window that says "the engine started but exited" on every machine it
-is installed on. A deb is unpacked with `dpkg-deb -x` and an AppImage with its own
-`--appimage-extract`; neither is installed, mounted or run as the app.
+is installed on. A deb is unpacked with `dpkg-deb -x`, an AppImage with its own
+`--appimage-extract`, and the rpm, tar and Arch package with `bsdtar`; none is installed,
+mounted or run as the app.
 
 What counts as a pass is what the shell needs, started the way the shell starts it
 (`engine_protocol::engine_env`): the bundle's own `python/bin/python3 -m engine`, from the bundle,
@@ -208,20 +212,47 @@ def unpack_appimage(appimage: Path, dest: Path) -> Path:
     return dest / "squashfs-root"
 
 
+def unpack_archive(package: Path, dest: Path) -> Path:
+    """Unpack an rpm, portable tar or Arch package into `dest` without running it.
+
+    libarchive's `bsdtar` reads all three formats (an rpm's payload is a cpio archive) and
+    keeps the package's paths, so `find_bundle` can look for the engine in the same tree a
+    person would install. It is extraction only: no package manager is invoked and no file
+    from the package is executed.
+    """
+    done = subprocess.run(  # noqa: S603 — fixed argv: bsdtar unpacking one package into a temp directory; nothing installed or run
+        ["bsdtar", "-xf", str(package), "-C", str(dest), "--no-same-owner"],  # noqa: S607 — resolves on PATH by design, like dpkg-deb
+        timeout=UNPACK_TIMEOUT_S,
+        check=False,
+    )
+    if done.returncode != 0:
+        raise SmokeError(f"bsdtar could not unpack {package.name} (exit {done.returncode})")
+    return dest
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n\n", 1)[0])
     what = parser.add_mutually_exclusive_group(required=True)
     what.add_argument("bundle", nargs="?", type=Path, help="a built bundle directory")
     what.add_argument("--deb", type=Path, help="a .deb to unpack and check")
+    what.add_argument("--rpm", type=Path, help="an .rpm to unpack and check")
+    what.add_argument("--tar", type=Path, help="a portable .tar.gz to unpack and check")
     what.add_argument("--appimage", type=Path, help="an .AppImage to extract and check")
+    what.add_argument("--arch", type=Path, help="an Arch .pkg.tar.zst to unpack and check")
     parser.add_argument("--version", default=None, help="the version BUNDLE.json must say")
     args = parser.parse_args(argv)
     try:
         with tempfile.TemporaryDirectory(prefix="smoke-bundle-") as scratch:
             if args.deb is not None:
                 bundle = find_bundle(unpack_deb(args.deb.resolve(), Path(scratch)))
+            elif args.rpm is not None:
+                bundle = find_bundle(unpack_archive(args.rpm.resolve(), Path(scratch)))
+            elif args.tar is not None:
+                bundle = find_bundle(unpack_archive(args.tar.resolve(), Path(scratch)))
             elif args.appimage is not None:
                 bundle = find_bundle(unpack_appimage(args.appimage.resolve(), Path(scratch)))
+            elif args.arch is not None:
+                bundle = find_bundle(unpack_archive(args.arch.resolve(), Path(scratch)))
             else:
                 bundle = args.bundle.resolve()
             account = smoke(bundle, version=args.version)

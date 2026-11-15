@@ -1,9 +1,9 @@
-"""Build the engine the deb and the AppImage carry: a CPython, its locked dependencies and `engine/`.
+"""Build the engine the Linux packages carry: a CPython, its locked dependencies and `engine/`.
 
 Until this existed a package held only the desktop shell, and the shell found its engine in a
 checkout — so installing Codify meant also cloning it, having Python 3.10+ and running
 `make setup` (`docs/18` §2). This builds the other half, once, into a directory the bundler
-copies into both packages:
+copies into every package:
 
     build/engine-bundle/
         python/       python-build-standalone's CPython, pruned, with the lock installed
@@ -308,7 +308,7 @@ def single_interpreter(python_root: Path) -> None:
 
     The build ships `python3` and `python` as symlinks to `python3.14`. The Tauri bundler copies
     a resource symlink as the file it points at, so each would become another 31 MB copy of the
-    interpreter in both packages. The shell starts `bin/python3` and nothing else, and CPython
+    interpreter in every package. The shell starts `bin/python3` and nothing else, and CPython
     finds its library from where the executable is, not what it is called.
     """
     bin_dir = python_root / "bin"

@@ -19,7 +19,7 @@ git tag v1.0.0 && git push origin v1.0.0
 That is the whole of it. `.github/workflows/release.yml` runs on `push: tags: ["v*"]`, builds the
 packages, and publishes them as a GitHub release on that tag. By hand (`workflow_dispatch`) it either
 rebuilds an existing tag's release (`publish` on, with that `tag`) or, by default, makes a dry run
-that builds and smoke-tests both packages from any ref and publishes nothing (§3).
+that builds and smoke-tests every package from any ref and publishes nothing (§3).
 
 Four things carry the version, three of them by hand:
 
@@ -43,21 +43,27 @@ with one another, which is what catches a bump that reached two of them.
 
 ## 2. What the packages hold, and what they do not
 
-`bundle.targets` in `tauri.conf.json` is `["deb", "appimage"]`, so `cargo tauri build` — and
-`make package-app`, which is the same command — produces exactly two files, named by Tauri with the
-Debian spelling of the architecture:
+`bundle.targets` in `tauri.conf.json` is `["deb", "rpm", "appimage"]`, so `cargo tauri build` —
+and `make package-app`, which is the same command — produces the three native packages. The release
+workflow then adds the portable tar and the Arch package from the deb's `/usr` tree, so all five
+formats carry the same shell and engine:
 
 | File | Install | Why someone would |
 |---|---|---|
-| `Codify_<version>_amd64.deb` | `sudo apt install ./Codify_<version>_amd64.deb` | wants it owned by the package manager, removed by `apt remove` |
+| `Codify_<version>_amd64.deb` | `sudo apt install ./Codify_<version>_amd64.deb` | wants it owned by Debian's package manager, removed by `apt remove` |
+| `Codify_<version>_amd64.rpm` | `sudo dnf install ./Codify_<version>_amd64.rpm` (or `zypper`) | uses a Fedora/RHEL-family or openSUSE system |
+| `Codify_<version>_amd64.tar.gz` | `tar -xzf Codify_<version>_amd64.tar.gz && ./Codify_<version>_amd64/AppRun` | wants a portable tree and no package manager |
 | `Codify_<version>_amd64.AppImage` | `chmod +x Codify_<version>_amd64.AppImage && ./Codify_<version>_amd64.AppImage` | wants one file, no root, nothing installed |
+| `Codify_<version>_amd64.pkg.tar.zst` | `sudo pacman -U ./Codify_<version>_amd64.pkg.tar.zst` | wants an Arch package owned by pacman |
+| `Codify_<version>_amd64.PKGBUILD` | put it beside the tar and run `makepkg -si` | wants to rebuild the Arch package from the release's own recipe |
 
-Both hold the **desktop shell** — the React UI, the Tauri window, the PTYs, the webview bridge, the
-machine tab — **and the engine**, with the Python it runs on, at `/usr/lib/Codify/engine-bundle` in
-the deb and the same path inside the AppImage. Neither needs a checkout or a Python of the user's, and
-the shell runs the engine its own package carries (`docs/04` §6.2), so the window and the engine it
-talks to always come from one commit. Up to 1.2.0 the packages held the shell alone, and a package
-installed with no checkout anywhere opened a window that said "No engine to run".
+All five hold the **desktop shell** — the React UI, the Tauri window, the PTYs, the webview bridge,
+the machine tab — **and the engine**, with the Python it runs on, at
+`/usr/lib/Codify/engine-bundle` in the deb, rpm, tar and Arch package and the same path inside the
+AppImage. None needs a checkout or a Python of the user's, and the shell runs the engine its own
+package carries (`docs/04` §6.2), so the window and the engine it talks to always come from one
+commit. Up to 1.2.0 the packages held the shell alone, and a package installed with no checkout
+anywhere opened a window that said "No engine to run".
 
 `make bundle-engine` (`scripts/bundle_engine.py`) builds that half into `build/engine-bundle`, and
 `make package-app` (the release's own command) adds it through `src-tauri/tauri.bundle.conf.json`:
@@ -69,13 +75,14 @@ installed with no checkout anywhere opened a window that said "No engine to run"
 | `engine/` | this checkout's `engine/`, without bytecode or `requirements.txt` | the engine the shell beside it was built with |
 | `BUNDLE.json` | written by the build | the app version, the interpreter and the lock's hash, so an installed package can say what its engine is |
 
-The tree is compiled with `unchecked-hash` bytecode, because neither package keeps a file's
-modification time and the bundle is read-only where it lands: timestamp-checked bytecode would be
-stale on every start and could not be rewritten. Pruned, because the engine never runs them: Tcl/Tk
-and `tkinter`, IDLE, `ensurepip` and `pip` itself, the headers and manual pages, and the shared
-`libpython` (`bin/python3` is linked statically). The interpreter is one file, not three names for
-it: the bundler copies a symlink as the file it points at. What is left is about 116 MB unpacked,
-which makes the deb about 40 MB larger and the AppImage about the same.
+The tree is compiled with `unchecked-hash` bytecode, because no package keeps a file's modification
+time and the bundle is read-only where it lands: timestamp-checked bytecode would be stale on every
+start and could not be rewritten. Pruned, because the engine never runs them: Tcl/Tk and `tkinter`,
+IDLE, `ensurepip` and `pip` itself, the headers and manual pages, and the shared `libpython`
+(`bin/python3` is linked statically). The interpreter is one file, not three names for it: the
+bundler copies a symlink as the file it points at. What is left is about 116 MB unpacked, which
+makes the deb and rpm about 40 MB larger; the tar and Arch package carry the same tree, and the
+AppImage is larger still because it also carries the libraries its launcher needs.
 
 **What the packages redistribute.** CPython (PSF licence) and the 34 locked wheels, each under the
 licence its lock line names: MIT, BSD, Apache-2.0 and PSF, plus the MPL's file-level copyleft for
@@ -91,9 +98,10 @@ variable is how a packaged app runs a checkout's engine for any other reason, su
 changes.
 
 **What a package still needs from the machine:** `git`, which the engine runs for every workspace —
-the deb depends on it, so `apt` installs it, and an AppImage uses the system's. The folder picker uses
-the system `python3` with GTK, as it always has (`engine/app.py`); without one, the engine says the
-dialog is unavailable and a folder can still be typed.
+the deb and rpm declare it, the Arch package lists it as a dependency, the tar's instructions name
+it, and an AppImage uses the system's. The folder picker uses the system `python3` with GTK, as it
+always has (`engine/app.py`); without one, the engine says the dialog is unavailable and a folder can
+still be typed.
 
 **What the AppImage's launcher changes, and the shell takes back.** linuxdeploy's `AppRun` sets, for
 the whole process tree, `LD_LIBRARY_PATH` to the libraries the image carries (Ubuntu 22.04's GLib,
@@ -153,7 +161,7 @@ otherwise have to be rediscovered:
   filesystem to run, which a runner does not have. Without this the bundling step fails with
   "failed to run linuxdeploy" and says nothing about FUSE.
 
-Before the build, `python3 scripts/bundle_engine.py` builds the engine both packages carry (§2). The
+Before the build, `python3 scripts/bundle_engine.py` builds the engine every package carries (§2). The
 runner's Python only starts the script; the interpreter that installs the lock and compiles the
 bundle is the pinned one, and **the wheels are chosen for the glibc of the runner this job is pinned
 to** (`GLIBC_FLOOR = (2, 35)`, newest tag first, as pip would choose on Ubuntu 22.04), so a wheel that
@@ -178,22 +186,24 @@ folder under both `cargo tauri build` and `cargo tauri dev` — every caller rea
 `src-tauri`, which is what makes `../ui` unambiguous. This was the first release's only failure, and
 it is written here rather than left in the workflow log.
 
-After it, one step collects `*.deb` and `*.AppImage` into `dist/`, writes `SHA256SUMS`, and **fails
-if the bundler produced fewer than two files**. A release with no assets looks published and cannot
-be installed, which is worse than a failed run: the update button would offer a version with nothing
+After it, one step collects `*.deb`, `*.rpm` and `*.AppImage` into `dist/`, another unpacks the deb
+with `dpkg-deb -x` to make the portable tar, and a final one builds the Arch package from that tar
+with `makepkg`. `SHA256SUMS` covers all six assets (the five packages and the PKGBUILD), and the
+steps **fail if any of them is missing**. A release with no assets looks published and cannot be
+installed, which is worse than a failed run: the update button would offer a version with nothing
 behind it.
 
 **Then each package's engine is booted, before anything is published.** `scripts/smoke_bundle.py`
-unpacks the deb (`dpkg-deb -x`) and the AppImage (`--appimage-extract`) without installing or
-running either, and starts the engine inside each the way the shell does: its own Python, the
-isolation environment of `docs/04` §6.2, a throwaway `CODIFY_HOME`. It passes only when the engine
-prints its handshake, answers `GET /health` with 200, and leaves every file in its bundle exactly as
-it found it — a deb's files belong to root and an AppImage is read-only, so a write that works on the
-runner fails on every installed copy, and the comparison is made on the tree rather than on file
-modes because CI runs as root. `--version` also requires the bundle's `BUNDLE.json` to name this
-release. This is the second check the workflow makes that nothing else can, after the version
-agreement: the gate never builds a package. `make check-bundle` runs the same smoke on a local
-`build/engine-bundle`.
+unpacks the deb (`dpkg-deb -x`), the AppImage (`--appimage-extract`), and the rpm, portable tar and
+Arch package (`bsdtar`) without installing or running any of them, and starts the engine inside each
+the way the shell does: its own Python, the isolation environment of `docs/04` §6.2, a throwaway
+`CODIFY_HOME`. It passes only when the engine prints its handshake, answers `GET /health` with 200,
+and leaves every file in its bundle exactly as it found it — a package's files belong to root or are
+read-only where they land, so a write that works on the runner fails on every installed copy, and
+the comparison is made on the tree rather than on file modes because CI runs as root. `--version`
+also requires the bundle's `BUNDLE.json` to name this release. This is the second check the workflow
+makes that nothing else can, after the version agreement: the gate never builds a package. `make
+check-bundle` runs the same smoke on a local `build/engine-bundle`.
 
 **A dry run builds and smoke-tests a release without publishing one.** Started by hand with
 `publish` off (the default), the workflow builds from the ref it was started on, holds the three
@@ -316,7 +326,7 @@ other (`allow-codify-update-check`, `allow-codify-update-download` in
 
 A connection that drops part-way leaves a file `apt` will happily try to unpack, and an asset can be
 re-uploaded after the page you read was rendered. The release workflow writes `sha256sum` output into
-a `SHA256SUMS` asset beside the two packages (§3), so there is something to check against, and **the
+a `SHA256SUMS` asset beside every package (§3), so there is something to check against, and **the
 Download button checks it before it writes anything** (audit of 2026-10-29: it used to write whatever
 arrived). It reads the release's `SHA256SUMS` first, from the same hosts and under the same redirect
 rule as the package (`update::fetch_sums`), so a release that publishes none is refused before tens of
@@ -331,6 +341,7 @@ For a package you downloaded some other way, or to check again:
 ```
 make verify-package                                # whatever Codify packages are in ~/Downloads
 make verify-package FILES=~/Downloads/Codify_1.0.0_amd64.deb
+make verify-package FILES=~/Downloads/Codify_1.0.0_amd64.rpm
 make verify-package SUMS=~/Downloads/SHA256SUMS     # the checksums you already downloaded
 make verify-package TAG=v1.0.0                      # a named release instead of the newest
 ```
@@ -356,8 +367,9 @@ repository's release workflow — no key is stored in CI, and none can be forgot
 download with:
 
 ```
-gh attestation verify ~/Downloads/Codify_1.5.0_amd64.deb --repo GeneticxCln/Codify
-gh attestation verify ~/Downloads/Codify_1.5.0_amd64.AppImage --repo GeneticxCln/Codify
+gh attestation verify ~/Downloads/Codify_1.6.0_amd64.deb --repo GeneticxCln/Codify
+gh attestation verify ~/Downloads/Codify_1.6.0_amd64.rpm --repo GeneticxCln/Codify
+gh attestation verify ~/Downloads/Codify_1.6.0_amd64.AppImage --repo GeneticxCln/Codify
 ```
 
 The attestation lives with the repository, not beside the file, which is why `--repo` is required. It
@@ -388,9 +400,10 @@ new advisory fails until it is fixed or deliberately recorded.
   presses the button.
 * **No channels, no beta ring, no rollback.** `releases/latest` is the whole notion of "newer" here,
   and a pre-release is not offered.
-* **Linux x86_64 only.** No rpm, no Flatpak, no AUR, no `aarch64` leg, and no Windows or macOS
+* **Linux x86_64 only.** No Flatpak, no AUR submission, no `aarch64` leg, and no Windows or macOS
   packaging: the crate is Linux-only (`gtk`, the machine tab's jail), so the other package formats
-  are a porting question rather than a bundling flag.
+  are a porting question rather than a bundling flag. The Arch package is published here directly,
+  not maintained as an AUR recipe.
 * **No in-place AppImage self-replacement.** The new AppImage is downloaded beside the old one and the
   person swaps it. Replacing a file that is currently executing is a thing AppImageUpdate does with
   the runtime's cooperation, and doing it here would mean this app writing over the binary it is
@@ -415,7 +428,7 @@ window does today. "Linux only" in §6 is the current fact; this section says *w
 | **The state lock** | `engine/app.py:4` and `:227`, `engine/providers.py:1601` | `fcntl.flock` | **Port.** `fcntl` does not import on Windows; `msvcrt.locking` or a lock file with a PID would replace it. |
 | **The desktop shell's child tracking** | `src-tauri/src/lib.rs:320-381` | `pidfd_open` and `pidfd_send_signal` (Linux 5.3), `libc::geteuid`, `SIGKILL` | **Port.** A pidfd names one process and never a reused pid; macOS has no equivalent, so the guarantee would weaken to a pid plus a start-time check. |
 | **The folder dialog** | `engine/app.py:1282-1408` | `zenity` or `kdialog`, found with `shutil.which`, and `pgrep -f` over `/proc/<pid>/cmdline` | **Replace.** The shell's native dialog is the normal answer on every OS. |
-| **Packaging and CI** | `tauri.conf.json` (`deb`, `appimage`), `.github/workflows/*` (`ubuntu-latest`, `ubuntu-22.04`) | Linux packages and runners; no `aarch64` leg | **New work**: dmg or pkg and notarization on macOS, msi or nsis and signing on Windows, a runner per OS, and the §5 attestation per artifact. |
+| **Packaging and CI** | `tauri.conf.json` (`deb`, `rpm`, `appimage`), `.github/workflows/*` (`ubuntu-latest`, `ubuntu-22.04`) | Linux packages and runners; no `aarch64` leg | **New work**: dmg or pkg and notarization on macOS, msi or nsis and signing on Windows, a runner per OS, and the §5 attestation per artifact. |
 
 ### 7.2 What is already portable
 

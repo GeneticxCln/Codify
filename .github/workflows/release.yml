@@ -1,12 +1,13 @@
 name: release
 
 # Push a tag like `v1.0.0` and the packages people download come out of this workflow:
-# a deb and an AppImage, their checksums, and a GitHub release that carries all three. Both
-# packages carry the engine and the Python it runs on (`scripts/bundle_engine.py`), so neither
-# needs a checkout beside it, and both are booted here before anything is published.
+# a deb, an rpm, a portable tar, an AppImage, an Arch package and its PKGBUILD, their
+# checksums, and a GitHub release that carries all of them. Every package carries the
+# engine and the Python it runs on (`scripts/bundle_engine.py`), so none needs a checkout
+# beside it, and each is booted here before anything is published.
 #
 # **What this is not.** It is not a second gate. `make ci` is the gate and it runs before a
-# commit reaches master (`make hooks` installs the pre-push hook, `check.yml` runs the same
+# commit reaches master (`make hooks` installs the pre-push hook; `check.yml` runs the same
 # targets on GitHub's runners for every pull request and every push to master). This workflow
 # builds and publishes; if the tag's commit was never gated, that is a fact about how the tag
 # was cut, not something this file can fix by re-running the suite and calling itself the
@@ -33,14 +34,15 @@ name: release
 # **What a person does with the output.** The app's About tab asks GitHub for the *latest*
 # release — this one, once published — and can download the package for the copy that is
 # running. It installs nothing and replaces nothing: the deb is handed over with the `apt`
-# command to run, and the AppImage with the `chmod +x` (docs/18 §4).
+# command to run, and the AppImage with the `chmod +x` (docs/18 §4). The rpm, tar and Arch
+# package are for the package managers and portable installs those names describe.
 
 on:
   push:
     tags: ["v*"]
   # Two jobs by hand. With `publish` and an existing tag: a release that has to be built again —
-  # a bad upload, a runner that died. Without `publish` (the default): a dry run that builds both
-  # packages from the ref it was started on, smoke-tests them exactly as a release would, and
+  # a bad upload, a runner that died. Without `publish` (the default): a dry run that builds every
+  # package from the ref it was started on, smoke-tests them exactly as a release would, and
   # leaves them as a workflow artifact — no tag, no release, nothing any copy of the app can see.
   # That is how a change to the packaging is tried before the release that would ship it.
   workflow_dispatch:
@@ -71,12 +73,12 @@ concurrency:
 
 jobs:
   packages:
-    name: deb + AppImage, published as a GitHub release
+    name: deb + rpm + tar + AppImage + Arch package, published as a GitHub release
     runs-on: ubuntu-22.04
     # `cargo install tauri-cli` is minutes of compilation, the app build is minutes more, and
     # the AppImage bundler downloads its own tools. Well under this, and a build that somehow
     # hangs ends here instead of holding the run for six hours.
-    timeout-minutes: 60
+    timeout-minutes: 75
     env:
       # A pushed tag always publishes; a run by hand only when it is asked to.
       PUBLISH: ${{ github.event_name == 'push' || inputs.publish == true }}
@@ -138,10 +140,11 @@ jobs:
         run: npm ci
         working-directory: ui
 
-      # The engine both packages carry (`docs/18` §2): the CPython pinned in packaging/python.json,
-      # checked against its SHA-256, the wheels packaging/engine.lock names installed with
-      # --require-hashes, and engine/. The script runs on any Python 3.10+; the interpreter it
-      # builds with is the pinned one, so this is only the runner's way of starting it.
+      # The engine every package carries (`docs/18` §2): the CPython pinned in
+      # packaging/python.json, checked against its SHA-256, the wheels packaging/engine.lock
+      # names installed with --require-hashes, and engine/. The script runs on any Python
+      # 3.10+; the interpreter it builds with is the pinned one, so this is only the runner's
+      # way of starting it.
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: "3.14"
@@ -153,8 +156,9 @@ jobs:
         with:
           toolchain: stable
 
-      # Tauri v2 links the platform webview, and the deb and AppImage bundlers need tools that
-      # are not on a bare runner: `patchelf` for linuxdeploy's AppImages, `file` for the
+      # Tauri v2 links the platform webview, and the deb, rpm and AppImage bundlers need tools
+      # that are not on a bare runner: `patchelf` for linuxdeploy's AppImages, `rpmbuild` for
+      # the rpm, `bsdtar` for the smoke checks of the rpm and Arch package, `file` for the
       # bundlers' own checks, `wget` because linuxdeploy and appimagetool arrive that way.
       - name: Install the build and bundling dependencies
         run: |
@@ -170,6 +174,8 @@ jobs:
             pkg-config \
             build-essential \
             patchelf \
+            rpm \
+            libarchive-tools \
             file \
             wget \
             curl
@@ -184,11 +190,12 @@ jobs:
       - name: Install the Tauri CLI
         run: cargo install tauri-cli --version "^2" --locked
 
-      # One command, because the targets live in `src-tauri/tauri.conf.json` (`bundle.targets`
-      # is `deb` + `appimage`) and a list repeated here would be a second place to forget.
-      # `beforeBuildCommand` builds the UI with Vite first, so the shell's window carries the
-      # real frontend. `tauri.bundle.conf.json` adds the engine bundle as a resource; it is kept
-      # out of tauri.conf.json so that `cargo check` never needs a bundle to exist.
+      # One command, because the targets live in `src-tauri/tauri.conf.json`
+      # (`bundle.targets` is `deb`, `rpm` and `appimage`) and a list repeated here would be a
+      # second place to forget. `beforeBuildCommand` builds the UI with Vite first, so the
+      # shell's window carries the real frontend. `tauri.bundle.conf.json` adds the engine
+      # bundle as a resource; it is kept out of tauri.conf.json so that `cargo check` never
+      # needs a bundle to exist.
       #
       # `APPIMAGE_EXTRACT_AND_RUN` because appimagetool is itself an AppImage: without this it
       # needs a mounted FUSE filesystem, which a runner does not have, and the bundle step
@@ -199,45 +206,129 @@ jobs:
         run: cargo tauri build --config tauri.bundle.conf.json
         working-directory: src-tauri
 
-      # Both files, their checksums, and a hard failure when the bundler produced neither:
-      # a release with no assets is a release that looks published and cannot be installed,
-      # and the update button would offer a version with nothing behind it.
-      - name: Collect the packages and their checksums
+      # The three native packages first. The rpm gets the same versioned file name as the
+      # others so a release page, a checksum and a download command agree.
+      - name: Collect the native packages
         run: |
+          set -euo pipefail
           mkdir -p dist
-          find src-tauri/target/release/bundle -maxdepth 2 -type f \( -name '*.deb' -o -name '*.AppImage' \) -exec cp {} dist/ \;
+          deb=$(find src-tauri/target/release/bundle/deb -name '*.deb' -print -quit)
+          rpm=$(find src-tauri/target/release/bundle/rpm -name '*.rpm' -print -quit)
+          appimage=$(find src-tauri/target/release/bundle/appimage -name '*.AppImage' -print -quit)
+          for file in "$deb" "$rpm" "$appimage"; do
+            if [ -z "$file" ]; then
+              echo "The bundler did not produce every package this release promises." >&2
+              find src-tauri/target/release/bundle -maxdepth 2 -type f >&2 || true
+              exit 1
+            fi
+          done
+          cp "$deb" dist/
+          cp "$rpm" "dist/Codify_${VERSION}_amd64.rpm"
+          cp "$appimage" dist/
+          ls -lh dist
+
+      # The portable tar is the deb's `/usr` tree, because that is the layout the shell and
+      # its resource resolver already know (`/usr/bin/codify-desktop` and
+      # `/usr/lib/Codify/engine-bundle`). `AppRun` is the one added file: it makes the
+      # extracted tree runnable without installing it or setting a library path.
+      - name: Build the portable tar
+        run: |
+          set -euo pipefail
+          root="Codify_${VERSION}_amd64"
+          rm -rf "build/$root"
+          mkdir -p "build/$root"
+          dpkg-deb -x "dist/Codify_${VERSION}_amd64.deb" "build/$root"
+          rm -rf "build/$root/DEBIAN"
+          cp LICENSE "build/$root/LICENSE"
+          cat > "build/$root/AppRun" <<'RUN'
+          #!/bin/sh
+          set -eu
+          here=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+          exec "$here/usr/bin/codify-desktop" "$@"
+          RUN
+          chmod 755 "build/$root/AppRun"
+          tar -C build -czf "dist/Codify_${VERSION}_amd64.tar.gz" "$root"
+
+      # An Arch binary package, built from the same tar. `makepkg` runs inside Arch's own
+      # base-devel image so the package metadata and compression are made by the tool that
+      # owns the format; it does not compile anything, because the binary is the one Ubuntu
+      # just built and the tar carries its engine.
+      - name: Build the Arch package and its PKGBUILD
+        run: |
+          set -euo pipefail
+          source="dist/Codify_${VERSION}_amd64.tar.gz"
+          arch_dir=$(mktemp -d)
+          cp packaging/arch/PKGBUILD.in "$arch_dir/PKGBUILD"
+          digest=$(sha256sum "$source" | cut -d' ' -f1)
+          sed -i "s/@VERSION@/${VERSION}/g; s/@SHA256@/${digest}/g" "$arch_dir/PKGBUILD"
+          cp "$source" "$arch_dir/"
+          docker run --rm \
+            -v "$arch_dir:/build" \
+            -w /build \
+            archlinux@sha256:97119fd9e21219b02b3c14ba256c9d3c0d031d07fc26c836c41ed793beeb5b74 \
+            bash -lc '
+              set -euo pipefail
+              pacman -S --noconfirm --needed zstd
+              useradd -m builder
+              chown -R builder:builder /build
+              su builder -c "cd /build && PKGDEST=/build makepkg --noconfirm --nodeps"
+            '
+          package=$(find "$arch_dir" -maxdepth 1 -name 'codify-bin-*.pkg.tar.zst' -print -quit)
+          if [ -z "$package" ]; then
+            echo "makepkg produced no Arch package." >&2
+            ls -la "$arch_dir" >&2
+            exit 1
+          fi
+          cp "$package" "dist/Codify_${VERSION}_amd64.pkg.tar.zst"
+          cp "$arch_dir/PKGBUILD" "dist/Codify_${VERSION}_amd64.PKGBUILD"
+          ls -lh dist
+
+      # Every asset, their checksums, and a hard failure when one is missing: a release with
+      # no assets looks published and cannot be installed, and the update button would offer
+      # a version with nothing behind it.
+      - name: Write the checksums and fail if any asset is missing
+        run: |
+          set -euo pipefail
           cd dist
           shopt -s nullglob
-          packages=(Codify_*.deb Codify_*.AppImage)
-          if [ ${#packages[@]} -lt 2 ]; then
-            echo "The bundler produced ${#packages[@]} of the 2 packages this release promises:" >&2
+          assets=(Codify_*.deb Codify_*.rpm Codify_*.tar.gz Codify_*.AppImage Codify_*.pkg.tar.zst Codify_*.PKGBUILD)
+          if [ ${#assets[@]} -lt 6 ]; then
+            echo "The release produced ${#assets[@]} of the 6 assets it promises:" >&2
             ls -la . >&2
             exit 1
           fi
-          sha256sum "${packages[@]}" > SHA256SUMS
+          sha256sum "${assets[@]}" > SHA256SUMS
           cat SHA256SUMS
 
-      # Each package is unpacked (never installed) and the engine inside it is booted the way the
-      # shell boots it: its own Python, a throwaway CODIFY_HOME, a GET /health that must answer
-      # 200, and not one file in the bundle written while it ran. A package whose engine cannot
-      # start is a window that says so on every machine it reaches, and this is the only place
-      # that can be known before it does (scripts/smoke_bundle.py).
-      - name: Boot the engine each package carries
+      # Each package is unpacked (never installed) and the engine inside it is booted the way
+      # the shell boots it: its own Python, a throwaway CODIFY_HOME, a GET /health that must
+      # answer 200, and not one file in the bundle written while it ran. A package whose
+      # engine cannot start is a window that says so on every machine it reaches, and this is
+      # the only place that can be known before it does (scripts/smoke_bundle.py).
+      - name: Boot the engine every package carries
         run: |
           python3 scripts/smoke_bundle.py --deb dist/Codify_*.deb --version "$VERSION"
+          python3 scripts/smoke_bundle.py --rpm dist/Codify_*.rpm --version "$VERSION"
+          python3 scripts/smoke_bundle.py --tar dist/Codify_*.tar.gz --version "$VERSION"
           python3 scripts/smoke_bundle.py --appimage dist/Codify_*.AppImage --version "$VERSION"
+          python3 scripts/smoke_bundle.py --arch dist/Codify_*.pkg.tar.zst --version "$VERSION"
 
       # A signed claim that this workflow built these exact bytes. Sigstore issues a short-lived
       # certificate to this run's OIDC identity, so there is no key to leak, rotate or forget in a
-      # secret. Each package and the checksums file are subjects; a person checks one with
-      # `gh attestation verify <file> --repo GeneticxCln/Codify` (docs/18 §5). The attestation is
-      # made before publishing, so a release whose provenance cannot be signed does not go out.
+      # secret. Every package, the PKGBUILD and the checksums file are subjects; a person checks
+      # one with `gh attestation verify <file> --repo GeneticxCln/Codify` (docs/18 §5). The
+      # attestation is made before publishing, so a release whose provenance cannot be signed
+      # does not go out.
       - name: Attest the packages and their checksums
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: |
             dist/Codify_*.deb
+            dist/Codify_*.rpm
+            dist/Codify_*.tar.gz
             dist/Codify_*.AppImage
+            dist/Codify_*.pkg.tar.zst
+            dist/Codify_*.PKGBUILD
             dist/SHA256SUMS
 
       # A dry run ends here, with the packages it built kept for a person to try.
@@ -265,11 +356,11 @@ jobs:
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Release $TAG exists, so its assets are replaced instead of a second one made."
-            gh release upload "$TAG" dist/Codify_*.deb dist/Codify_*.AppImage dist/SHA256SUMS --clobber
+            gh release upload "$TAG" dist/Codify_* dist/SHA256SUMS --clobber
           else
             gh release create "$TAG" \
               --title "Codify $TAG" \
               --notes-file release-notes.md \
-              dist/Codify_*.deb dist/Codify_*.AppImage dist/SHA256SUMS
+              dist/Codify_* dist/SHA256SUMS
           fi
           gh release view "$TAG" --json url,assets --jq '.url, (.assets[].name)'

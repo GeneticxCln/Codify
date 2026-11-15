@@ -119,8 +119,15 @@ class TestTheVersionsAndTheTag(unittest.TestCase):
 class TestTheNotes(unittest.TestCase):
     def test_the_notes_name_exactly_the_files_the_release_publishes(self) -> None:
         text = notes("v1.0.0", "1.0.0")
-        self.assertIn(f"Codify_1.0.0_{ARCH}.deb", text)
-        self.assertIn(f"Codify_1.0.0_{ARCH}.AppImage", text)
+        for name in (
+            f"Codify_1.0.0_{ARCH}.deb",
+            f"Codify_1.0.0_{ARCH}.rpm",
+            f"Codify_1.0.0_{ARCH}.tar.gz",
+            f"Codify_1.0.0_{ARCH}.AppImage",
+            f"Codify_1.0.0_{ARCH}.pkg.tar.zst",
+            f"Codify_1.0.0_{ARCH}.PKGBUILD",
+        ):
+            self.assertIn(name, text)
         self.assertIn("SHA256SUMS", text)
         # The version is in every file name it names, so notes for a new release cannot be
         # the old ones.
@@ -155,7 +162,7 @@ class TestTheRealCheckout(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn(f"Codify_{version}_{ARCH}.deb", out)
 
-    def test_the_workflow_runs_this_script_and_publishes_both_packages(self) -> None:
+    def test_the_workflow_runs_this_script_and_publishes_every_package(self) -> None:
         """The three files are only checked if a release actually calls the check.
 
         Read as text, the way the UI suite reads its components: no YAML parser is worth
@@ -167,8 +174,8 @@ class TestTheRealCheckout(unittest.TestCase):
         )
         self.assertIn("python3 scripts/release_notes.py", workflow)
         self.assertIn("--notes-file release-notes.md", workflow)
-        self.assertIn("Codify_*.deb", workflow)
-        self.assertIn("Codify_*.AppImage", workflow)
+        for asset in ("deb", "rpm", "tar.gz", "AppImage", "pkg.tar.zst", "PKGBUILD"):
+            self.assertIn(f"Codify_*.{asset}", workflow)
         self.assertIn("cargo tauri build", workflow)
 
     def test_the_workflow_ships_the_engine_and_boots_it_in_both_packages(self) -> None:
@@ -186,7 +193,10 @@ class TestTheRealCheckout(unittest.TestCase):
             "python3 scripts/bundle_engine.py",
             "cargo tauri build --config tauri.bundle.conf.json",
             'python3 scripts/smoke_bundle.py --deb dist/Codify_*.deb --version "$VERSION"',
+            'python3 scripts/smoke_bundle.py --rpm dist/Codify_*.rpm --version "$VERSION"',
+            'python3 scripts/smoke_bundle.py --tar dist/Codify_*.tar.gz --version "$VERSION"',
             'python3 scripts/smoke_bundle.py --appimage dist/Codify_*.AppImage --version "$VERSION"',
+            'python3 scripts/smoke_bundle.py --arch dist/Codify_*.pkg.tar.zst --version "$VERSION"',
             "- name: Publish the release",
         ]
         positions = [workflow.find(step) for step in steps]

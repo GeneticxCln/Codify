@@ -57,7 +57,15 @@ class TestReleaseWorkflow(unittest.TestCase):
         publish = self.text.index("name: Publish the release")
         self.assertLess(attest, publish, "packages are published before they are attested")
         block = self.text[attest:publish]
-        for subject in ("dist/Codify_*.deb", "dist/Codify_*.AppImage", "dist/SHA256SUMS"):
+        for subject in (
+            "dist/Codify_*.deb",
+            "dist/Codify_*.rpm",
+            "dist/Codify_*.tar.gz",
+            "dist/Codify_*.AppImage",
+            "dist/Codify_*.pkg.tar.zst",
+            "dist/Codify_*.PKGBUILD",
+            "dist/SHA256SUMS",
+        ):
             self.assertIn(subject, block, f"{subject} is not a subject of the attestation")
 
     def test_the_dispatch_tag_never_reaches_a_shell_script(self) -> None:

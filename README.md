@@ -125,14 +125,14 @@ codify                 # from any directory, or from the applications menu
 make uninstall-local   # removes exactly those three files
 ```
 
-Codify targets Linux desktops and comes two ways. A **package** — a deb or an AppImage, built from a tag by
+Codify targets Linux desktops and comes two ways. A **package** — a deb, rpm, portable tar, AppImage or Arch package, built from a tag by
 [`.github/workflows/release.yml`](.github/workflows/release.yml) and downloaded from the releases page — or the
 **checkout**, which is what `make install-local` above puts in your applications menu: a `codify` command and a menu
 entry under your own `~/.local`, no root involved. **Moving or deleting the checkout breaks the entry**, because the
 launcher finds the project root from where it lives.
 
 A package carries its own engine and the Python it runs on, so it needs no checkout and no Python of yours, only `git`
-(which the deb installs). The checkout runs its own engine, and `CODIFY_ROOT=/path/to/Codify` points a package at a
+(the deb and rpm declare it; the tar and Arch package list it as a dependency). The checkout runs its own engine, and `CODIFY_ROOT=/path/to/Codify` points a package at a
 checkout's instead — see [`docs/18`](docs/18-release-and-updates.md) §2 for what a package holds and leaves out. A
 checkout build finds the checkout it was built in; starting it from another folder does not run that folder's engine
 unless you opt in with `CODIFY_DEV_CWD=1`. The app

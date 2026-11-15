@@ -1,6 +1,6 @@
 """`scripts/smoke_bundle.py` passes a bundle the shell can use, and fails each way one cannot be used.
 
-The release runs the smoke on both packages before publishing them, so what it calls a pass is
+The release runs the smoke on every package before publishing them, so what it calls a pass is
 what decides whether a broken engine reaches people. These tests give it fake bundles whose
 `engine/__main__.py` is a small stub server and whose `python/bin/python3` hands over to the
 interpreter running the suite, and check each verdict: a good boot passes; no handshake, a

@@ -34,7 +34,11 @@ from scripts.verify_package import (
 )
 
 DEB = "Codify_1.0.0_amd64.deb"
+RPM = "Codify_1.0.0_amd64.rpm"
+TAR = "Codify_1.0.0_amd64.tar.gz"
 APPIMAGE = "Codify_1.0.0_amd64.AppImage"
+ARCH = "Codify_1.0.0_amd64.pkg.tar.zst"
+PKGBUILD = "Codify_1.0.0_amd64.PKGBUILD"
 
 
 def sha256(data: bytes) -> str:
@@ -240,12 +244,25 @@ class TestTheCommandItself(unittest.TestCase):
             self.assertIn(APPIMAGE, out)
             self.assertNotIn("source.tar.gz", out)
 
-    def test_the_packages_it_looks_for_are_this_apps_two_bundles(self) -> None:
+    def test_the_packages_it_looks_for_are_this_apps_published_assets(self) -> None:
         with tempfile.TemporaryDirectory() as scratch:
-            for name in (DEB, APPIMAGE, "Codify.deb.sig", "SHA256SUMS", "other.deb"):
+            for name in (
+                DEB,
+                RPM,
+                TAR,
+                APPIMAGE,
+                ARCH,
+                PKGBUILD,
+                "Codify.deb.sig",
+                "SHA256SUMS",
+                "other.deb",
+            ):
                 (Path(scratch) / name).write_bytes(b"x")
             self.assertEqual(
-                sorted([Path(scratch) / DEB, Path(scratch) / APPIMAGE]),
+                sorted(
+                    Path(scratch) / name
+                    for name in (DEB, RPM, TAR, APPIMAGE, ARCH, PKGBUILD)
+                ),
                 sorted(packages_in(Path(scratch))),
             )
             self.assertEqual([], packages_in(Path(scratch) / "nowhere-in-particular"))

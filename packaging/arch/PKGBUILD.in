@@ -1,0 +1,29 @@
+# Maintainer: Codify <https://github.com/GeneticxCln/Codify>
+# Built by the release workflow from the same /usr tree as the deb, so the
+# package is a binary install and does not compile the Rust shell on the user's
+# machine. The version and the source digest are filled in by the workflow.
+pkgname=codify-bin
+pkgver=@VERSION@
+pkgrel=1
+pkgdesc='A local-first, multi-agent AI coding assistant'
+arch=('x86_64')
+url='https://github.com/GeneticxCln/Codify'
+license=('MIT')
+depends=('git' 'gtk3' 'webkit2gtk-4.1' 'libayatana-appindicator' 'librsvg')
+optdepends=(
+  'gst-plugins-good: media playback in the embedded browser'
+  'gst-plugins-bad: additional media codecs'
+  'gst-plugins-ugly: additional media codecs'
+)
+provides=('codify')
+conflicts=('codify')
+options=('!strip')
+source=("Codify_${pkgver}_amd64.tar.gz")
+sha256sums=('@SHA256@')
+
+package() {
+  cd "$srcdir/Codify_${pkgver}_amd64"
+  install -d "$pkgdir/usr"
+  cp -a usr/. "$pkgdir/usr/"
+  install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}
