@@ -268,7 +268,7 @@ jobs:
             archlinux@sha256:97119fd9e21219b02b3c14ba256c9d3c0d031d07fc26c836c41ed793beeb5b74 \
             bash -lc '
               set -euo pipefail
-              pacman -S --noconfirm --needed zstd
+              pacman -Syu --noconfirm --needed zstd
               useradd -m builder
               chown -R builder:builder /build
               su builder -c "cd /build && PKGDEST=/build makepkg --noconfirm --nodeps"
