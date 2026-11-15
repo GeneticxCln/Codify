@@ -82,6 +82,14 @@ libc = "0.2"
 # a second `gtk` node in the graph is a second set of types, and none of this
 # would typecheck against tauri's. Unconditional: Codify targets Linux only.
 gtk = { version = "0.18", features = ["v3_24"] }
+# WebKit's right-click menu is the only menu WebKit owns that a person sees
+# before the app draws one. The signal in `context_menu.rs` uses the runtime's
+# own `webkit2gtk` types to remove the browser navigation, open and inspector
+# entries; naming the crate here is what makes those types this crate's rather
+# than Tauri's private re-export. Same version the runtime already links (2.0.2 in the lockfile), so
+# this adds no second WebKit to the graph. Unconditional, like `gtk` above:
+# Codify targets Linux only, and a target gate would be a second way to say so.
+webkit2gtk = "2.0"
 
 [dev-dependencies]
 glob = "0.3"

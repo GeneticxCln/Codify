@@ -100,7 +100,7 @@ make run-app    # builds the UI, embeds it, launches the app
 |---|---|
 | **Python 3.10+** with `venv` | The shell boots the engine as `python3 -m engine`, and 3.10 is a real deployment floor. |
 | **Node 22.22.2+, 24.15+ or 26+** | The range jsdom supports, which the UI test suite inherits. |
-| **Rust stable** with `rustfmt` | The Tauri shell. WebKitGTK 4.1 (2.40+), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config` come with it. |
+| **Rust 1.90+** with `rustfmt` | The Tauri shell; `src-tauri/Cargo.toml` declares 1.90 as its floor, and `make doctor` checks the compiler you have against it. WebKitGTK 4.1 (2.40+), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config` come with it. |
 | **bubblewrap** and `unshare` | The Machine tab is a jailed shell, and its tests build real jails (an unprivileged overlay mount needs Linux 6.6+). The app runs without the overlay, with the project read-only in the machine. The same jail contains the commands a goal runs: **without a working jail, an approved goal's tests and scripts are refused** until you allow unjailed runs in Settings → Agents → Workspace command jail (`sandbox_unjailed_ok`). |
 | A display | For the Tauri tests; `xvfb` is used automatically on a headless machine. |
 | PipeWire's `pw-record` | Optional: only for dictation. |

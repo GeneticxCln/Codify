@@ -6,7 +6,7 @@ From a fresh clone, get to a machine that can run it in two commands:
 
 ```
 make setup     # .venv, the engine, the dev tools, npm ci
-make doctor    # what is still missing (system libraries, Node, a display, a stale .venv), and how to fix it
+make doctor    # what is still missing (system libraries, Node, a display, a Rust compiler below src-tauri/Cargo.toml's rust-version, a stale .venv), and how to fix it
 ```
 
 `make setup` uses a virtualenv because a modern distribution refuses `pip install` into the system
