@@ -51,7 +51,7 @@ help:
 	@echo "  make build-tauri  - Build Tauri desktop application"
 	@echo "  make run-app      - Build the UI and launch the desktop app with it embedded (the way to open Codify from a checkout)"
 	@echo "  make build-app    - Build the release app (UI embedded) that scripts/codify and the menu entry start"
-	@echo "  make package-app  - Build the Linux packages (deb + AppImage; needs cargo-tauri and the bundling tools)"
+	@echo "  make package-app  - Build the native Linux packages (deb + rpm + AppImage; needs cargo-tauri and the bundling tools)"
 	@echo "  make install-local - build-app, then add a 'codify' command and an applications-menu entry under ~/.local (no root)"
 	@echo "  make uninstall-local - Remove exactly what install-local wrote"
 	@echo "  make dev-app      - Launch the desktop app against the Vite dev server, with hot reload (needs cargo-tauri)"
@@ -267,22 +267,24 @@ dev-app:
 
 # The build `scripts/codify` starts: release profile, UI embedded (`custom-protocol`),
 # under the same memory cap as `run-app`. `cargo build` does not bundle, so this is a
-# binary at src-tauri/target/release/codify-desktop and nothing else — neither a deb nor
-# an AppImage, which is `package-app`'s job.
+# binary at src-tauri/target/release/codify-desktop and nothing else — no package, which is
+# `package-app`'s job.
 build-app: build-ui
 	cd src-tauri && $(BUILD_GUARD) cargo build --release --features custom-protocol
 
-# The Linux packages, by the same command the release workflow runs (docs/18 §3): the
-# targets live in tauri.conf.json (`bundle.targets` is `deb` + `appimage`), so the list is
-# in one place and `cargo tauri build` picks both up. The UI is built first by Tauri's own
-# `beforeBuildCommand`, so this needs no `build-ui` prerequisite. The engine both packages
-# carry is `bundle-engine`'s, added by tauri.bundle.conf.json alone: in tauri.conf.json its
-# resources would have to exist for every `cargo check`, and the gate would need the download.
+# The native Linux packages, by the same command the release workflow runs (docs/18 §3): the
+# targets live in tauri.conf.json (`bundle.targets` is `deb`, `rpm` + `appimage`), so the list is
+# in one place and `cargo tauri build` picks them up. The UI is built first by Tauri's own
+# `beforeBuildCommand`, so this needs no `build-ui` prerequisite. The engine the packages carry
+# is `bundle-engine`'s, added by tauri.bundle.conf.json alone: in tauri.conf.json its resources
+# would have to exist for every `cargo check`, and the gate would need the download. The release
+# also derives the portable tar and Arch package from the deb's tree; this target stops at the
+# native three.
 #
 # Deliberately not part of `check` or `ci`: it needs the Tauri CLI
-# (`cargo install tauri-cli --version "^2" --locked`), the tools a deb and an AppImage are
+# (`cargo install tauri-cli --version "^2" --locked`), the tools the deb, rpm and AppImage are
 # assembled with, and the network for linuxdeploy. What it writes lands in
-# src-tauri/target/release/bundle/{deb,appimage}/.
+# src-tauri/target/release/bundle/{deb,rpm,appimage}/.
 package-app: bundle-engine
 	cd src-tauri && $(BUILD_GUARD) cargo tauri build --config tauri.bundle.conf.json
 
@@ -299,13 +301,13 @@ lock-engine:
 
 # Boot what `bundle-engine` built the way the shell would, ask it for /health, and check it wrote
 # nothing beside itself (scripts/smoke_bundle.py). Fails rather than skips when there is no bundle,
-# like check-ghidra: the release runs the same smoke on both packages before it publishes them.
+# like check-ghidra: the release runs the same smoke on every package before it publishes them.
 check-bundle:
 	python3 scripts/smoke_bundle.py build/engine-bundle
 
 # The checkout's own way in — a `codify` command and a menu entry, both under the user's own
 # ~/.local, both pointing back at this checkout, neither needing root. Not a package and not
-# a replacement for one: `package-app` builds the deb and the AppImage a system install
+# a replacement for one: `package-app` builds the native Linux packages a system install
 # takes, and this stays for working out of a checkout. See scripts/install-local.sh.
 install-local: build-app
 	scripts/install-local.sh install

@@ -101,25 +101,38 @@ def disagreements(tag: str, found: list[tuple[str, str]]) -> list[str]:
 def notes(tag: str, version: str) -> str:
     """The release page's body for `tag`, naming exactly the files the workflow publishes."""
     deb = f"Codify_{version}_{ARCH}.deb"
+    rpm = f"Codify_{version}_{ARCH}.rpm"
+    tarball = f"Codify_{version}_{ARCH}.tar.gz"
     appimage = f"Codify_{version}_{ARCH}.AppImage"
+    arch = f"Codify_{version}_{ARCH}.pkg.tar.zst"
+    pkgbuild = f"Codify_{version}_{ARCH}.PKGBUILD"
+    directory = f"Codify_{version}_{ARCH}"
     return f"""Codify {version} for Linux ({ARCH}), built from `{tag}` on Ubuntu 22.04.
 
 | File | What it is |
 |---|---|
 | `{deb}` | A Debian/Ubuntu package. Needs a package manager to install it. |
+| `{rpm}` | An RPM package for Fedora, RHEL-family distributions and openSUSE. |
+| `{tarball}` | A portable `/usr` tree. Extract it, then run `AppRun`; no root needed. |
 | `{appimage}` | One self-contained file. Needs only `chmod +x`. |
-| `SHA256SUMS` | The checksums of the two above. |
+| `{arch}` | An Arch Linux package, built from the portable tar. |
+| `{pkgbuild}` | The PKGBUILD that built the Arch package. Put it beside the tar and run `makepkg -si`. |
+| `SHA256SUMS` | The checksums of the six files above. |
 
 ```bash
 sudo apt install ./{deb}
+sudo dnf install ./{rpm}          # or: sudo zypper install ./{rpm}
+tar -xzf ./{tarball} && ./{directory}/AppRun
 chmod +x ./{appimage} && ./{appimage}
+sudo pacman -U ./{arch}
 sha256sum -c SHA256SUMS
 ```
 
-**Each package carries the engine** and the Python it runs on, so neither needs a checkout or a
-Python of yours. Both need `git`, which the deb installs for you. To run a checkout's engine
-instead — your own changes, or the Laya gate's SDK, which the packages leave out — start the app
-with `CODIFY_ROOT=/path/to/Codify`; `{REPO}` has the three commands that set a checkout up.
+**Each package carries the engine** and the Python it runs on, so none needs a checkout or a
+Python of yours. The deb and rpm declare `git`; the tar and Arch package list it as a dependency
+in their instructions. To run a checkout's engine instead — your own changes, or the Laya gate's
+SDK, which the packages leave out — start the app with `CODIFY_ROOT=/path/to/Codify`; `{REPO}`
+has the three commands that set a checkout up.
 
 **Nothing here updates itself.** The app's About tab asks GitHub for the newest release when a
 person presses Check for updates, and can download the package for the copy they are running —

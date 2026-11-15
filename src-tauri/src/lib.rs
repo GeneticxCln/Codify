@@ -1,5 +1,6 @@
 mod appimage_env;
 mod browser;
+mod context_menu;
 mod engine_log;
 mod engine_protocol;
 mod machine;
@@ -2463,6 +2464,11 @@ pub fn run() {
             // initialised GTK by the time setup runs, so this cannot be the call
             // that does it.
             apply_software_render_motion_default(app.handle());
+            // WebKit's own right-click menu is a browser's: Back, Forward, Stop,
+            // Reload, Inspect Element. This window has none of that chrome, and
+            // the first menu a person sees should not look like a browser they
+            // did not open. The native Cut/Copy/Paste entries stay WebKit's own.
+            context_menu::install(app.handle());
             // The embed smoke test, when asked: seat the page, watch for the
             // paint, report, exit. Runs INSTEAD of the engine launch so the
             // test is about the embed path and nothing else — see

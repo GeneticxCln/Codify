@@ -540,7 +540,7 @@ dependencies = [
 
 [[package]]
 name = "codify-desktop"
-version = "1.5.0"
+version = "1.6.0"
 dependencies = [
  "glob",
  "gtk",
@@ -555,6 +555,7 @@ dependencies = [
  "tauri-plugin-single-instance",
  "tokio",
  "url",
+ "webkit2gtk",
 ]
 
 [[package]]

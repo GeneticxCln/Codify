@@ -1,7 +1,7 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "Codify",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "identifier": "com.codify.app",
   "build": {
     "beforeDevCommand": { "script": "npm run dev", "cwd": "../ui" },
@@ -30,6 +30,7 @@
     "active": true,
     "targets": [
       "deb",
+      "rpm",
       "appimage"
     ],
     "category": "DeveloperTool",
@@ -39,6 +40,9 @@
     "longDescription": "Codify is a local-first, multi-agent AI coding assistant: a goal is planned by a fixed set of roles, written by the fixer, run by the verifier and reviewed by the critic, all against a workspace on this machine. Your code, your keys and your history stay here. It talks to the model providers you configure, and, only when you allow it in Settings, fetches web pages for the assistant; an update check contacts GitHub only when you click it. The package carries its own engine and the Python it runs on, so no checkout and no Python of yours are needed; CODIFY_ROOT points it at a checkout's engine instead.",
     "linux": {
       "deb": {
+        "depends": ["git"]
+      },
+      "rpm": {
         "depends": ["git"]
       }
     },

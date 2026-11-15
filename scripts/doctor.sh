@@ -48,6 +48,25 @@ bad() {
   [ -n "${2:-}" ] && hints+=("$2")
 }
 
+# True when dotted version `have` is at least dotted version `need`. A missing
+# patch component is zero. Bash 3 has no version comparator, and `sort -V` is not
+# guaranteed on the minimal machines this script exists for, so the comparison is
+# arithmetic over three numeric components. Callers strip a `-nightly`/`-dev`
+# suffix before asking; only digits and dots reach the arithmetic.
+version_at_least() {
+  local have="$1" need="$2" i hv nv
+  local -a have_parts need_parts
+  IFS=. read -r -a have_parts <<< "$have"
+  IFS=. read -r -a need_parts <<< "$need"
+  for i in 0 1 2; do
+    hv="${have_parts[$i]:-0}"
+    nv="${need_parts[$i]:-0}"
+    ((10#$hv > 10#$nv)) && return 0
+    ((10#$hv < 10#$nv)) && return 1
+  done
+  return 0
+}
+
 echo "Codify doctor — what 'make ci' needs, checked on this machine"
 echo
 
@@ -122,7 +141,27 @@ echo
 
 echo "Rust and the desktop shell's system libraries"
 if have cargo && have rustc; then
-  ok "$(run rustc --version)"
+  rust_manifest="$root/src-tauri/Cargo.toml"
+  declared_rust=""
+  if [ -f "$rust_manifest" ]; then
+    declared_rust="$(sed -n 's/^[[:space:]]*rust-version[[:space:]]*=[[:space:]]*"\([^"]*\)".*/\1/p' "$rust_manifest" | head -1)"
+  fi
+  rustc_line="$(run rustc --version)"
+  if [ -z "$declared_rust" ]; then
+    bad "src-tauri/Cargo.toml does not declare a rust-version, so the compiler this checkout builds on is unspecified" \
+      "Add rust-version = \"1.90.0\" (or the version the shell needs) under [package] in src-tauri/Cargo.toml."
+  else
+    installed_rust="$(printf '%s\n' "$rustc_line" | sed -n 's/^rustc \([0-9][0-9.]*\).*/\1/p')"
+    if [ -z "$installed_rust" ]; then
+      bad "could not read a version from '${rustc_line}': the declared Rust floor cannot be checked" \
+        "Expected 'rustc <version>'; run rustc --version yourself and install the toolchain it names."
+    elif version_at_least "$installed_rust" "$declared_rust"; then
+      ok "$rustc_line (meets src-tauri/Cargo.toml rust-version $declared_rust)"
+    else
+      bad "rustc $installed_rust is older than the $declared_rust this checkout declares in src-tauri/Cargo.toml" \
+        "Install Rust $declared_rust or newer: rustup toolchain install $declared_rust && rustup override set $declared_rust (or install the matching compiler from your distribution)."
+    fi
+  fi
   # `make check-tauri` ends in `cargo fmt --check`, and rustup's *minimal* profile (and some distro
   # packages) leave rustfmt out: the build and the tests then pass and the gate fails at its last step,
   # after the long part. Found by running `make ci` as a fresh user from the README alone.

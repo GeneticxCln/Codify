@@ -47,7 +47,7 @@ STUBS: dict[str, str] = {
         'fi\n'
         'echo "cargo 1.94.1"\n'
     ),
-    "rustc": '#!/bin/sh\necho "rustc 1.94.1"\n',
+    "rustc": '#!/bin/sh\necho "rustc ${DOCTOR_STUB_RUSTC_VERSION:-1.94.1}"\n',
     # `pkg-config --exists LIB` fails for every name in DOCTOR_STUB_MISSING_LIBS.
     "pkg-config": (
         '#!/bin/sh\nlib="$2"\n'
@@ -90,6 +90,10 @@ class DoctorCase(unittest.TestCase):
         for name in ("doctor.sh", "venv_gaps.py"):
             shutil.copy2(SCRIPTS / name, self.root / "scripts" / name)
         (self.root / "pyproject.toml").write_text('dependencies = [\n    "httpx",\n]\n', encoding="utf-8")
+        (self.root / "src-tauri").mkdir()
+        (self.root / "src-tauri" / "Cargo.toml").write_text(
+            '[package]\nname = "codify-desktop"\nrust-version = "1.90.0"\n', encoding="utf-8"
+        )
 
     def make_venv(self, body: str | None = None) -> None:
         """A `.venv` whose interpreter is the real one, so `venv_gaps.py` really runs in it."""
@@ -164,6 +168,35 @@ class TestEveryMissingPieceIsNamedAndFixable(DoctorCase):
         self.remove("cargo")
 
         self.assertMissing(self.doctor(DISPLAY=":0"), "cargo/rustc not installed", "rustup")
+
+    def test_a_compiler_older_than_the_checkout_declares_is_missing(self) -> None:
+        # The doctor used to report rustc's version and call it ok. A 1.88 compiler
+        # then failed in `cargo check`, after the long setup, despite the checkout
+        # promising 1.90 in Cargo.toml.
+        done = self.doctor(DISPLAY=":0", DOCTOR_STUB_RUSTC_VERSION="1.88.0")
+
+        self.assertMissing(
+            done,
+            "rustc 1.88.0 is older than the 1.90.0",
+            "rustup toolchain install 1.90.0",
+            "src-tauri/Cargo.toml",
+        )
+        self.assertIn("ok       clippy", done.stdout)
+
+    def test_a_compiler_at_the_declared_version_is_enough(self) -> None:
+        done = self.doctor(DISPLAY=":0", DOCTOR_STUB_RUSTC_VERSION="1.90.0")
+
+        self.assertEqual(0, done.returncode, done.stdout)
+        self.assertIn("meets src-tauri/Cargo.toml rust-version 1.90.0", done.stdout)
+
+    def test_a_missing_rust_version_declaration_is_not_a_pass(self) -> None:
+        (self.root / "src-tauri" / "Cargo.toml").write_text(
+            '[package]\nname = "codify-desktop"\n', encoding="utf-8"
+        )
+
+        done = self.doctor(DISPLAY=":0")
+
+        self.assertMissing(done, "does not declare a rust-version", "rust-version =")
 
     def test_a_toolchain_without_rustfmt_is_named_with_the_fix(self) -> None:
         # The gate ends in `cargo fmt --check`. A minimal rustup profile builds and tests fine and then

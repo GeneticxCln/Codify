@@ -538,9 +538,21 @@ right-click *on a thread* could do nothing while the same click beside it worked
 The menu then resolves the thread from the list, so it acts on the row that was
 clicked and not on whichever thread happens to be first.
 
-**`preventDefault` is not optional.** Without it the webview puts its own menu
-on screen — Reload, Inspect — and the right-click looks exactly like the app
-ignoring it, which is the symptom this handler exists to remove.
+**`preventDefault` is not optional.** Without it the app's menu never opens and
+the webview's own menu — whatever the filter below leaves of it — is the only
+thing that appears; the right-click looks exactly like the app ignoring it,
+which is the symptom this handler exists to remove.
+
+**The webview's own menu is filtered too.** The paragraph above is about menus
+the app draws; WebKit's menu is still underneath every region that has none. The
+main webview's `context-menu` signal removes Back, Forward, Stop, Reload,
+Inspect Element, Open Link, Open Link in New Window and Open Frame in New Window
+before the menu is shown, and suppresses it when nothing is left. The editing
+entries are WebKit's own, not reimplemented: Cut, Copy, Paste, Select All,
+spelling, emoji and Copy Link still act on the focused field, the selection and
+the system clipboard. The filter is installed on the main webview only; a browser pane is a
+separate webview with real history, and its inspector remains the browser pane's
+explicit DevTools control (`src-tauri/src/context_menu.rs`).
 
 **Clamping is not decoration.** The panel is 240px wide, so *every* right-click
 lands near an edge, and an unclamped menu hangs off the window — worst on the

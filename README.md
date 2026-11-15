@@ -100,7 +100,7 @@ make run-app    # builds the UI, embeds it, launches the app
 |---|---|
 | **Python 3.10+** with `venv` | The shell boots the engine as `python3 -m engine`, and 3.10 is a real deployment floor. |
 | **Node 22.22.2+, 24.15+ or 26+** | The range jsdom supports, which the UI test suite inherits. |
-| **Rust stable** with `rustfmt` | The Tauri shell. WebKitGTK 4.1 (2.40+), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config` come with it. |
+| **Rust 1.90+** with `rustfmt` | The Tauri shell; `src-tauri/Cargo.toml` declares 1.90 as its floor, and `make doctor` checks the compiler you have against it. WebKitGTK 4.1 (2.40+), GTK 3, libsoup 3, librsvg, OpenSSL and `pkg-config` come with it. |
 | **bubblewrap** and `unshare` | The Machine tab is a jailed shell, and its tests build real jails (an unprivileged overlay mount needs Linux 6.6+). The app runs without the overlay, with the project read-only in the machine. The same jail contains the commands a goal runs: **without a working jail, an approved goal's tests and scripts are refused** until you allow unjailed runs in Settings → Agents → Workspace command jail (`sandbox_unjailed_ok`). |
 | A display | For the Tauri tests; `xvfb` is used automatically on a headless machine. |
 | PipeWire's `pw-record` | Optional: only for dictation. |
@@ -125,14 +125,14 @@ codify                 # from any directory, or from the applications menu
 make uninstall-local   # removes exactly those three files
 ```
 
-Codify targets Linux desktops and comes two ways. A **package** — a deb or an AppImage, built from a tag by
+Codify targets Linux desktops and comes two ways. A **package** — a deb, rpm, portable tar, AppImage or Arch package, built from a tag by
 [`.github/workflows/release.yml`](.github/workflows/release.yml) and downloaded from the releases page — or the
 **checkout**, which is what `make install-local` above puts in your applications menu: a `codify` command and a menu
 entry under your own `~/.local`, no root involved. **Moving or deleting the checkout breaks the entry**, because the
 launcher finds the project root from where it lives.
 
 A package carries its own engine and the Python it runs on, so it needs no checkout and no Python of yours, only `git`
-(which the deb installs). The checkout runs its own engine, and `CODIFY_ROOT=/path/to/Codify` points a package at a
+(the deb and rpm declare it; the tar and Arch package list it as a dependency). The checkout runs its own engine, and `CODIFY_ROOT=/path/to/Codify` points a package at a
 checkout's instead — see [`docs/18`](docs/18-release-and-updates.md) §2 for what a package holds and leaves out. A
 checkout build finds the checkout it was built in; starting it from another folder does not run that folder's engine
 unless you opt in with `CODIFY_DEV_CWD=1`. The app
