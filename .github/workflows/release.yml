@@ -258,6 +258,10 @@ jobs:
           set -euo pipefail
           source="dist/Codify_${VERSION}_amd64.tar.gz"
           arch_dir=$(mktemp -d)
+          # The container user must be able to create src/ and pkg/ here, while the
+          # runner must still be able to read the package it writes back. A shared
+          # writable directory does both; chowning the mount would lock the runner out.
+          chmod 777 "$arch_dir"
           cp packaging/arch/PKGBUILD.in "$arch_dir/PKGBUILD"
           digest=$(sha256sum "$source" | cut -d' ' -f1)
           sed -i "s/@VERSION@/${VERSION}/g; s/@SHA256@/${digest}/g" "$arch_dir/PKGBUILD"
@@ -270,7 +274,6 @@ jobs:
               set -euo pipefail
               pacman -Syu --noconfirm --needed zstd
               useradd -m builder
-              chown -R builder:builder /build
               su builder -c "cd /build && PKGDEST=/build makepkg --noconfirm --nodeps"
             '
           package=$(find "$arch_dir" -maxdepth 1 -name 'codify-bin-*.pkg.tar.zst' -print -quit)
