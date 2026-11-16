@@ -29,26 +29,26 @@
     "@tauri-apps/api": "^2.12.4",
     "@xterm/addon-canvas": "^0.7.0",
     "@xterm/addon-fit": "^0.11.0",
-    "@xterm/headless": "5.5.0",
-    "@xterm/xterm": "^5.5.0",
+    "@xterm/headless": "6.0.0",
+    "@xterm/xterm": "^6.0.0",
     "clsx": "^2.1.1",
-    "lucide-react": "^1.69.0",
+    "lucide-react": "^1.72.0",
     "react": "^19.3.1",
     "react-dom": "^19.3.1",
     "tailwind-merge": "^3.0.0"
   },
   "devDependencies": {
-    "@tailwindcss/postcss": "^4.3.4",
+    "@tailwindcss/postcss": "^4.3.5",
     "@types/jsdom": "^30.0.0",
     "@types/node": "^26.6.6",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^6.2.1",
+    "@vitejs/plugin-react": "^6.3.0",
     "esbuild": "^0.28.2",
     "jsdom": "^31.0.0",
     "postcss": "^8.5.32",
     "tailwindcss": "^4.3.3",
     "typescript": "^7.0.2",
-    "vite": "^8.3.6"
+    "vite": "^8.3.8"
   }
 }
