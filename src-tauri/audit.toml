@@ -22,4 +22,6 @@ ignore = [
     "RUSTSEC-2026-0371",
     "RUSTSEC-2026-0370",
     "RUSTSEC-2026-0372",
+    # tauri-utils / tauri-codegen pull chrono 0.4.45, which is marked unmaintained upstream.
+    "RUSTSEC-2026-0543",
 ]

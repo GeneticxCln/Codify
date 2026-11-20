@@ -23,6 +23,13 @@ updates:
     groups:
       ui:
         patterns: ["*"]
+    # @xterm/addon-canvas 0.7.0 declares peer `@xterm/xterm: "^5.0.0"`, so xterm 6.x fails `npm ci`
+    # with ERESOLVE until the canvas renderer migration or an xterm 6-compatible addon is adopted.
+    ignore:
+      - dependency-name: "@xterm/xterm"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "@xterm/headless"
+        update-types: ["version-update:semver-major"]
 
   - package-ecosystem: cargo
     directory: "/src-tauri"

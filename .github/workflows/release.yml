@@ -194,7 +194,7 @@ jobs:
       # CLI's own version and dependency graph are fixed, so a release cannot silently pull an
       # unreviewed CLI release or transitive dependency between two tags.
       - name: Install the Tauri CLI
-        run: cargo install tauri-cli --version "=2.10.5" --locked
+        run: cargo install tauri-cli --version "=2.11.5" --locked
 
       # One command, because the targets live in `src-tauri/tauri.conf.json`
       # (`bundle.targets` is `deb`, `rpm` and `appimage`) and a list repeated here would be a
