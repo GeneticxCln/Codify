@@ -397,6 +397,7 @@ jobs:
         if: env.PUBLISH == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
         run: |
           set -euo pipefail
           if gh release view "$TAG" >/dev/null 2>&1; then
