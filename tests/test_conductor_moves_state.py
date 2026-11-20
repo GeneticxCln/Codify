@@ -565,6 +565,37 @@ class TestSummarizeReportsWhatTheScribeDid(MovesCase):
         self.assertIn("cancelled", out)
         self.assertNotEqual("COMPLETED", self.step_status())
 
+    async def test_summarize_refuses_when_goal_is_no_longer_running(self) -> None:
+        self.build(A_V2)
+        self.repo()
+        table, step_id = await self._through_review()
+        g = self.goals.get(self.goal.id)
+        self.goals.update_status(self.goal.id, g.version, "PAUSED")
+
+        out = await table["summarize"]({"step_id": step_id})
+
+        self.assertIn("paused", out.lower())
+        self.assertNotEqual("COMPLETED", self.step_status())
+
+    async def test_summarize_checks_stored_events_for_verify_and_review(self) -> None:
+        self.build(A_V2)
+        self.repo()
+        step_id = self.approve()
+        tools = ConductorTools(
+            self.executor, self.goal.id, self.goals.get(self.goal.id),
+            str(self.root), load_skills(str(self.root)),
+        )
+        await tools.write({"step_id": step_id, "instructions": "first"})
+        # Even if in-memory state claimed reviewed=True, stored events have no passing verify or review.
+        state = tools._state_of(step_id)
+        state.test = {"verdict": "pass"}
+        state.reviewed = True
+
+        out = await tools.summarize({"step_id": step_id})
+
+        self.assertIn("not been reviewed", out)
+        self.assertNotEqual("COMPLETED", self.step_status())
+
 
 class TestWhatTheFixerAndPlannerSaidIsNotDropped(MovesCase):
     async def test_a_fixer_that_wants_another_pass_is_told_to_the_conductor(self) -> None:

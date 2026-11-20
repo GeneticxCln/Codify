@@ -1403,6 +1403,37 @@ class TestACallWrittenInsideProse(ConductorTestCase):
         self.assertEqual(reply.tool_calls, [])
         self.assertEqual(reply.text, text)
 
+    def test_a_json_array_of_parallel_calls_is_recovered_in_order(self) -> None:
+        text = (
+            '[{"name": "read_file", "arguments": {"path": "a.py"}}, '
+            '{"name": "search_code", "arguments": {"query": "parse"}}]'
+        )
+        reply = coerce_tool_reply(text, [], list(TOOLS))
+        self.assertEqual(["read_file", "search_code"], [c.name for c in reply.tool_calls])
+        self.assertEqual({"path": "a.py"}, reply.tool_calls[0].arguments)
+        self.assertEqual({"query": "parse"}, reply.tool_calls[1].arguments)
+        self.assertEqual("", reply.text)
+
+    def test_multiple_fenced_read_calls_are_all_recovered(self) -> None:
+        text = (
+            "I will read both files first:\n"
+            '```json\n{"name": "read_file", "arguments": {"path": "a.py"}}\n```\n'
+            '```json\n{"name": "read_file", "arguments": {"path": "b.py"}}\n```\n'
+        )
+        reply = coerce_tool_reply(text, [], list(TOOLS))
+        self.assertEqual(["read_file", "read_file"], [c.name for c in reply.tool_calls])
+        self.assertEqual(["a.py", "b.py"], [c.arguments["path"] for c in reply.tool_calls])
+        self.assertEqual("", reply.text)
+
+    def test_a_json_array_with_an_unoffered_tool_is_rejected_whole(self) -> None:
+        text = (
+            '[{"name": "read_file", "arguments": {"path": "a.py"}}, '
+            '{"name": "not_a_real_tool", "arguments": {}}]'
+        )
+        reply = coerce_tool_reply(text, [], list(TOOLS))
+        self.assertEqual([], reply.tool_calls)
+        self.assertEqual(text, reply.text)
+
 
 class TestTheConductorFallsBack(unittest.IsolatedAsyncioTestCase):
     """A conductor whose model is down should still answer.

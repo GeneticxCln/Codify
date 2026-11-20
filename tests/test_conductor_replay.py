@@ -23,13 +23,16 @@ from typing import Any
 
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
+from engine.cache_diagnostics import message_digests, shared_prefix_count
 from engine.conductor import (
     KEEP_WHOLE_RESULTS,
+    LOW_WATER_CONTEXT_CHARS,
     MAX_CONTEXT_CHARS,
     MAX_HISTORY_CHARS,
     MAX_TOOL_RESULT_CHARS,
     Conductor,
     TOOLS,
+    _clip,
     bound_history,
     bound_replay,
 )
@@ -149,6 +152,38 @@ class TestTheBoundItself(unittest.TestCase):
         tiny = [{"role": "user", "content": "q"}, _tool(0, "ok")]
         self.assertEqual(0, bound_replay(tiny, budget=0, keep=0), "a two-letter result was replaced by a longer stub")
         self.assertEqual("ok", tiny[1]["content"])
+
+    def test_low_water_eviction_keeps_the_prefix_stable_across_several_calls_past_60k(self) -> None:
+        # Once past 60k, evicting down to LOW_WATER_CONTEXT_CHARS (40k) in one pass leaves 20k of headroom
+        # so the next several calls do not rewrite an old tool message in the middle of the prefix.
+        messages: list[dict[str, Any]] = [{"role": "user", "content": "inspect"}]
+        snapshots: list[tuple[str, ...]] = []
+        for i in range(14):
+            messages.append(_tool(i, "x" * 6_000))
+            bound_replay(messages)
+            snapshots.append(message_digests(messages))
+
+        self.assertLessEqual(_total(messages), MAX_CONTEXT_CHARS)
+        # Between call 10 (when total first crosses 60k and drops to <= 40k) and call 13, each call's entire
+        # prior message prefix must stay 100% unchanged on the very next call.
+        unchanged_transitions = sum(
+            1
+            for prev, curr in zip(snapshots, snapshots[1:], strict=False)
+            if shared_prefix_count(prev, curr) == len(prev)
+        )
+        self.assertGreaterEqual(
+            unchanged_transitions, 11,
+            f"prefix was rewritten too often ({unchanged_transitions}/13 unchanged transitions)",
+        )
+        self.assertEqual(LOW_WATER_CONTEXT_CHARS, 40_000)
+
+    def test_clip_keeps_both_head_and_tail_of_a_tool_result(self) -> None:
+        raw = "HEAD-OPENING\n" + ("middle\n" * 3000) + "TAIL-VERDICT: 1 failed, 42 passed"
+        clipped = _clip(raw, limit=MAX_TOOL_RESULT_CHARS)
+        self.assertLessEqual(len(clipped), MAX_TOOL_RESULT_CHARS)
+        self.assertTrue(clipped.startswith("HEAD-OPENING\n"))
+        self.assertTrue(clipped.endswith("TAIL-VERDICT: 1 failed, 42 passed"))
+        self.assertIn("chars elided by the engine", clipped)
 
 
 class TestTheHistoryItself(unittest.TestCase):

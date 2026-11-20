@@ -112,6 +112,12 @@ MAX_TOOL_RESULT_CHARS = 12000
 # tool schemas a call carries and the reply, and is about 15k tokens of conversation.
 MAX_CONTEXT_CHARS = 60_000
 
+# The low-water mark `bound_replay` evicts down to once `MAX_CONTEXT_CHARS` is exceeded. Evicting only back to
+# the 60k ceiling rewrote one old tool message in place on nearly every subsequent turn, invalidating the KV
+# prefix cache on local servers (Ollama, llama.cpp) from that message onward. Dropping to 40k opens 20k of
+# headroom so the prefix stays byte-identical across several calls.
+LOW_WATER_CONTEXT_CHARS = 40_000
+
 # How many of the newest tool results are kept whole *while the transcript fits*. The step being worked on is
 # the evidence the next call is about; an older read is what "call it again" is for. It is a preference rather
 # than a promise: `bound_replay` reduces these too, oldest first, when stubbing everything older was not enough.
@@ -275,6 +281,7 @@ def bound_replay(
     *,
     budget: int = MAX_CONTEXT_CHARS,
     keep: int = KEEP_WHOLE_RESULTS,
+    low_water: int | None = None,
 ) -> int:
     """Replace the oldest tool results with a stub until the transcript fits `budget`.
 
@@ -283,6 +290,11 @@ def bound_replay(
     assistant messages are never touched — the person's words and the model's own replies are the conversation,
     not evidence — and a tool message keeps its `tool_call_id`, because the protocol pairs it with the call that
     asked for it.
+
+    Once `total > budget`, older results are evicted down to `low_water` (defaulting to
+    `LOW_WATER_CONTEXT_CHARS` = 40,000 when running under the production `MAX_CONTEXT_CHARS` ceiling, or
+    `budget * 2 // 3` for smaller custom budgets) so the transcript prefix stays byte-stable across the next
+    several calls instead of rewriting one old tool message on every turn past 60k.
 
     Returns how many results were stubbed, so a test can see the bound at work. Stubbing is idempotent: a result
     already reduced is passed over, which is what makes it safe to call before every model call. A single result
@@ -301,18 +313,29 @@ def bound_replay(
     total = sum(size(message) for message in messages)
     if total <= budget:
         return 0
+    if low_water is not None:
+        target = min(budget, max(0, low_water))
+        kept_target = target
+    elif budget >= MAX_CONTEXT_CHARS:
+        target = min(budget, LOW_WATER_CONTEXT_CHARS)
+        kept_target = target
+    else:
+        target = (budget * 2) // 3
+        kept_target = budget
     tools = [
         index for index, message in enumerate(messages)
         if message.get("role") == "tool" and message.get("content")
     ]
     # The newest results are the ones this call is about; `keep=0` is for a caller that wants only the budget.
     stubbable = tools[:-keep] if keep > 0 else tools
+    stubbable_set = set(stubbable)
     # Then the kept ones, oldest first. Appended rather than written as a second loop so the budget test below
     # has one order to walk, and `keep=0` adds nothing (every tool is already in `stubbable`).
     candidates = stubbable + (tools[len(stubbable):] if keep > 0 else [])
     stubbed = 0
     for index in candidates:
-        if total <= budget:
+        limit = target if index in stubbable_set else kept_target
+        if total <= limit:
             break
         message = messages[index]
         original = str(message.get("content") or "")
@@ -378,10 +401,18 @@ def bound_history(
 
 
 def _clip(value: str, limit: int = MAX_TOOL_RESULT_CHARS) -> str:
+    """`value` cut to fit `limit`, keeping both ends.
+
+    The end of a result is often its verdict: pytest's `short test summary info` and its `N failed` line, a
+    compiler's last error, a traceback's innermost frame. Keeping only the opening dropped exactly that, so a
+    `run_command` over the limit reached the model with no outcome in it. Same shape as `_history_clip`.
+    """
     if len(value) <= limit:
         return value
-    head = limit * 2 // 3
-    return f"{value[:head]}\n…[{len(value) - head} chars elided by the engine]…"
+    head = limit // 2
+    tail = limit // 3
+    elided = len(value) - head - tail
+    return f"{value[:head]}\n…[{elided} chars elided by the engine]…\n{value[-tail:]}"
 
 
 def _result(payload: Any) -> str:
@@ -1027,7 +1058,8 @@ RUN_COMMAND = ToolSpec(
     description=(
         "Run one of the project's own commands — its tests, its linter, its "
         "type checker (`ruff check`, `mypy PATH`, `tsc --noEmit`, `cargo check`, "
-        "`go vet ./...`, `make lint`, `make typecheck`), its build. This is how "
+        "`go vet ./...`, `make lint`, `make typecheck`, `make check`, `make test`, "
+        "`node --test`), its build. This is how "
         "you find out whether something is actually "
         "true. It cannot start a shell or install anything, and an unlisted "
         "command, or a flag the engine does not list (`--fix` included: a check "

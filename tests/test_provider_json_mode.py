@@ -713,6 +713,22 @@ class TestOllamaKeepAlive(TestOllamaNumCtx):
         coroutine = provider.complete("s", "u", "m", 0.0, 8, keep_alive="30m")
         coroutine.close()
 
+    def test_json_schema_reaches_ollama_format_field_when_provided(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(
+            provider.complete("sys", "user", "m1", 0.0, 64, json_schema=REPLY_SCHEMAS["fixer"])
+        )
+        self.assertEqual(server.post_bodies[0].get("format"), REPLY_SCHEMAS["fixer"])
+
+    def test_without_json_schema_ollama_format_stays_json(self) -> None:
+        import asyncio
+
+        provider, server = self._make()
+        asyncio.run(provider.complete("sys", "user", "m1", 0.0, 64))
+        self.assertEqual(server.post_bodies[0].get("format"), "json")
+
 
 if __name__ == "__main__":
     unittest.main()

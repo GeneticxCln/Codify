@@ -39,6 +39,12 @@ ACCEPTED: tuple[list[str], ...] = (
     ["go", "vet", "./pkg"],
     ["make", "lint"],
     ["make", "typecheck"],
+    ["make", "check"],
+    ["make", "test"],
+    ["make", "test-ui"],
+    ["make", "typecheck-ui-tests"],
+    ["node", "--test", "ui/tests/a.test.ts"],
+    ["node", "--experimental-strip-types", "--test", "ui/tests/a.test.ts"],
 )
 
 REFUSED: tuple[list[str], ...] = (
@@ -95,11 +101,10 @@ REFUSED: tuple[list[str], ...] = (
     ["go", "vet", "-vettool", "x", "./..."],
     ["go", "vet", "/etc"],
     ["go", "vet", "../x"],
-    # make: exactly `make lint` or `make typecheck`. Anything else is a different program's worth of
-    # surface (-f names a makefile, -C a directory, VAR=x an override, a target is whatever the repo says).
+    # make: only the allowlisted verification targets, with no flags or variable overrides.
     ["make"],
     ["make", "install"],
-    ["make", "check"],
+    ["make", "deploy"],
     ["make", "-f", "x.mk", "lint"],
     ["make", "-C", "..", "lint"],
     ["make", "-n", "lint"],
@@ -107,6 +112,14 @@ REFUSED: tuple[list[str], ...] = (
     ["make", "lint", "typecheck"],
     ["make", "lint", "-j4"],
     ["make", "--eval=x", "lint"],
+    # node: only `node --test` (with optional `--experimental-strip-types`) and workspace paths.
+    ["node"],
+    ["node", "a.js"],
+    ["node", "-e", "process.exit(0)"],
+    ["node", "--eval=1", "--test"],
+    ["node", "--test", "--import=x", "a.test.js"],
+    ["node", "--test", "/etc/passwd"],
+    ["node", "--test", "../x.test.js"],
 )
 
 

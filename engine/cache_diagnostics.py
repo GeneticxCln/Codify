@@ -16,7 +16,7 @@ Pure, like `usage_audit`: no clock, no database, no model. The audit hands it th
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Iterable
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 
 # What a miss can be attributed to, in the order the attribution is tried. `none` means that nothing the engine
@@ -57,6 +57,33 @@ def prompt_parts(system: str, tool_names: Iterable[str], model: str, protocol: s
 def fingerprint(parts: dict[str, str]) -> str:
     """One digest over all the parts, in a fixed order. Changes exactly when one of them does."""
     return digest("|".join(parts.get(key, "") for key in ("system", "tools", "model", "protocol")))
+
+
+def message_digests(messages: Iterable[Mapping[str, object]]) -> tuple[str, ...]:
+    """Content-free 16-hex-char digests of each message in `messages`, in transcript order.
+
+    Local servers (Ollama, llama.cpp) reuse their KV cache across the longest unchanged prefix of messages.
+    Comparing two calls' `message_digests` with `shared_prefix_count` measures how much of the prefix survived
+    `bound_replay` without storing a single word of the conversation.
+    """
+    out: list[str] = []
+    for msg in messages:
+        role = str(msg.get("role") or "")
+        call_id = str(msg.get("tool_call_id") or "")
+        name = str(msg.get("name") or "")
+        content = str(msg.get("content") or "")
+        out.append(digest(f"{role}|{call_id}|{name}|{content}"))
+    return tuple(out)
+
+
+def shared_prefix_count(previous: Iterable[str], current: Iterable[str]) -> int:
+    """How many leading message digests of `previous` and `current` are identical."""
+    matched = 0
+    for a, b in zip(previous, current, strict=False):
+        if a != b:
+            break
+        matched += 1
+    return matched
 
 
 @dataclass(frozen=True)

@@ -1334,6 +1334,9 @@ class OllamaProvider(BaseProvider):
     def __init__(self, base_url: str):
         validate_local_base_url(base_url)
         self._base_url = base_url.rstrip("/")
+        # Ollama 0.5+ compiles a JSON Schema in `format` into a GBNF grammar; older servers
+        # only accept `"json"` and return a 4xx on a dict, which downgrades this flag to False.
+        self._schema_format = True
 
     @property
     def supports_tools(self) -> bool:
@@ -1415,8 +1418,10 @@ class OllamaProvider(BaseProvider):
         json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
         json_mode: bool = True,
     ) -> str:
-        # `json_schema` is accepted and not sent: when `json_mode` is True this call sends `format: "json"`,
-        # which is Ollama's object-mode rung; plain-prose calls (`json_mode=False`) omit `format` altogether.
+        # When `json_mode` is True and `json_schema` is provided, pass the JSON schema directly in
+        # `format` (Ollama's GBNF grammar constraint); if the server is an older Ollama that rejects a
+        # schema object with 4xx, step down to `format: "json"` and remember the downgrade. Plain-prose
+        # calls (`json_mode=False`) omit `format` altogether.
         stream = self.on_delta is not None
         # `num_ctx` is the one option here that changes *what the model can
         # see*. Without it Ollama sizes the window from its own default (4096)
@@ -1438,23 +1443,45 @@ class OllamaProvider(BaseProvider):
         # names directly on a model that supports levels. None sends nothing and leaves the model's own
         # default alone.
         think_field = {"think": thinking_effort} if thinking_effort is not None else {}
-        format_field = {"format": "json"} if json_mode else {}
+        use_schema = json_mode and json_schema is not None and self._schema_format
+        format_field: dict[str, Any] = (
+            {"format": json_schema if use_schema else "json"} if json_mode else {}
+        )
         async with _http_client(self._base_url, timeout=180) as client:
             if not stream:
-                data = await post_json(
-                    client,
-                    f"{self._base_url}/api/generate",
-                    label="ollama",
-                    json={
-                        "model": model,
-                        "prompt": f"{system_prompt}\n\n{user_prompt}",
-                        "options": options,
-                        **keep_alive_field,
-                        **think_field,
-                        **format_field,
-                        "stream": False,
-                    },
-                )
+                try:
+                    data = await post_json(
+                        client,
+                        f"{self._base_url}/api/generate",
+                        label="ollama",
+                        json={
+                            "model": model,
+                            "prompt": f"{system_prompt}\n\n{user_prompt}",
+                            "options": options,
+                            **keep_alive_field,
+                            **think_field,
+                            **format_field,
+                            "stream": False,
+                        },
+                    )
+                except ProviderError as exc:
+                    if not (use_schema and refused_the_request(exc)):
+                        raise
+                    self._schema_format = False
+                    data = await post_json(
+                        client,
+                        f"{self._base_url}/api/generate",
+                        label="ollama",
+                        json={
+                            "model": model,
+                            "prompt": f"{system_prompt}\n\n{user_prompt}",
+                            "options": options,
+                            **keep_alive_field,
+                            **think_field,
+                            "format": "json",
+                            "stream": False,
+                        },
+                    )
             else:
                 # NDJSON streaming: one JSON object per line until the final
                 # one (done=true) carries the full text and the usage counts.
@@ -1462,43 +1489,52 @@ class OllamaProvider(BaseProvider):
                 # is byte-identical to what stream=false returns.
                 text = ""
                 data = {}
-                async with open_stream(
-                    client,
-                    f"{self._base_url}/api/generate",
-                    label="ollama",
-                    json={
-                        "model": model,
-                        "prompt": f"{system_prompt}\n\n{user_prompt}",
-                        "options": options,
-                        **keep_alive_field,
-                        **think_field,
-                        **format_field,
-                        "stream": True,
-                    },
-                ) as response:
+                while True:
                     try:
-                        async for line in response.aiter_lines():
-                            line = (line or "").strip()
-                            if not line:
-                                continue
-                            piece = json.loads(line)
-                            if not isinstance(piece, dict):
-                                continue
-                            text += _as_str(piece.get("response"))
+                        async with open_stream(
+                            client,
+                            f"{self._base_url}/api/generate",
+                            label="ollama",
+                            json={
+                                "model": model,
+                                "prompt": f"{system_prompt}\n\n{user_prompt}",
+                                "options": options,
+                                **keep_alive_field,
+                                **think_field,
+                                **format_field,
+                                "stream": True,
+                            },
+                        ) as response:
                             try:
-                                self.on_delta(text)  # type: ignore[misc]
-                            except Exception:
-                                pass
-                            if piece.get("done"):
-                                data = piece
-                    except (json.JSONDecodeError, RecursionError) as exc:
-                        raise ProviderError(
-                            "provider_bad_response", f"ollama streamed a line that is not JSON: {exc}"
-                        ) from exc
-                    except httpx.HTTPError as exc:
-                        # A connection that dropped after the reply began: the stream is reported as
-                        # interrupted, never re-run, because what arrived is already on screen.
-                        raise _interrupted("ollama", text, exc) from exc
+                                async for line in response.aiter_lines():
+                                    line = (line or "").strip()
+                                    if not line:
+                                        continue
+                                    piece = json.loads(line)
+                                    if not isinstance(piece, dict):
+                                        continue
+                                    text += _as_str(piece.get("response"))
+                                    try:
+                                        self.on_delta(text)  # type: ignore[misc]
+                                    except Exception:
+                                        pass
+                                    if piece.get("done"):
+                                        data = piece
+                            except (json.JSONDecodeError, RecursionError) as exc:
+                                raise ProviderError(
+                                    "provider_bad_response", f"ollama streamed a line that is not JSON: {exc}"
+                                ) from exc
+                            except httpx.HTTPError as exc:
+                                # A connection that dropped after the reply began: the stream is reported as
+                                # interrupted, never re-run, because what arrived is already on screen.
+                                raise _interrupted("ollama", text, exc) from exc
+                        break
+                    except ProviderError as exc:
+                        if not (use_schema and refused_the_request(exc)):
+                            raise
+                        self._schema_format = False
+                        use_schema = False
+                        format_field = {"format": "json"}
                 if not data.get("done"):
                     raise ProviderError(
                         "provider_bad_response", "ollama stream ended without a done=true chunk"
