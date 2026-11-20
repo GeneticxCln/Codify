@@ -188,9 +188,13 @@ export async function mountEditor(options: {
   buffers.attachView(tabId, view);
   if (autoFocus) view.focus();
   // The grammar arrives after the text is already on screen: reading it should not wait for a download.
-  void loadLanguage(buffer.path).then((loaded) => {
-    if (view.dom.isConnected) view.dispatch({ effects: language.reconfigure(loaded ?? []) });
-  });
+  void loadLanguage(buffer.path)
+    .then((loaded) => {
+      if (view.dom.isConnected) view.dispatch({ effects: language.reconfigure(loaded ?? []) });
+    })
+    .catch(() => {
+      // A grammar that fails to download leaves the text readable as plain text.
+    });
   return {
     view,
     refresh: () => view.dispatch({}),

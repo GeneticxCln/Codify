@@ -37,10 +37,22 @@ import os
 import platform
 import shutil
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
 from engine.laya import SDK_DISABLE_ENV
+
+CACHE_TTL_S = 60.0
+_laya_cache: tuple[float, Any, Any, str | None, str | None] | None = None
+_sandbox_cache: tuple[float, Any, Any, dict[str, Any]] | None = None
+
+
+def clear_capability_cache() -> None:
+    """Clear cached probe results for Laya SDK and sandbox availability."""
+    global _laya_cache, _sandbox_cache
+    _laya_cache = None
+    _sandbox_cache = None
 
 # Mirrors `requires-python` in pyproject.toml, which is also ruff's target-version
 # and mypy's `python_version`. Hardcoded rather than parsed out of the file: the
@@ -105,17 +117,30 @@ def laya_sdk_report() -> dict[str, Any]:
     `importable` is a property of the interpreter alone. Whether the gate will
     *use* it is `LayaService.status()`, which also honours `CODIFY_LAYA_SDK`.
     """
-    import_error: str | None = None
-    version: str | None = None
-    try:
-        importlib.import_module("laya")
-    except Exception as exc:  # a broken install raises, and it is the reason we report
-        import_error = f"{type(exc).__name__}: {exc}"
+    global _laya_cache
+    now = time.monotonic()
+    imp_fn = importlib.import_module
+    ver_fn = importlib.metadata.version
+    if (
+        _laya_cache is not None
+        and (now - _laya_cache[0]) < CACHE_TTL_S
+        and _laya_cache[1] is imp_fn
+        and _laya_cache[2] is ver_fn
+    ):
+        import_error, version = _laya_cache[3], _laya_cache[4]
     else:
+        import_error = None
+        version = None
         try:
-            version = importlib.metadata.version("laya")
-        except importlib.metadata.PackageNotFoundError:  # pragma: no cover - importable but unlabelled
-            version = None
+            imp_fn("laya")
+        except Exception as exc:  # a broken install raises, and it is the reason we report
+            import_error = f"{type(exc).__name__}: {exc}"
+        else:
+            try:
+                version = ver_fn("laya")
+            except importlib.metadata.PackageNotFoundError:  # pragma: no cover - importable but unlabelled
+                version = None
+        _laya_cache = (now, imp_fn, ver_fn, import_error, version)
     return {
         "importable": import_error is None,
         "import_error": import_error,
@@ -134,13 +159,26 @@ def sandbox_report() -> dict[str, Any]:
     Installed is not enough: user namespaces can be disabled or AppArmor-restricted, and then every
     bwrap invocation fails before the command starts. The probe is shared with the jail itself.
     """
-    bwrap = shutil.which("bwrap")
-    if bwrap is None:
-        return {"bwrap": None, "available": False}
+    global _sandbox_cache
     # Local import: capabilities is imported at app boot, and sandbox owns the probe.
     from engine.sandbox import bwrap_can_jail
 
-    return {"bwrap": bwrap, "available": bwrap_can_jail(bwrap)}
+    now = time.monotonic()
+    which_fn = shutil.which
+    if (
+        _sandbox_cache is not None
+        and (now - _sandbox_cache[0]) < CACHE_TTL_S
+        and _sandbox_cache[1] is which_fn
+        and _sandbox_cache[2] is bwrap_can_jail
+    ):
+        return dict(_sandbox_cache[3])
+    bwrap = which_fn("bwrap")
+    if bwrap is None:
+        result: dict[str, Any] = {"bwrap": None, "available": False}
+    else:
+        result = {"bwrap": bwrap, "available": bwrap_can_jail(bwrap)}
+    _sandbox_cache = (now, which_fn, bwrap_can_jail, result)
+    return dict(result)
 
 
 def _warnings(

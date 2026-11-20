@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -285,7 +286,7 @@ class SettingsService:
             return self.STRING_SPEC[key]
         return str(row["value"]).strip()
 
-    def set_str(self, key: str, value: str) -> str:
+    def set_str(self, key: str, value: str, *, commit: bool = True) -> str:
         if key not in self.STRING_SPEC:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
         clean = str(value).strip()
@@ -300,7 +301,8 @@ class SettingsService:
                                              updated_at = excluded.updated_at""",
             (key, clean, time.time()),
         )
-        self._db.commit()
+        if commit:
+            self._db.commit()
         return clean
 
     def get_int(self, key: str) -> int:
@@ -318,7 +320,7 @@ class SettingsService:
             # the settings screen wrote it, so a bad save must not wedge goals.
             return default
 
-    def set_int(self, key: str, value: int) -> int:
+    def set_int(self, key: str, value: int, *, commit: bool = True) -> int:
         if key not in self.SPEC:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
         default, clamp = self.SPEC[key]
@@ -329,7 +331,8 @@ class SettingsService:
                ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at""",
             (key, str(clamped), time.time()),
         )
-        self._db.commit()
+        if commit:
+            self._db.commit()
         return clamped
 
 def custom_provider_address(
@@ -1713,17 +1716,41 @@ class GoalService:
                ORDER BY created_at DESC, id DESC LIMIT ?""",
             (conversation_id, exclude_goal_id, max(0, int(limit))),
         ).fetchall()
+        if not rows:
+            return []
+        goal_ids = [r["id"] for r in rows]
+        if hasattr(self._db, "events_for_goals"):
+            logs_by_goal = self._db.events_for_goals(
+                goal_ids, event_type="log", per_goal_limit=40,
+            )
+        else:
+            placeholders = ",".join("?" for _ in goal_ids)
+            log_rows = self._db.execute(
+                f"""SELECT goal_id, payload FROM (
+                        SELECT goal_id, payload, sequence,
+                               ROW_NUMBER() OVER (PARTITION BY goal_id ORDER BY sequence DESC) AS _rn
+                        FROM events
+                        WHERE goal_id IN ({placeholders}) AND type = 'log'
+                    )
+                    WHERE _rn <= 40
+                    ORDER BY goal_id, sequence ASC""",  # noqa: S608 — placeholders are `?`
+                goal_ids,
+            ).fetchall()
+            logs_by_goal = {}
+            for ev_row in log_rows:
+                logs_by_goal.setdefault(ev_row["goal_id"], []).append(ev_row)
         out: list[dict[str, Any]] = []
         for r in reversed(rows):
-            reply = self._db.execute(
-                """SELECT payload FROM events
-                   WHERE goal_id = ? AND type = 'log'
-                   ORDER BY sequence DESC LIMIT 40""",
-                (r["id"],),
-            ).fetchall()
+            reply = logs_by_goal.get(r["id"], ())
             text = ""
-            for ev in reversed(reply):
-                payload = scrub_surrogates(json.loads(ev["payload"] or "{}"))
+            for ev in reply:
+                try:
+                    raw_payload = json.loads(ev["payload"] or "{}")
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    continue
+                payload = scrub_surrogates(raw_payload)
+                if not isinstance(payload, dict):
+                    continue
                 if payload.get("turn"):
                     text = str(payload.get("message") or "")
                     break
@@ -1984,6 +2011,51 @@ class GoalService:
             })
         return out
 
+    _observations_lock = threading.Lock()
+
+    def _update_existing_observation(
+        self,
+        workspace_id: str,
+        subject: str,
+        obs: dict[str, Any],
+        evidence: list[str],
+        existing: Any,
+        now: float,
+    ) -> None:
+        try:
+            prior = json.loads(existing["evidence"] or "[]")
+        except (TypeError, ValueError):
+            prior = []
+        if not isinstance(prior, list):
+            prior = []
+        known = {str(e) for e in prior}
+        # `evidence` is newest-first and capped at 20 (same cap as stored `prior`),
+        # so re-scanning a window with >20 events never treats evicted older IDs as fresh.
+        recent = evidence[:20]
+        merged = list(dict.fromkeys([*recent, *[str(e) for e in prior]]))
+        # Proof grows by the events not already counted. Every run's end re-scans the same recent
+        # events, so adding the scan's whole count each time made one error read "proof: 4" after four
+        # runs that never saw it again, and a belief nobody re-observed stayed out of the fade.
+        fresh = [e for e in recent if e not in known]
+        if fresh:
+            gained = max(1, min(int(obs.get("proof") or 1), len(fresh)))
+            self._db.execute(
+                """UPDATE observations SET lesson = ?, example = ?,
+                   proof = proof + ?, evidence = ?, refined_at = ?
+                   WHERE workspace_id = ? AND subject = ?""",
+                (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
+                 gained, json.dumps(merged[:20]), now, workspace_id, subject),
+            )
+        else:
+            # Nothing new was seen: the wording may have changed (a recovery), the count and the
+            # time it was last seen may not.
+            self._db.execute(
+                """UPDATE observations SET lesson = ?, example = ?
+                   WHERE workspace_id = ? AND subject = ?""",
+                (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
+                 workspace_id, subject),
+            )
+
     def record_observations(self, workspace_id: str, observations: list[dict[str, Any]]) -> int:
         """Refine the store with what one consolidation pass distilled.
 
@@ -2001,57 +2073,43 @@ class GoalService:
         """
         now = time.time()
         written = 0
-        for obs in observations:
-            subject = str(obs.get("subject") or "")
-            if not subject or subject.startswith("step:"):
-                continue
-            existing = self._db.execute(
-                "SELECT proof, evidence FROM observations WHERE workspace_id = ? AND subject = ?",
-                (workspace_id, subject),
-            ).fetchone()
-            evidence = [str(e) for e in (obs.get("evidence") or []) if str(e)]
-            if existing is None:
-                self._db.execute(
-                    """INSERT INTO observations
-                       (id, workspace_id, subject, lesson, example, proof, evidence,
-                        created_at, refined_at)
-                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                    (str(uuid.uuid4()), workspace_id, subject,
-                     str(obs.get("lesson") or ""), str(obs.get("example") or ""),
-                     max(1, int(obs.get("proof") or 1)),
-                     json.dumps(evidence), now, now),
-                )
-            else:
-                try:
-                    prior = json.loads(existing["evidence"] or "[]")
-                except (TypeError, ValueError):
-                    prior = []
-                known = {str(e) for e in prior}
-                merged = list(dict.fromkeys([*evidence, *[str(e) for e in prior]]))
-                # Proof grows by the events not already counted. Every run's end re-scans the same recent
-                # events, so adding the scan's whole count each time made one error read "proof: 4" after four
-                # runs that never saw it again, and a belief nobody re-observed stayed out of the fade.
-                fresh = [e for e in evidence if e not in known]
-                if fresh:
-                    gained = max(1, min(int(obs.get("proof") or 1), len(fresh)))
-                    self._db.execute(
-                        """UPDATE observations SET lesson = ?, example = ?,
-                           proof = proof + ?, evidence = ?, refined_at = ?
-                           WHERE workspace_id = ? AND subject = ?""",
-                        (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
-                         gained, json.dumps(merged[:20]), now, workspace_id, subject),
-                    )
+        with self._observations_lock:
+            for obs in observations:
+                subject = str(obs.get("subject") or "")
+                if not subject or subject.startswith("step:"):
+                    continue
+                existing = self._db.execute(
+                    "SELECT proof, evidence FROM observations WHERE workspace_id = ? AND subject = ?",
+                    (workspace_id, subject),
+                ).fetchone()
+                evidence = [str(e) for e in (obs.get("evidence") or []) if str(e)][:20]
+                if existing is None:
+                    try:
+                        self._db.execute(
+                            """INSERT INTO observations
+                               (id, workspace_id, subject, lesson, example, proof, evidence,
+                                created_at, refined_at)
+                               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                            (str(uuid.uuid4()), workspace_id, subject,
+                             str(obs.get("lesson") or ""), str(obs.get("example") or ""),
+                             max(1, int(obs.get("proof") or 1)),
+                             json.dumps(evidence), now, now),
+                        )
+                    except sqlite3.IntegrityError:
+                        existing = self._db.execute(
+                            "SELECT proof, evidence FROM observations WHERE workspace_id = ? AND subject = ?",
+                            (workspace_id, subject),
+                        ).fetchone()
+                        if existing is not None:
+                            self._update_existing_observation(
+                                workspace_id, subject, obs, evidence, existing, now,
+                            )
                 else:
-                    # Nothing new was seen: the wording may have changed (a recovery), the count and the
-                    # time it was last seen may not.
-                    self._db.execute(
-                        """UPDATE observations SET lesson = ?, example = ?
-                           WHERE workspace_id = ? AND subject = ?""",
-                        (str(obs.get("lesson") or ""), str(obs.get("example") or ""),
-                         workspace_id, subject),
+                    self._update_existing_observation(
+                        workspace_id, subject, obs, evidence, existing, now,
                     )
-            written += 1
-        self._db.commit()
+                written += 1
+            self._db.commit()
         return written
 
     def thread_recall(
@@ -2093,14 +2151,30 @@ class GoalService:
                LIMIT ?""",
             (workspace_id, cap),
         ).fetchall()
+        if not rows:
+            return []
+        convo_ids = [row["id"] for row in rows]
+        placeholders = ",".join("?" for _ in convo_ids)
+        ask_rows = self._db.execute(
+            f"""SELECT conversation_id, description FROM (
+                    SELECT conversation_id, description,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY conversation_id ORDER BY created_at DESC, id DESC
+                           ) AS _rn
+                    FROM goals
+                    WHERE conversation_id IN ({placeholders})
+                )
+                WHERE _rn <= 4
+                ORDER BY conversation_id, _rn ASC""",  # noqa: S608 — placeholders are `?`
+            convo_ids,
+        ).fetchall()
+        asks_by_convo: dict[str, list[str]] = {}
+        for r in ask_rows:
+            asks_by_convo.setdefault(r["conversation_id"], []).append(
+                (r["description"] or "")[:MAX_ASK_CHARS]
+            )
         out: list[dict[str, Any]] = []
         for row in rows:
-            asks = self._db.execute(
-                """SELECT description FROM goals
-                   WHERE conversation_id = ?
-                   ORDER BY created_at DESC, id DESC LIMIT ?""",
-                (row["id"], 4),
-            ).fetchall()
             out.append({
                 "id": row["id"],
                 "title": row["title"],
@@ -2109,10 +2183,7 @@ class GoalService:
                 "completed": row["completed"],
                 "failed": row["failed"],
                 "cancelled": row["cancelled"],
-                "asks": [
-                    (r["description"] or "")[:MAX_ASK_CHARS]
-                    for r in asks
-                ],
+                "asks": asks_by_convo.get(row["id"], []),
             })
         return out
 
@@ -2570,25 +2641,56 @@ class GoalService:
         self._db.commit()
         return event
 
-    def latest_event(self, goal_id: str, type_: str) -> Event | None:
+    def latest_event(self, goal_id: str, type_: str, step_id: str | None = None) -> Event | None:
         """The goal's newest event of one type, or None.
 
         For state that is a *snapshot* carried by events (the conductor's todo list is the one: every change
         republishes the whole list, so the newest event is the list). Reading the whole log to find the last
         one of a type would make a long goal pay for its history every time a run starts.
         """
-        row = self._db.execute(
-            "SELECT * FROM events WHERE goal_id = ? AND type = ? ORDER BY sequence DESC LIMIT 1",
-            (goal_id, type_),
-        ).fetchone()
-        if row is None:
-            return None
-        d = row_to_dict(row)
-        try:
-            d["payload"] = json.loads(d["payload"])
-            return Event.model_validate(d)
-        except Exception:
-            return None
+        if step_id is None:
+            rows = self._db.execute(
+                "SELECT * FROM events WHERE goal_id = ? AND type = ? ORDER BY sequence DESC",
+                (goal_id, type_),
+            )
+        else:
+            rows = self._db.execute(
+                "SELECT * FROM events WHERE goal_id = ? AND type = ? AND step_id = ? ORDER BY sequence DESC",
+                (goal_id, type_, step_id),
+            )
+        for row in rows:
+            d = row_to_dict(row)
+            try:
+                d["payload"] = json.loads(d["payload"])
+                return Event.model_validate(d)
+            except Exception:
+                continue
+        return None
+
+    def events_for_goals(self, goal_ids: list[str]) -> dict[str, list[Event]]:
+        """Batch-fetch valid events for multiple goals in a single query."""
+        ids = [gid for gid in goal_ids if gid]
+        if not ids:
+            return {}
+        out: dict[str, list[Event]] = {gid: [] for gid in ids}
+        if hasattr(self._db, "events_for_goals"):
+            raw_by_goal = self._db.events_for_goals(ids)
+            raw_rows = [r for gid in ids for r in raw_by_goal.get(gid, ())]
+        else:
+            placeholders = ",".join("?" for _ in ids)
+            raw_rows = self._db.execute(
+                f"SELECT * FROM events WHERE goal_id IN ({placeholders}) ORDER BY goal_id, sequence",  # noqa: S608
+                ids,
+            ).fetchall()
+        for r in raw_rows:
+            d = row_to_dict(r)
+            try:
+                d["payload"] = json.loads(d["payload"])
+                ev = Event.model_validate(d)
+            except Exception:
+                continue
+            out.setdefault(ev.goal_id, []).append(ev)
+        return out
 
     def events_after(self, goal_id: str, after: int, limit: int | None = None) -> list[Event]:
         """The goal's events with a sequence above `after`, in order.
@@ -2601,24 +2703,46 @@ class GoalService:
 
         The guarantee that makes a limit safe here is that `after` advances only
         to the last event actually **sent**, so a bounded read is still lossless
-        — the next tick starts exactly where this one stopped. A row that cannot
-        be parsed is skipped without advancing the watermark, exactly as before.
+        — the next tick starts exactly where this one stopped. Corrupt rows are
+        skipped while still recording `last_sequence` on the returned batch so
+        streaming pollers advance past invalid rows instead of re-querying them.
         """
-        sql = "SELECT * FROM events WHERE goal_id = ? AND sequence > ? ORDER BY sequence"
-        params: tuple[Any, ...] = (goal_id, after)
-        if limit is not None:
-            sql += " LIMIT ?"
-            params = (goal_id, after, limit)
-        rows = self._db.execute(sql, params)
-        out = []
-        for r in rows:
-            d = row_to_dict(r)
-            try:
-                d["payload"] = json.loads(d["payload"])
-            except (TypeError, ValueError):
-                continue
-            try:
-                out.append(Event.model_validate(d))
-            except Exception:
-                continue
+        out = EventBatch()
+        out.last_sequence = after
+        if limit is not None and limit <= 0:
+            return out
+        cursor = after
+        while True:
+            sql = "SELECT * FROM events WHERE goal_id = ? AND sequence > ? ORDER BY sequence"
+            params: tuple[Any, ...] = (goal_id, cursor)
+            batch_cap: int | None = None
+            if limit is not None:
+                batch_cap = limit - len(out)
+                sql += " LIMIT ?"
+                params = (goal_id, cursor, batch_cap)
+            fetched = self._db.execute(sql, params).fetchall()
+            if not fetched:
+                break
+            for r in fetched:
+                seq = int(r["sequence"])
+                if seq > cursor:
+                    cursor = seq
+                d = row_to_dict(r)
+                try:
+                    d["payload"] = json.loads(d["payload"])
+                except (TypeError, ValueError):
+                    continue
+                try:
+                    out.append(Event.model_validate(d))
+                except Exception:
+                    continue
+            if batch_cap is None or len(fetched) < batch_cap or len(out) >= limit:  # type: ignore[operator]
+                break
+        out.last_sequence = cursor
         return out
+
+
+class EventBatch(list[Event]):
+    """A `list[Event]` returned by `events_after`, carrying `last_sequence` scanned."""
+
+    last_sequence: int = 0

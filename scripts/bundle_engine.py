@@ -212,7 +212,8 @@ def fetch_python(
     cache.mkdir(parents=True, exist_ok=True)
     cached = cache / pin.asset
     if tarball is not None:
-        shutil.copyfile(tarball, cached)
+        if tarball.resolve() != cached.resolve():
+            shutil.copyfile(tarball, cached)
         keep_if_pinned(cached, pin)
         return cached
     if cached.is_file():
@@ -226,12 +227,12 @@ def fetch_python(
         partial = cached.with_suffix(".partial")
         try:
             download(url, partial)
-        except OSError as exc:
+            partial.replace(cached)
+            keep_if_pinned(cached, pin)
+        except (OSError, BundleError) as exc:
             partial.unlink(missing_ok=True)
             failures.append(f"{url}: {exc}")
             continue
-        partial.replace(cached)
-        keep_if_pinned(cached, pin)
         return cached
     raise BundleError("could not fetch the pinned CPython from any mirror:\n  " + "\n  ".join(failures))
 
@@ -359,9 +360,14 @@ def manifest(pin: Pin, lock_text: str, version: str, engine_files: int) -> dict[
     }
 
 
-def _run(argv: list[str], what: str, timeout_s: int) -> None:
+def _clean_python_env() -> dict[str, str]:
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONHOME", "PYTHONPATH")}
     env["PYTHONNOUSERSITE"] = "1"
+    return env
+
+
+def _run(argv: list[str], what: str, timeout_s: int) -> None:
+    env = _clean_python_env()
     try:
         done = subprocess.run(argv, env=env, timeout=timeout_s, check=False)  # noqa: S603 — argv is install_argv/compile_argv: the pinned interpreter's own pip and compileall over paths this script made; no shell
     except subprocess.TimeoutExpired as exc:
@@ -370,23 +376,29 @@ def _run(argv: list[str], what: str, timeout_s: int) -> None:
         raise BundleError(f"{what} exited {done.returncode}")
 
 
-def _make_room(out: Path) -> None:
-    """Clear `out` for a new bundle — but only an old bundle or nothing, never someone's directory."""
+def _check_out(out: Path) -> None:
+    """Refuse `out` before building if it holds something that is not an engine bundle."""
     if not out.exists():
         return
     if (out / "BUNDLE.json").is_file() or not any(out.iterdir()):
-        shutil.rmtree(out)
         return
     raise BundleError(f"{out} exists and is not an engine bundle; it is left as it is")
+
+
+def _make_room(out: Path) -> None:
+    """Clear `out` for a new bundle — but only an old bundle or nothing, never someone's directory."""
+    _check_out(out)
+    if out.exists():
+        shutil.rmtree(out)
 
 
 def build(out: Path, cache: Path, *, tarball: Path | None = None) -> dict[str, Any]:
     pin = load_pin()
     lock_text = LOCK_PATH.read_text(encoding="utf-8")
-    _make_room(out)
+    _check_out(out)
     archive = fetch_python(pin, cache, tarball=tarball)
     # Built beside `out` and renamed into place, so an interrupted build leaves no half-bundle
-    # where the packager would pick it up.
+    # where the packager would pick it up, and an existing bundle stays intact until the new one is ready.
     out.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".engine-bundle-", dir=out.parent))
     try:
@@ -403,6 +415,7 @@ def build(out: Path, cache: Path, *, tarball: Path | None = None) -> dict[str, A
         )
         info = manifest(pin, lock_text, app_version(), engine_files)
         (staging / "BUNDLE.json").write_text(json.dumps(info, indent=2) + "\n", encoding="utf-8")
+        _make_room(out)
         staging.replace(out)
     except BaseException:
         shutil.rmtree(staging, ignore_errors=True)

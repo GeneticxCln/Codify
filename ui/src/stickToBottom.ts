@@ -34,6 +34,9 @@ export function useStickToBottom(sentinel: RefObject<HTMLElement | null>, count:
   const stuck = useRef(true);
   const seen = useRef(0);
   const lastOwnScroll = useRef(0);
+  // ChatTimeline renders an empty-state branch (without the sentinel) when count === 0;
+  // re-running once items appear ensures the scroll listener actually attaches.
+  const hasItems = count > 0;
 
   useEffect(() => {
     const scroller = scrollParent(sentinel.current);
@@ -44,7 +47,7 @@ export function useStickToBottom(sentinel: RefObject<HTMLElement | null>, count:
     };
     scroller.addEventListener("scroll", onScroll, { passive: true });
     return () => scroller.removeEventListener("scroll", onScroll);
-  }, [sentinel]);
+  }, [sentinel, hasItems]);
 
   useEffect(() => {
     const isNew = count > seen.current;
@@ -52,7 +55,9 @@ export function useStickToBottom(sentinel: RefObject<HTMLElement | null>, count:
     if (isNew) stuck.current = true;
     if (!stuck.current) return;
     lastOwnScroll.current = Date.now();
-    sentinel.current?.scrollIntoView({ behavior: "smooth" });
+    // Use instant ("auto") scrolling for high-frequency streaming updates so
+    // smooth-scroll animations aren't constantly restarted on every delta.
+    sentinel.current?.scrollIntoView({ behavior: isNew ? "smooth" : "auto" });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [changed, count]);
 }

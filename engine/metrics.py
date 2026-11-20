@@ -28,6 +28,7 @@ pass `now`; the no-clock anchor exists only for tests building a timeline.
 
 from __future__ import annotations
 
+import math
 from typing import Any
 
 # Which outcomes mean "this role did its job", per stage. Deliberately a
@@ -63,6 +64,19 @@ STAGE_ORDER: tuple[str, ...] = (
 UNCANCELLED_ONLY: frozenset[str] = frozenset({"cancelled"})
 
 
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        num = float(value)
+        if math.isfinite(num):
+            return num
+    return None
+
+
+def _finite_int(value: Any) -> int | None:
+    num = _finite_float(value)
+    return int(num) if num is not None else None
+
+
 def _within(ts: float, cutoff: float | None) -> bool:
     return cutoff is None or ts >= cutoff
 
@@ -90,9 +104,10 @@ def percentile(values: list[float], pct: float) -> int | None:
     between two that never happened, and a latency table that reports a
     duration nothing took is a number nobody can act on.
     """
-    if not values:
+    finite = [v for v in values if not isinstance(v, bool) and math.isfinite(v)]
+    if not finite:
         return None
-    ordered = sorted(values)
+    ordered = sorted(finite)
     if pct <= 0:
         return int(ordered[0])
     rank = int(-(-pct * len(ordered) // 100)) - 1  # ceil, no float import
@@ -101,7 +116,8 @@ def percentile(values: list[float], pct: float) -> int | None:
 
 def _mean(values: list[float]) -> int | None:
     # None, not 0: "no run was recorded" is not "every run was instant".
-    return int(sum(values) / len(values)) if values else None
+    finite = [v for v in values if not isinstance(v, bool) and math.isfinite(v)]
+    return int(sum(finite) / len(finite)) if finite else None
 
 
 def role_success_rate(
@@ -143,9 +159,9 @@ def role_success_rate(
             role = str(payload.get("role") or "")
             if role in tokens:
                 for key in ("input_tokens", "output_tokens"):
-                    value = payload.get(key)
-                    if isinstance(value, (int, float)):
-                        tokens[role] += int(value)
+                    value = _finite_int(payload.get(key))
+                    if value is not None:
+                        tokens[role] += value
             continue
         if kind != "stage_result":
             continue
@@ -163,9 +179,9 @@ def role_success_rate(
             entry["succeeded"] += 1
         else:
             entry["failed"] += 1
-        duration = payload.get("duration_ms")
-        if isinstance(duration, (int, float)):
-            durations[role].append(float(duration))
+        duration = _finite_float(payload.get("duration_ms"))
+        if duration is not None:
+            durations[role].append(duration)
 
     for stage, entry in by_role.items():
         terminal = entry["succeeded"] + entry["failed"]
@@ -231,15 +247,15 @@ def stage_costs(
             "outcomes": {},
         })
         entry["runs"] += 1
-        tokens = payload.get("tokens")
-        if isinstance(tokens, (int, float)):
-            entry["tokens"] += int(tokens)
-        calls = payload.get("calls")
-        if isinstance(calls, (int, float)):
-            entry["calls"] += int(calls)
-        duration = payload.get("duration_ms")
-        if isinstance(duration, (int, float)):
-            entry["durations"].append(float(duration))
+        tokens = _finite_int(payload.get("tokens"))
+        if tokens is not None:
+            entry["tokens"] += tokens
+        calls = _finite_int(payload.get("calls"))
+        if calls is not None:
+            entry["calls"] += calls
+        duration = _finite_float(payload.get("duration_ms"))
+        if duration is not None:
+            entry["durations"].append(duration)
         outcome = str(payload.get("outcome") or "unavailable")
         histogram: dict[str, int] = entry["outcomes"]
         histogram[outcome] = histogram.get(outcome, 0) + 1
@@ -413,9 +429,14 @@ def _recovery_pairs(
         payload = ev.get("payload") or {}
         if kind == "fix_retry":
             retried.add(key)
+            recovered.discard(key)
         elif key in retried:
             if kind == "test_result" and payload.get("verdict") in ("pass", "skip"):
                 recovered.add(key)
-            elif kind == "step_status" and payload.get("status") == "COMPLETED":
-                recovered.add(key)
+            elif kind == "step_status":
+                status = payload.get("status")
+                if status == "COMPLETED":
+                    recovered.add(key)
+                elif status == "FAILED":
+                    recovered.discard(key)
     return retried, recovered

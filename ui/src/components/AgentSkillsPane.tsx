@@ -97,16 +97,25 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
   const previewRequest = useRef(0);
   /** Which list request is current; a slow refresh must not replace a newer load. */
   const listRequest = useRef(0);
+  /** Always reflects the active workspaceId so stale async handlers never touch another workspace. */
+  const workspaceIdRef = useRef(workspaceId);
+  workspaceIdRef.current = workspaceId;
 
-  const loadSkills = async (resetFilters: boolean, announce: boolean): Promise<boolean> => {
-    if (!workspaceId) return false;
+  const loadSkills = async (
+    resetFilters: boolean,
+    announce: boolean,
+    targetWorkspaceId: string | null | undefined = workspaceIdRef.current,
+  ): Promise<boolean> => {
+    if (!targetWorkspaceId) return false;
     const request = ++listRequest.current;
     setRefreshing(true);
     setError(null);
     setMessage(null);
     try {
-      const result = await getAgentSkills(workspaceId);
-      if (listRequest.current !== request) return false;
+      const result = await getAgentSkills(targetWorkspaceId);
+      if (listRequest.current !== request || workspaceIdRef.current !== targetWorkspaceId) {
+        return false;
+      }
       setSkills(result.skills);
       setAvailableMoves(result.available_moves ?? []);
       setProblems(result.problems ?? []);
@@ -122,12 +131,14 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
       if (announce) setMessage("Skills refreshed from this workspace.");
       return true;
     } catch (err: unknown) {
-      if (listRequest.current === request) {
+      if (listRequest.current === request && workspaceIdRef.current === targetWorkspaceId) {
         setError(readRejection(err, "Could not refresh the skills."));
       }
       return false;
     } finally {
-      if (listRequest.current === request) setRefreshing(false);
+      if (listRequest.current === request && workspaceIdRef.current === targetWorkspaceId) {
+        setRefreshing(false);
+      }
     }
   };
 
@@ -138,6 +149,7 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
     setAvailableMoves([]);
     setProblems([]);
     setError(null);
+    setSaving({});
     setMessage(null);
     setQuery("");
     setFilter("all");
@@ -159,14 +171,15 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
       };
     }
 
-    void loadSkills(true, false);
+    void loadSkills(true, false, workspaceId);
     return () => {
       listRequest.current += 1;
     };
   }, [workspaceId]);
 
   const save = async (skill: AgentSkill, enabled: boolean) => {
-    if (!workspaceId) return;
+    const targetWorkspace = workspaceId;
+    if (!targetWorkspace) return;
     setMessage(null);
     setError(null);
     setSaving((current) => ({ ...current, [skill.name]: true }));
@@ -174,7 +187,8 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
       current?.map((entry) => (entry.name === skill.name ? { ...entry, enabled } : entry)) ?? current,
     );
     try {
-      const result = await setAgentSkillEnabled(skill.name, enabled, workspaceId);
+      const result = await setAgentSkillEnabled(skill.name, enabled, targetWorkspace);
+      if (workspaceIdRef.current !== targetWorkspace) return;
       setSkills((current) =>
         current?.map((entry) =>
           entry.name === result.name ? { ...entry, enabled: result.enabled } : entry,
@@ -186,6 +200,7 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
           : `${result.name} is off for this workspace — the conductor will not be offered it.`,
       );
     } catch (err: unknown) {
+      if (workspaceIdRef.current !== targetWorkspace) return;
       // Roll back only the switch that failed. Replacing the whole list would undo a
       // second toggle that succeeded while this request was in flight.
       setSkills((current) =>
@@ -195,16 +210,19 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
       );
       setError(readRejection(err, `Could not change ${skill.name}.`));
     } finally {
-      setSaving((current) => {
-        const next = { ...current };
-        delete next[skill.name];
-        return next;
-      });
+      if (workspaceIdRef.current === targetWorkspace) {
+        setSaving((current) => {
+          const next = { ...current };
+          delete next[skill.name];
+          return next;
+        });
+      }
     }
   };
 
   const togglePreview = async (skill: AgentSkill) => {
-    if (!workspaceId) return;
+    const targetWorkspace = workspaceId;
+    if (!targetWorkspace) return;
     if (previewName === skill.name) {
       previewRequest.current += 1;
       setPreviewName(null);
@@ -217,11 +235,11 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
     setPreview(null);
     setPreviewError(null);
     try {
-      const result = await getAgentSkill(skill.name, workspaceId);
-      if (previewRequest.current !== request) return;
+      const result = await getAgentSkill(skill.name, targetWorkspace);
+      if (previewRequest.current !== request || workspaceIdRef.current !== targetWorkspace) return;
       setPreview(result);
     } catch (err: unknown) {
-      if (previewRequest.current !== request) return;
+      if (previewRequest.current !== request || workspaceIdRef.current !== targetWorkspace) return;
       setPreviewError(readRejection(err, `Could not read ${skill.name}.`));
     }
   };
@@ -251,14 +269,16 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
     setCreateError(null);
   };
 
-  const afterCreate = async (created: AgentSkillCreated) => {
+  const afterCreate = async (created: AgentSkillCreated, targetWorkspace: string) => {
+    if (workspaceIdRef.current !== targetWorkspace) return;
     setCreatorOpen(false);
     setCreatorMode("write");
     setDraft({ ...EMPTY_DRAFT, moves: [] });
     setUpload(null);
     setUploadError(null);
     setCreateError(null);
-    const refreshed = await loadSkills(true, false);
+    const refreshed = await loadSkills(true, false, targetWorkspace);
+    if (workspaceIdRef.current !== targetWorkspace) return;
     setMessage(
       `${created.name} was created at ${created.path} and is on for this workspace. ` +
         `It is available to the next conductor turn.` +
@@ -269,7 +289,8 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
 
   const submitCreate = async (event: React.FormEvent) => {
     event.preventDefault();
-    if (!workspaceId || creating) return;
+    const targetWorkspace = workspaceId;
+    if (!targetWorkspace || creating) return;
     setCreateError(null);
     setMessage(null);
     if (!draft.name.trim() || !draft.description.trim() || !draft.instructions.trim()) {
@@ -278,17 +299,21 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
     }
     setCreating(true);
     try {
-      const created = await createAgentSkill(workspaceId, {
+      const created = await createAgentSkill(targetWorkspace, {
         name: draft.name,
         description: draft.description,
         moves: draft.moves,
         instructions: draft.instructions,
       });
-      await afterCreate(created);
+      await afterCreate(created, targetWorkspace);
     } catch (err: unknown) {
-      setCreateError(readRejection(err, "Could not create the skill."));
+      if (workspaceIdRef.current === targetWorkspace) {
+        setCreateError(readRejection(err, "Could not create the skill."));
+      }
     } finally {
-      setCreating(false);
+      if (workspaceIdRef.current === targetWorkspace) {
+        setCreating(false);
+      }
     }
   };
 
@@ -333,7 +358,8 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
   };
 
   const submitUpload = async () => {
-    if (!workspaceId || creating) return;
+    const targetWorkspace = workspaceId;
+    if (!targetWorkspace || creating) return;
     setCreateError(null);
     setUploadError(null);
     setMessage(null);
@@ -343,12 +369,16 @@ export const AgentSkillsPane: React.FC<{ workspaceId?: string }> = ({ workspaceI
     }
     setCreating(true);
     try {
-      const created = await importAgentSkill(workspaceId, upload);
-      await afterCreate(created);
+      const created = await importAgentSkill(targetWorkspace, upload);
+      await afterCreate(created, targetWorkspace);
     } catch (err: unknown) {
-      setUploadError(readRejection(err, "Could not import the skill."));
+      if (workspaceIdRef.current === targetWorkspace) {
+        setUploadError(readRejection(err, "Could not import the skill."));
+      }
     } finally {
-      setCreating(false);
+      if (workspaceIdRef.current === targetWorkspace) {
+        setCreating(false);
+      }
     }
   };
 

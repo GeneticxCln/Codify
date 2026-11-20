@@ -690,6 +690,19 @@ pub(crate) fn download_dir_for(
     ))
 }
 
+fn part_path(into: &Path, name: &str) -> PathBuf {
+    // Written beside the destination and renamed over it, so a crash or a full disk
+    // leaves a `.part` file rather than a truncated package under the real name. The
+    // rename also replaces a symlink instead of following it: without this, a link at
+    // `~/Downloads/Codify.deb` made the download write through it to wherever it pointed.
+    static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    into.join(format!(
+        ".{name}.{}.{}.part",
+        std::process::id(),
+        PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    ))
+}
+
 /// Write `bytes` as `name` in `into`, and report where they went.
 ///
 /// The only place this module touches a disk. Both refusals above the write are the reason
@@ -697,6 +710,7 @@ pub(crate) fn download_dir_for(
 /// than against what the release claimed, and the name has to be a plain file name, so
 /// nothing here can write outside `into` or over a file whose name a release chose to be
 /// clever.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) async fn write_asset(into: &Path, name: &str, bytes: &[u8]) -> Result<PathBuf, String> {
     if !is_plain_file_name(name) {
         return Err(format!(
@@ -717,16 +731,7 @@ pub(crate) async fn write_asset(into: &Path, name: &str, bytes: &[u8]) -> Result
         .await
         .map_err(|err| format!("could not use {} ({err})", into.display()))?;
     let path = into.join(name);
-    // Written beside the destination and renamed over it, so a crash or a full disk
-    // leaves a `.part` file rather than a truncated package under the real name. The
-    // rename also replaces a symlink instead of following it: without this, a link at
-    // `~/Downloads/Codify.deb` made the download write through it to wherever it pointed.
-    static PART: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let part = into.join(format!(
-        ".{name}.{}.{}.part",
-        std::process::id(),
-        PART.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
-    ));
+    let part = part_path(into, name);
     tokio::fs::write(&part, bytes).await.map_err(|err| {
         let _ = std::fs::remove_file(&part);
         format!("could not write {} ({err})", path.display())
@@ -784,13 +789,43 @@ pub(crate) fn parse_sums(text: &str) -> Result<std::collections::HashMap<String,
     Ok(sums)
 }
 
+/// Format a raw SHA-256 digest as the lowercase hex `sha256sum` prints.
+fn format_sha256(digest: &[u8]) -> String {
+    digest.iter().map(|byte| format!("{byte:02x}")).collect()
+}
+
 /// The SHA-256 of `bytes`, as the lowercase hex `sha256sum` prints.
+#[cfg_attr(not(test), allow(dead_code))]
 fn sha256_hex(bytes: &[u8]) -> String {
     use sha2::{Digest, Sha256};
-    Sha256::digest(bytes)
-        .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+    format_sha256(&Sha256::digest(bytes))
+}
+
+/// Check a pre-computed lowercase hex digest for `name` against the release's parsed checksums.
+fn verify_digest_against_expected(
+    name: &str,
+    actual: &str,
+    expected: &str,
+) -> Result<String, String> {
+    if actual != expected {
+        return Err(format!(
+            "{name} does not match the release's {SUMS_ASSET} (expected {expected}, got {actual}), so nothing \
+             was written. The download was damaged or changed on the way; try again, or take it from \
+             {RELEASES_PAGE}"
+        ));
+    }
+    Ok(actual.to_string())
+}
+
+/// Look up `name`'s expected SHA-256 in the release's `SHA256SUMS` text.
+fn expected_digest(name: &str, sums_text: &str) -> Result<String, String> {
+    let sums = parse_sums(sums_text)?;
+    sums.get(name).cloned().ok_or_else(|| {
+        format!(
+            "the release's {SUMS_ASSET} does not list {name}, so it could not be checked and nothing was \
+             written. Take it from {RELEASES_PAGE}"
+        )
+    })
 }
 
 /// Whether `bytes`, downloaded as `name`, are the file the release's checksums list under that name.
@@ -799,27 +834,15 @@ fn sha256_hex(bytes: &[u8]) -> String {
 /// because nothing is: this runs before [`write_asset`]. It is not a signature, and nothing here says it is: the
 /// checksums come from the same release as the package, so what a match proves is that the file is whole and is the
 /// one that release published.
+#[cfg_attr(not(test), allow(dead_code))]
 pub(crate) fn check_against_sums(
     name: &str,
     bytes: &[u8],
     sums_text: &str,
 ) -> Result<String, String> {
-    let sums = parse_sums(sums_text)?;
-    let Some(expected) = sums.get(name) else {
-        return Err(format!(
-            "the release's {SUMS_ASSET} does not list {name}, so it could not be checked and nothing was \
-             written. Take it from {RELEASES_PAGE}"
-        ));
-    };
+    let expected = expected_digest(name, sums_text)?;
     let actual = sha256_hex(bytes);
-    if &actual != expected {
-        return Err(format!(
-            "{name} does not match the release's {SUMS_ASSET} (expected {expected}, got {actual}), so nothing \
-             was written. The download was damaged or changed on the way; try again, or take it from \
-             {RELEASES_PAGE}"
-        ));
-    }
-    Ok(actual)
+    verify_digest_against_expected(name, &actual, &expected)
 }
 
 /// The release's checksums, as text, from the same hosts and under the same redirect rule as everything else here.
@@ -896,6 +919,22 @@ fn next_step(package: Package, path: &Path) -> String {
     }
 }
 
+/// Why a package kind has no downloadable asset, if it has none.
+pub(crate) fn refusal_for_unmanaged_package(package: Package) -> Option<String> {
+    match package {
+        Package::Source => Some(format!(
+            "this copy runs from a checkout, so there is no package to download — `git pull` in \
+             it, or take one from {RELEASES_PAGE}"
+        )),
+        Package::Distro => Some(format!(
+            "this copy was installed by your distribution's package manager, so there is no \
+             package to download here — update it through your package manager, or take the \
+             AppImage from {RELEASES_PAGE}"
+        )),
+        Package::Deb | Package::AppImage => None,
+    }
+}
+
 /// Download the package this install can use, into `into`.
 ///
 /// Takes no argument from the frontend, and that is the point: there is no way for a page —
@@ -909,11 +948,8 @@ pub(crate) async fn fetch_package(
     into: PathBuf,
     on_progress: &(dyn Fn(UpdateProgress) + Send + Sync),
 ) -> Result<UpdateDownload, String> {
-    if package.extension().is_none() {
-        return Err(format!(
-            "this copy runs from a checkout, so there is no package to download — `git pull` in \
-             it, or take one from {RELEASES_PAGE}"
-        ));
+    if let Some(reason) = refusal_for_unmanaged_package(package) {
+        return Err(reason);
     }
     let arch = package_arch();
     let client = client(DOWNLOAD_TIMEOUT, current)?;
@@ -957,9 +993,15 @@ pub(crate) async fn fetch_package(
              {RELEASES_PAGE}"
         ));
     }
-    // Read first: it is a few hundred bytes, and a release that cannot be checked is refused before tens of
-    // megabytes are spent on a package that would then not be written.
+    if !is_plain_file_name(&name) {
+        return Err(format!(
+            "the release names a file this app will not write ({name:?}), so nothing was written"
+        ));
+    }
+    // Read and validate checksums first: a few hundred bytes, and a release that cannot be
+    // checked (or does not list this package) is refused before tens of megabytes are streamed.
     let sums = fetch_sums(&client, &payload).await?;
+    let expected_sha256 = expected_digest(&name, &sums)?;
     let mut response = client
         .get(&url)
         .send()
@@ -983,42 +1025,78 @@ pub(crate) async fn fetch_package(
              {RELEASES_PAGE}"
         ));
     }
-    let mut bytes: Vec<u8> = Vec::with_capacity(total.unwrap_or(0).min(MAX_ASSET_BYTES) as usize);
+    tokio::fs::create_dir_all(&into)
+        .await
+        .map_err(|err| format!("could not use {} ({err})", into.display()))?;
+    let path = into.join(&name);
+    let part = part_path(&into, &name);
+    let mut file = tokio::fs::File::create(&part)
+        .await
+        .map_err(|err| format!("could not write {} ({err})", path.display()))?;
+
+    use sha2::{Digest, Sha256};
+    use tokio::io::AsyncWriteExt;
+    let mut hasher = Sha256::new();
+    let mut received: u64 = 0;
     let mut announced: Option<u64> = None;
-    loop {
-        let chunk = response
-            .chunk()
+    let stream_result: Result<(), String> = async {
+        loop {
+            let chunk = response
+                .chunk()
+                .await
+                .map_err(|err| format!("the download of {name} stopped part-way ({err})"))?;
+            let Some(chunk) = chunk else { break };
+            received = received.saturating_add(chunk.len() as u64);
+            if received > MAX_ASSET_BYTES {
+                return Err(format!(
+                    "{name} passed this app's limit of {MAX_ASSET_BYTES} bytes while it was being read, \
+                     so nothing was written; take it from {RELEASES_PAGE}"
+                ));
+            }
+            hasher.update(&chunk);
+            file.write_all(&chunk)
+                .await
+                .map_err(|err| format!("could not write {} ({err})", path.display()))?;
+            if announce(received, total, announced) {
+                announced = Some(received);
+                on_progress(UpdateProgress { received, total });
+            }
+        }
+        file.flush()
             .await
-            .map_err(|err| format!("the download of {name} stopped part-way ({err})"))?;
-        let Some(chunk) = chunk else { break };
-        bytes.extend_from_slice(&chunk);
-        let received = bytes.len() as u64;
-        if received > MAX_ASSET_BYTES {
-            return Err(format!(
-                "{name} passed this app's limit of {MAX_ASSET_BYTES} bytes while it was being read, \
-                 so nothing was written; take it from {RELEASES_PAGE}"
-            ));
-        }
-        if announce(received, total, announced) {
-            announced = Some(received);
-            on_progress(UpdateProgress { received, total });
-        }
+            .map_err(|err| format!("could not write {} ({err})", path.display()))?;
+        Ok(())
     }
-    // The end is always announced, so a bar cannot stop at 97% — and only when there is an end to
-    // announce: an empty body is refused by `write_asset` below, with its own sentence.
-    let arrived = bytes.len() as u64;
-    if arrived > 0 && announced != Some(arrived) {
-        on_progress(UpdateProgress {
-            received: arrived,
-            total,
-        });
+    .await;
+    drop(file);
+    if let Err(err) = stream_result {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(err);
     }
-    // Before anything is written: a package that is not the one the release lists never reaches the downloads folder.
-    let sha256 = check_against_sums(&name, &bytes, &sums)?;
-    let path = write_asset(&into, &name, &bytes).await?;
+    if received == 0 {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(format!("{name} came back empty, so nothing was written"));
+    }
+    // The end is always announced, so a bar cannot stop at 97%.
+    if announced != Some(received) {
+        on_progress(UpdateProgress { received, total });
+    }
+    // Only rename over the destination once the streamed digest matches SHA256SUMS.
+    let actual_sha256 = format_sha256(&hasher.finalize());
+    let sha256 = match verify_digest_against_expected(&name, &actual_sha256, &expected_sha256) {
+        Ok(digest) => digest,
+        Err(err) => {
+            let _ = tokio::fs::remove_file(&part).await;
+            return Err(err);
+        }
+    };
+    if let Err(err) = tokio::fs::rename(&part, &path).await {
+        let _ = tokio::fs::remove_file(&part).await;
+        return Err(format!("could not write {} ({err})", path.display()));
+    }
     Ok(UpdateDownload {
         path: path.display().to_string(),
-        bytes: bytes.len() as u64,
+        bytes: received,
         package,
         tag: update.tag.clone().unwrap_or_default(),
         next_step: format!(
@@ -1699,5 +1777,18 @@ mod tests {
             .expect_err("not listed");
         assert!(unlisted.contains("does not list"), "{unlisted}");
         assert!(unlisted.contains("nothing was written"), "{unlisted}");
+    }
+
+    #[test]
+    fn a_distro_package_refusal_names_the_package_manager_not_git_pull() {
+        let distro = refusal_for_unmanaged_package(Package::Distro).expect("distro refused");
+        assert!(distro.contains("package manager"), "{distro}");
+        assert!(!distro.contains("git pull"), "{distro}");
+
+        let source = refusal_for_unmanaged_package(Package::Source).expect("source refused");
+        assert!(source.contains("git pull"), "{source}");
+
+        assert!(refusal_for_unmanaged_package(Package::Deb).is_none());
+        assert!(refusal_for_unmanaged_package(Package::AppImage).is_none());
     }
 }

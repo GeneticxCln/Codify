@@ -96,9 +96,13 @@ export const StaleAuthBanner: React.FC<{
   // leave a timer firing into an unmounted tree; the reset itself is the
   // same pattern AppearancePane's copy notice uses.
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
   useEffect(() => {
+    mountedRef.current = true;
     return () => {
+      mountedRef.current = false;
       if (timer.current) clearTimeout(timer.current);
+      timer.current = null;
     };
   }, []);
 
@@ -114,9 +118,14 @@ export const StaleAuthBanner: React.FC<{
       writeText: writeText ?? clipboard,
       document: typeof document !== "undefined" ? document : undefined,
     });
+    // The banner may have been dismissed while the clipboard answered.
+    if (!mountedRef.current) return;
     setCopied(ok);
     if (timer.current) clearTimeout(timer.current);
-    timer.current = setTimeout(() => setCopied(false), 2000);
+    timer.current = setTimeout(() => {
+      timer.current = null;
+      if (mountedRef.current) setCopied(false);
+    }, 2000);
   };
 
   return (

@@ -245,6 +245,21 @@ def _skip_string(text: str, i: int) -> int:
     return len(text)
 
 
+def _string_closed(text: str, i: int, end: int) -> bool:
+    """Whether the string starting at `i` was closed by an unescaped quote at `end - 1`."""
+    if text.startswith('"""', i):
+        return end <= len(text) and end - i >= 6 and text[end - 3:end] == '"""' and bool(_VALUE_END.match(text, end))
+    ch = text[i]
+    if end > len(text) or end - 1 <= i or text[end - 1] != ch:
+        return False
+    backslashes = 0
+    k = end - 2
+    while k > i and text[k] == "\\":
+        backslashes += 1
+        k -= 1
+    return backslashes % 2 == 0
+
+
 def _balanced_end(text: str, start: int) -> int | None:
     """The index just past the bracket that closes the one at `start`, or None if it never closes."""
     depth = 0
@@ -413,12 +428,14 @@ def _close_truncated(text: str) -> Any:
     stack: list[tuple[str, int]] = []  # (closer, index just after the opener)
     last_comma: dict[int, int] = {}    # depth -> index of the latest comma directly inside that depth
     complete_at = -1                   # the last index at which every open container held only whole values
+    unclosed_string = False
     i = 0
     while i < len(text):
         ch = text[i]
         if ch in "\"'":
             end = _skip_string(text, i)
-            if end > len(text) or text[end - 1] != ch or end - 1 == i:
+            if not _string_closed(text, i, end):
+                unclosed_string = True
                 break  # the string never closed: the reply ends inside it
             i = end
             continue
@@ -440,7 +457,7 @@ def _close_truncated(text: str) -> Any:
     # A reply that ends on a *closed* container and merely lacks the outer closers is complete: nothing
     # was half-written. Anything else at the tail — a string, a number, `tru` — may be unfinished.
     closers_all = "".join(closer for closer, _ in reversed(stack))
-    if text.rstrip()[-1:] in ("}", "]"):
+    if not unclosed_string and text.rstrip()[-1:] in ("}", "]"):
         try:
             return _load_repaired(text + closers_all)
         except ValueError:
@@ -500,6 +517,9 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
     decoder = json.JSONDecoder()
     found: list[Any] = []
     first_problem: str | None = None
+    repaired_problem: str | None = None
+    unclosed_candidates: list[int] = []
+    max_unclosed_skips = 32
     i = 0
     while i < len(stripped):
         ch = stripped[i]
@@ -511,29 +531,42 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
             found.append(value)
             i = end
             continue
-        except (ValueError, RecursionError) as exc:
+        except RecursionError as exc:
+            problem = str(exc)
+            if first_problem is None:
+                first_problem = f"invalid JSON: {problem}"
+            break
+        except ValueError as exc:
             problem = str(exc)
             if first_problem is None:
                 first_problem = f"invalid JSON: {problem}"
         end_at = _balanced_end(stripped, i)
         if end_at is None:
-            # It never closes: the reply was cut off, and this is the last thing in it.
-            if repair_truncation:
-                try:
-                    found.append(_close_truncated(stripped[i:]))
-                except (ValueError, RecursionError):
-                    pass
-            else:
-                # What the re-ask quotes, so it says where the document breaks *after* the repairs, and
-                # calls a reply cut off only when the parser really ran out of text: a string missing its
-                # closing quote also "never closes", and is a syntax error in a complete reply.
-                repaired = _repaired_problem(stripped[i:])
-                where, ran_out = repaired if repaired is not None else (problem, True)
-                if ran_out:
-                    first_problem = f"invalid JSON: the reply ends before the document does ({where})"
+            repaired = _repaired_problem(stripped[i:])
+            where, ran_out = repaired if repaired is not None else (problem, True)
+            if ran_out:
+                # It never closes and is syntactically valid up to EOF: genuinely
+                # truncated JSON starting here. Do not advance into its interior
+                # (which could return an inner sub-object of a cut-off document).
+                if repair_truncation:
+                    try:
+                        found.append(_close_truncated(stripped[i:]))
+                    except (ValueError, RecursionError):
+                        pass
                 else:
-                    first_problem = f"invalid JSON: {where}"
-            break
+                    repaired_problem = f"invalid JSON: the reply ends before the document does ({where})"
+                break
+            # Syntax broke well before EOF: either a stray unmatched `{`/`[` in
+            # leading prose followed by real JSON later, or a syntax error (e.g.
+            # unclosed quote) in a complete reply. Keep the first diagnosis and
+            # keep scanning for a valid JSON document later in the reply.
+            if repaired_problem is None:
+                repaired_problem = f"invalid JSON: {where}"
+            unclosed_candidates.append(i)
+            if len(unclosed_candidates) >= max_unclosed_skips:
+                break
+            i += 1
+            continue
         try:
             found.append(_load_repaired(stripped[i:end_at]))
         except (ValueError, RecursionError):
@@ -542,9 +575,17 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
         # *inner* objects returned in its place.
         i = end_at
 
+    if not found and repair_truncation and unclosed_candidates:
+        for idx in reversed(unclosed_candidates):
+            try:
+                found.append(_close_truncated(stripped[idx:]))
+                break
+            except (ValueError, RecursionError):
+                continue
+
     containers = [v for v in found if isinstance(v, (dict, list))]
     if not containers:
-        raise ValueError(first_problem or "there is no JSON in the reply")
+        raise ValueError(repaired_problem or first_problem or "there is no JSON in the reply")
     wanted = set(expect)
     dicts = [v for v in containers if isinstance(v, dict)]
     with_keys = [d for d in dicts if wanted and wanted & d.keys()]

@@ -11,13 +11,15 @@ has more than one plausible recipe.
 | If the task is... | Load |
 |---|---|
 | vague, high stakes or the ask itself is wrong | `sharpen-the-ask`, then `plan-loop` |
-| more than one file or step | `plan-loop` |
+| more than one file or step | `plan-loop` or `ship-a-change` |
 | a bug with a cheap local check | `test-first`, then `prove` |
+| a quick check that an edit still holds | `verify-change` |
 | a risky change outside its own diff | `blast-radius` |
 | the same failure after two fixes | `unstick` |
 | a long run that is losing facts | `resume-long-run`, with `decision-log` |
 | a review before a person merges | `review-loop`, or `second-opinion` when a separate model is available |
-| a wide but shallow audit | `wide-audit` |
+| review comments on a pull request | `review-replies` |
+| a wide but shallow audit | `wide-audit` or `health-review` |
 | a new or templated screen | `design-review` |
 | a change to prepare for a person to push | `prepare-a-pull-request`, then `watch-ci` |
 | a change that should be merge-ready | `ship-with-a-person` or `merge-ready` |

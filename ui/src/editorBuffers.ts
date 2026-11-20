@@ -96,6 +96,11 @@ export interface BuffersSnapshot {
   readonly byTab: ReadonlyMap<string, EditorBuffer>;
 }
 
+export interface BadgeSnapshot {
+  readonly unsavedIds: readonly string[];
+  readonly assistantEditedIds: readonly string[];
+}
+
 export type EditOutcome =
   | { ok: true; replaced: number; fromLine: number; toLine: number }
   | { ok: false; reason: string };
@@ -135,6 +140,16 @@ const codeOf = (error: unknown): string | undefined => (error as { code?: string
 
 const byteLength = (text: string): number => new TextEncoder().encode(text).length;
 
+/** Canonical relative POSIX path for comparing workspace file paths (`./src//a.py` -> `src/a.py`). */
+export function normalizeRelPath(path: string): string {
+  const clean: string[] = [];
+  for (const part of path.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    clean.push(part);
+  }
+  return clean.join("/");
+}
+
 /** Lines as a person counts them: a final newline ends the last line instead of starting another, and an empty file has none. */
 function realLines(state: EditorState): number {
   const { doc } = state;
@@ -151,6 +166,8 @@ export interface EditorBuffers {
   close(tabId: string): void;
   subscribe(listener: () => void): () => void;
   getSnapshot(): BuffersSnapshot;
+  subscribeBadges(listener: () => void): () => void;
+  getBadgeSnapshot(): BadgeSnapshot;
   unsavedIds(snapshot: BuffersSnapshot): string[];
   assistantEditedIds(snapshot: BuffersSnapshot): string[];
   lineCount(tabId: string): number;
@@ -172,11 +189,30 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
   const loading = new Map<string, Promise<void>>();
   const saves = new Map<string, Promise<SaveOutcome>>();
   const listeners = new Set<() => void>();
+  const badgeListeners = new Set<() => void>();
   let snapshot: BuffersSnapshot = { version: 0, byTab: new Map() };
+  let badgeSnapshot: BadgeSnapshot = { unsavedIds: [], assistantEditedIds: [] };
+
+  const sameList = (a: readonly string[], b: readonly string[]): boolean =>
+    a.length === b.length && a.every((v, i) => v === b[i]);
 
   const publish = (): void => {
     snapshot = { version: snapshot.version + 1, byTab: new Map(buffers) };
     for (const listener of [...listeners]) listener();
+    const unsaved: string[] = [];
+    const aiEdited: string[] = [];
+    for (const b of buffers.values()) {
+      if (b.status !== "ready") continue;
+      if (b.dirty) unsaved.push(b.tabId);
+      if (b.aiChanged) aiEdited.push(b.tabId);
+    }
+    if (
+      !sameList(badgeSnapshot.unsavedIds, unsaved) ||
+      !sameList(badgeSnapshot.assistantEditedIds, aiEdited)
+    ) {
+      badgeSnapshot = { unsavedIds: unsaved, assistantEditedIds: aiEdited };
+      for (const listener of [...badgeListeners]) listener();
+    }
   };
 
   const put = (tabId: string, change: Partial<EditorBuffer>): EditorBuffer | undefined => {
@@ -196,7 +232,7 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
     if (!entry) return;
     try {
       const file = await io.read(entry.workspaceId, entry.path);
-      if (buffers.get(tabId) !== entry && !buffers.has(tabId)) return;
+      if (buffers.get(tabId) !== entry) return;
       const normalized = normalizeForEditing(file.content);
       if ("error" in normalized) {
         put(tabId, { status: "error", error: normalized.error, state: EMPTY, diskText: "", dirty: false });
@@ -218,6 +254,7 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
         });
       }
     } catch (error) {
+      if (buffers.get(tabId) !== entry) return;
       put(tabId, { status: "error", error: plain(error), state: EMPTY, diskText: "", dirty: false });
     }
     publish();
@@ -254,8 +291,9 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
     get: (tabId) => buffers.get(tabId),
 
     find(workspaceId, path) {
+      const target = normalizeRelPath(path);
       for (const buffer of buffers.values()) {
-        if (buffer.workspaceId === workspaceId && buffer.path === path) return buffer;
+        if (buffer.workspaceId === workspaceId && normalizeRelPath(buffer.path) === target) return buffer;
       }
       return undefined;
     },
@@ -274,6 +312,13 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
     },
 
     getSnapshot: () => snapshot,
+
+    subscribeBadges(listener) {
+      badgeListeners.add(listener);
+      return () => void badgeListeners.delete(listener);
+    },
+
+    getBadgeSnapshot: () => badgeSnapshot,
 
     unsavedIds: (snap) => [...snap.byTab.values()].filter((b) => b.status === "ready" && b.dirty).map((b) => b.tabId),
 
@@ -296,8 +341,10 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
       if (!buffer || !last) return;
       let ranges: readonly AiRange[] = buffer.aiRanges;
       let aiChanged = buffer.aiChanged;
+      let anyDocChanged = false;
       for (const tr of transactions) {
         if (tr.docChanged) {
+          anyDocChanged = true;
           // A range follows the text it covers. Its ends lean *inward*, so typing at either edge lands outside it and
           // typing inside it grows it. A range that a change covers whole (the person selected it and typed) is
           // dropped: mapping alone would keep it, stretched over their text, and mark what they wrote as the assistant's.
@@ -314,7 +361,7 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
           aiChanged = true;
         }
       }
-      const dirty = isDirty(last.state, buffer.diskText);
+      const dirty = anyDocChanged ? isDirty(last.state, buffer.diskText) : buffer.dirty;
       // Back to what is on disk: nothing is unsaved, so nothing is "changed by the assistant" either.
       if (!dirty && (ranges.length > 0 || aiChanged)) {
         ranges = [];
@@ -340,6 +387,12 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
       }
       // What the model types has LF line breaks; the buffer is LF whatever the file is on disk.
       const find = oldText.replace(/\r\n/g, "\n");
+      if (find.length === 0) {
+        return {
+          ok: false,
+          reason: "old_text must not be empty. Read the file with read_editor and copy the exact text to replace.",
+        };
+      }
       const put_ = newText.replace(/\r\n/g, "\n");
       const text = buffer.state.doc.toString();
       const at: number[] = [];
@@ -368,8 +421,12 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
       });
       const spec: TransactionSpec = { changes, annotations: aiEdit.of(ranges) };
       const tr = buffer.state.update(spec);
-      // Counted in bytes, as the engine counts. Only a document big enough to be over by three bytes a character is worth encoding.
-      if (tr.newDoc.length * 3 > MAX_EDIT_BYTES && byteLength(tr.newDoc.toString()) > MAX_EDIT_BYTES) {
+      // Counted in serialized on-disk bytes (including CRLF and BOM), as the engine counts on Save.
+      const maxFactor = buffer.eol === "crlf" ? 4 : 3;
+      if (
+        tr.newDoc.length * maxFactor + (buffer.bom ? 3 : 0) > MAX_EDIT_BYTES &&
+        byteLength(serializeForDisk(tr.newDoc.toString(), buffer)) > MAX_EDIT_BYTES
+      ) {
         return {
           ok: false,
           reason: `That edit would make ${buffer.path} too large: the editor holds files up to ${MAX_EDIT_BYTES.toLocaleString("en-US")} bytes.`,
@@ -420,13 +477,14 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
           });
           const now = buffers.get(tabId);
           if (!now) return { ok: true };
+          const stillDirty = isDirty(now.state, text);
           put(tabId, {
             diskText: text,
             version: saved.version,
             conflict: null,
-            aiRanges: [],
-            aiChanged: false,
-            dirty: isDirty(now.state, text),
+            // Preserve assistant attribution if an AI edit arrived while the save was in flight.
+            ...(stillDirty ? {} : { aiRanges: [], aiChanged: false }),
+            dirty: stillDirty,
           });
           return { ok: true };
         } catch (error) {
@@ -482,16 +540,39 @@ export function createEditorBuffers(io: FileIo): EditorBuffers {
     },
 
     async noteDiskChange(workspaceId, paths) {
+      const wanted = new Set(paths.map(normalizeRelPath));
       const touched = [...buffers.values()].filter(
-        (b) => b.workspaceId === workspaceId && b.status === "ready" && paths.includes(b.path),
+        (b) => b.workspaceId === workspaceId && b.status === "ready" && wanted.has(normalizeRelPath(b.path)),
       );
       for (const buffer of touched) {
         try {
           const file = await io.read(buffer.workspaceId, buffer.path);
           const now = buffers.get(buffer.tabId);
           if (!now || file.version === now.version) continue;
-          if (!now.dirty) await store.reload(buffer.tabId);
-          else {
+          if (!now.dirty) {
+            // Apply the already-fetched file synchronously without a second async read,
+            // preventing a TOCTOU race that could discard edits made while reloading.
+            const normalized = normalizeForEditing(file.content);
+            if ("error" in normalized) {
+              put(buffer.tabId, { conflict: { kind: "changed", currentVersion: file.version } });
+              publish();
+              continue;
+            }
+            put(buffer.tabId, {
+              state: EditorState.create({ doc: normalized.text }),
+              diskText: normalized.text,
+              version: file.version,
+              eol: normalized.eol,
+              bom: normalized.bom,
+              dirty: false,
+              aiRanges: [],
+              aiChanged: false,
+              conflict: null,
+              saveError: undefined,
+              epoch: now.epoch + 1,
+            });
+            publish();
+          } else {
             put(buffer.tabId, { conflict: { kind: "changed", currentVersion: file.version } });
             publish();
           }

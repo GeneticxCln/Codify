@@ -92,26 +92,53 @@ export function underShell(): boolean {
  * `7431oops` is not a port, and accepting its prefix would probe a port the
  * person did not choose.
  */
+function safeStorage(): Storage | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage : null;
+  } catch {
+    return null;
+  }
+}
+
 function storedPort(): number {
-  const text = (localStorage.getItem("CODIFY_PORT") || "").trim();
+  const storage = safeStorage();
+  if (!storage) return 7430;
+  let text = "";
+  try {
+    text = (storage.getItem("CODIFY_PORT") || "").trim();
+  } catch {
+    return 7430;
+  }
   const port = Number(text);
   return Number.isInteger(port) && port >= 1 && port <= 65535 ? port : 7430;
 }
 
 export function storedEngineInfo(shell: boolean = underShell()): EngineInfo {
   const port = storedPort();
-  if (shell) {
-    localStorage.removeItem("CODIFY_TOKEN");
+  const storage = safeStorage();
+  if (!storage) return { port, token: "" };
+  try {
+    if (shell) {
+      storage.removeItem("CODIFY_TOKEN");
+      return { port, token: "" };
+    }
+    return { port, token: storage.getItem("CODIFY_TOKEN") || "" };
+  } catch {
     return { port, token: "" };
   }
-  return { port, token: localStorage.getItem("CODIFY_TOKEN") || "" };
 }
 
 /** Remember a connection: the port always, the token only where nothing else can supply it. */
 export function rememberEngineInfo(info: EngineInfo, shell: boolean = underShell()): void {
-  localStorage.setItem("CODIFY_PORT", info.port.toString());
-  if (shell) localStorage.removeItem("CODIFY_TOKEN");
-  else localStorage.setItem("CODIFY_TOKEN", info.token);
+  const storage = safeStorage();
+  if (!storage) return;
+  try {
+    storage.setItem("CODIFY_PORT", info.port.toString());
+    if (shell) storage.removeItem("CODIFY_TOKEN");
+    else storage.setItem("CODIFY_TOKEN", info.token);
+  } catch {
+    // Storage may be disabled or full; keep the in-memory connection usable.
+  }
 }
 
 let currentEngine: EngineInfo = storedEngineInfo();
@@ -289,7 +316,7 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
     }
     case "codify_update_agent_config": {
       const { role, patch } = args || {};
-      const res = await fetch(`${base}/settings/agents/${role}`, {
+      const res = await fetch(`${base}/settings/agents/${encodeURIComponent(String(role ?? ""))}`, {
         method: "PUT",
         headers,
         body: JSON.stringify(patch),
@@ -310,10 +337,13 @@ async function fallbackHttpInvoke<T>(cmd: string, args?: Record<string, any>): P
     }
     case "codify_test_agent_connection": {
       const { role } = args || {};
-      const res = await fetch(`${base}/settings/agents/${role}/test-connection`, {
-        method: "POST",
-        headers,
-      });
+      const res = await fetch(
+        `${base}/settings/agents/${encodeURIComponent(String(role ?? ""))}/test-connection`,
+        {
+          method: "POST",
+          headers,
+        },
+      );
       if (!res.ok) {
         const err = await res.json().catch(() => ({}));
         return { ok: false, message: err.message || `HTTP ${res.status}` } as any;
@@ -950,7 +980,7 @@ export async function listWorkspaces(): Promise<Workspace[]> {
  */
 export async function deleteGoal(goal_id: string): Promise<DeletedGoal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
@@ -971,7 +1001,7 @@ export async function deleteWorkspace(
 ): Promise<DeletedWorkspace> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const qs = opts.deleteGoals ? "?delete_goals=true" : "";
-  const res = await fetch(`${base}/workspaces/${workspace_id}${qs}`, {
+  const res = await fetch(`${base}/workspaces/${encodeURIComponent(workspace_id)}${qs}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
@@ -1011,7 +1041,7 @@ export async function setWorkspaceDesignContract(
   path: string,
 ): Promise<Workspace> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/workspaces/${workspace_id}/design-contract`, {
+  const res = await fetch(`${base}/workspaces/${encodeURIComponent(workspace_id)}/design-contract`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -1243,7 +1273,7 @@ export async function fetchConversationTurns(
   conversationId: string,
 ): Promise<ConversationTurn[]> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/conversations/${conversationId}/turns`, {
+  const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}/turns`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw await engineError(res, "Failed to load the thread's turns");
@@ -1256,7 +1286,7 @@ export async function renameConversation(
   title: string,
 ): Promise<Conversation> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/conversations/${conversationId}`, {
+  const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}`, {
     method: "PATCH",
     headers: {
       "Content-Type": "application/json",
@@ -1273,7 +1303,7 @@ export async function getCompactionStatus(
   conversationId: string,
 ): Promise<CompactionStatus> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/conversations/${conversationId}/compaction`, {
+  const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}/compaction`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw await engineError(res, "Failed to read this session");
@@ -1285,7 +1315,7 @@ export async function compactConversation(
   conversationId: string,
 ): Promise<CompactionStatus> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/conversations/${conversationId}/compaction`, {
+  const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}/compaction`, {
     method: "POST",
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
@@ -1298,7 +1328,7 @@ export async function undoCompaction(
   conversationId: string,
 ): Promise<CompactionStatus> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/conversations/${conversationId}/compaction`, {
+  const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}/compaction`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
@@ -1314,7 +1344,7 @@ export async function archiveConversation(
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const params = new URLSearchParams({ archived: String(archived) });
   const res = await fetch(
-    `${base}/conversations/${conversationId}/archive?${params}`,
+    `${base}/conversations/${encodeURIComponent(conversationId)}/archive?${params}`,
     {
       method: "POST",
       headers: { Authorization: `Bearer ${currentEngine.token}` },
@@ -1334,7 +1364,7 @@ export async function deleteConversation(
   conversationId: string,
 ): Promise<{ deleted: boolean }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/conversations/${conversationId}`, {
+  const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
@@ -1355,7 +1385,7 @@ export async function attachGoalToConversation(
   conversationId: string,
 ): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/conversation`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/conversation`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -1704,7 +1734,7 @@ export async function createTurn(
   if (provider) payload.provider = provider;
   if (model) payload.model = model;
   if (trace) payload.trace = true;
-  const res = await fetch(`${base}/conversations/${conversationId}/turns`, {
+  const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}/turns`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1733,7 +1763,7 @@ export async function createTurn(
  */
 export async function fetchGoalTrace(goal_id: string): Promise<TraceSummary> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/trace`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/trace`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw await engineError(res, "Failed to read the recording");
@@ -1747,7 +1777,7 @@ export async function fetchGoalTrace(goal_id: string): Promise<TraceSummary> {
  */
 export async function deleteGoalTrace(goal_id: string): Promise<{ deleted: number }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/trace`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/trace`, {
     method: "DELETE",
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
@@ -1763,7 +1793,7 @@ export async function deleteGoalTrace(goal_id: string): Promise<{ deleted: numbe
  */
 export async function setGoalTrace(goal_id: string, enabled: boolean): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/trace`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/trace`, {
     method: "PUT",
     headers: {
       "Content-Type": "application/json",
@@ -1877,7 +1907,7 @@ export function recordSuggestionAccepted(id: string, goalId: string): Promise<Su
 
 export async function getGoal(goal_id: string): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1905,7 +1935,7 @@ export interface GoalUsage {
 
 export async function getGoalUsage(goal_id: string): Promise<GoalUsage> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/usage`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/usage`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1915,7 +1945,7 @@ export async function getGoalUsage(goal_id: string): Promise<GoalUsage> {
 /** The goal's full audit trail — plan edits, fallbacks, failures, outcomes — as one document. */
 export async function getGoalAudit(goal_id: string): Promise<Record<string, unknown>> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/audit`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/audit`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -1923,15 +1953,15 @@ export async function getGoalAudit(goal_id: string): Promise<Record<string, unkn
 }
 
 export async function startGoal(goal_id: string, expected_version: number): Promise<Goal> {
-  return requestGoalAction(`/goals/${goal_id}/start`, { expected_version });
+  return requestGoalAction(`/goals/${encodeURIComponent(goal_id)}/start`, { expected_version });
 }
 
 export async function pauseGoal(goal_id: string, expected_version: number): Promise<Goal> {
-  return requestGoalAction(`/goals/${goal_id}/pause`, { expected_version });
+  return requestGoalAction(`/goals/${encodeURIComponent(goal_id)}/pause`, { expected_version });
 }
 
 export async function cancelGoal(goal_id: string, expected_version: number): Promise<Goal> {
-  return requestGoalAction(`/goals/${goal_id}/cancel`, { expected_version });
+  return requestGoalAction(`/goals/${encodeURIComponent(goal_id)}/cancel`, { expected_version });
 }
 
 export interface HealthStatus {
@@ -2066,19 +2096,41 @@ export async function downloadUpdate(
  * which is exactly what the pill communicates. (The engine returns 401 for
  * missing tokens on /health; any HTTP response means "alive".)
  */
+const HEALTH_CHECK_TIMEOUT_MS = 5000;
+
 export async function checkEngineHealth(): Promise<HealthStatus> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const timer = controller ? setTimeout(() => controller.abort(), HEALTH_CHECK_TIMEOUT_MS) : null;
+  if (timer && typeof (timer as unknown as { unref?: () => void }).unref === "function") {
+    (timer as unknown as { unref: () => void }).unref();
+  }
   try {
     const res = await fetch(`${base}/health`, {
       headers: { Authorization: `Bearer ${currentEngine.token}` },
+      ...(controller ? { signal: controller.signal } : {}),
     });
     if (res.status === 401) return { ok: true, authenticated: false };
     if (!res.ok) return { ok: false, authenticated: false };
     // Awaited here so a body that is not JSON (another local server on this port) is caught below as "no
     // engine", instead of rejecting out of the probe and stopping the poll for good.
-    return await res.json();
+    const data: unknown = await res.json();
+    if (
+      typeof data === "object" &&
+      data !== null &&
+      typeof (data as { ok?: unknown }).ok === "boolean" &&
+      typeof (data as { authenticated?: unknown }).authenticated === "boolean"
+    ) {
+      return {
+        ok: (data as HealthStatus).ok,
+        authenticated: (data as HealthStatus).authenticated,
+      };
+    }
+    return { ok: false, authenticated: false };
   } catch {
     return { ok: false, authenticated: false };
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 
@@ -2092,7 +2144,7 @@ export async function applyGoal(
   expected_version: number,
 ): Promise<{ applied: boolean; goal_id: string }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/apply`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/apply`, {
     method: "POST",
     headers: { Authorization: `Bearer ${currentEngine.token}`, "Content-Type": "application/json" },
     body: JSON.stringify({ expected_version }),
@@ -2112,14 +2164,17 @@ export async function patchStep(
   patch: { title?: string; description?: string; suggested_paths?: string[] }
 ): Promise<PlanStep> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/steps/${step_id}`, {
-    method: "PATCH",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${currentEngine.token}`,
+  const res = await fetch(
+    `${base}/goals/${encodeURIComponent(goal_id)}/steps/${encodeURIComponent(step_id)}`,
+    {
+      method: "PATCH",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${currentEngine.token}`,
+      },
+      body: JSON.stringify({ expected_version, ...patch }),
     },
-    body: JSON.stringify({ expected_version, ...patch }),
-  });
+  );
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.message || `HTTP ${res.status}`);
@@ -2129,7 +2184,7 @@ export async function patchStep(
 
 export async function enableExecution(goal_id: string, expected_version: number): Promise<Goal> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/enable-execution`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/enable-execution`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -2174,7 +2229,7 @@ export async function listGoals(params: {
  * to, so a restored card and a live card are one format. */
 export async function getGoalEvents(goal_id: string): Promise<Event[]> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/events?after=0`, {
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/events?after=0`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
@@ -2187,7 +2242,9 @@ export async function retryStep(
   expected_version: number
 ): Promise<PlanStep> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/goals/${goal_id}/steps/${step_id}/retry`, {
+  const res = await fetch(
+    `${base}/goals/${encodeURIComponent(goal_id)}/steps/${encodeURIComponent(step_id)}/retry`,
+    {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

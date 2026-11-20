@@ -21,6 +21,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass, field
 from typing import Any
 
+from engine.models import BUILTIN_PROVIDERS
+
 # A failed discovery proves nothing, so it never makes a role repairable. Treating
 # "the provider did not answer" as "your model is gone" would repoint roles over a
 # temporary outage — which is exactly the false statement with the shape of the
@@ -257,6 +259,29 @@ def _usable_candidates(catalog: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [m for m in catalog or [] if m.get("supports_chat") is not False]
 
 
+def _candidate_callable(m: dict[str, Any], keys: dict[str, dict[str, Any]]) -> bool:
+    """Whether assigning another broken role to catalog entry `m` yields a callable target.
+
+    Repair writes only `(provider, model_name, protocol)` onto the repaired role;
+    it never copies another role's private `api_key_ref` or `base_url`. A
+    candidate is therefore assignable only when its provider has a shared/builtin
+    endpoint AND either needs no key or has a provider-level credential stored.
+    """
+    provider = str(m.get("provider") or "")
+    if not provider:
+        return False
+    builtin = BUILTIN_PROVIDERS.get(provider)
+    has_shared_url = bool(
+        (builtin and builtin.get("base_url"))
+        or (isinstance(m.get("base_url"), str) and m["base_url"].strip())
+    )
+    if not has_shared_url:
+        return False
+    if target_needs_key(provider, m.get("protocol"), keys):
+        return bool((keys.get(provider) or {}).get("has_key"))
+    return True
+
+
 def choose_target(
     configs: list[dict[str, Any]],
     working_roles: set[str],
@@ -273,7 +298,7 @@ def choose_target(
        fail for a reason the user has not fixed yet;
     3. the first discovered model at all.
     """
-    candidates = _usable_candidates(catalog)
+    candidates = [m for m in _usable_candidates(catalog) if _candidate_callable(m, keys)]
     if not candidates:
         return None, (
             "no model was discovered, so there is nothing to point these roles at: add a provider "

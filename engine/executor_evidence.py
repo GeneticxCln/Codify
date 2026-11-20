@@ -64,6 +64,9 @@ class _Evidence(_ExecutorCore):
         From the event log rather than memory: a goal resumed in another process
         must still hand its fixer the same material its planner planned from.
         """
+        if hasattr(self.goals, "latest_event"):
+            ev = self.goals.latest_event(goal_id, "library_evidence")
+            return (ev.payload or {}) if ev is not None else {}
         latest: dict[str, Any] = {}
         for ev in self.goals.events_after(goal_id, 0):
             if ev.type == "library_evidence":
@@ -92,7 +95,7 @@ class _Evidence(_ExecutorCore):
         librarian after something the user never requested. Empty (the engine's
         own path, with no conductor) leaves the prompt byte-identical to before.
         """
-        lib = LibraryService(ws.root_path)
+        lib = LibraryService(ws.root_path, sandbox=getattr(self, "sandbox", None))
         tree = lib.tree()
         listed: set[str] = set(tree["files"])
         opened: set[str] = set()

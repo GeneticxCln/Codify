@@ -126,10 +126,70 @@ fn parents() -> HashMap<u32, u32> {
     map
 }
 
+/// Fast-path descendant walk via `/proc/<pid>/task/<tid>/children`.
+///
+/// Avoids scanning every numeric entry in `/proc` every 500ms per open machine. Returns `None`
+/// only when `/proc/<pid>/task/<tid>/children` is unavailable on the running kernel, in which
+/// case [`tree`] falls back to [`parents`].
+fn tree_from_children(root: u32) -> Option<Vec<u32>> {
+    let Ok(root_stat) = std::fs::read_to_string(format!("/proc/{root}/stat")) else {
+        return Some(Vec::new());
+    };
+    if parse_state(&root_stat) == Some('Z') {
+        return Some(Vec::new());
+    }
+    let mut out = vec![root];
+    let mut seen: HashSet<u32> = HashSet::from([root]);
+    let mut at = 0;
+    let mut saw_children_file = false;
+    while at < out.len() {
+        let pid = out[at];
+        at += 1;
+        let Ok(tasks) = std::fs::read_dir(format!("/proc/{pid}/task")) else {
+            if pid == root {
+                return None;
+            }
+            continue;
+        };
+        for task in tasks.flatten() {
+            let children_path = task.path().join("children");
+            let Ok(children_text) = std::fs::read_to_string(&children_path) else {
+                if !saw_children_file && !children_path.exists() {
+                    return None;
+                }
+                continue;
+            };
+            saw_children_file = true;
+            for token in children_text.split_whitespace() {
+                let Ok(child_pid) = token.parse::<u32>() else {
+                    continue;
+                };
+                if seen.contains(&child_pid) {
+                    continue;
+                }
+                let Ok(stat) = std::fs::read_to_string(format!("/proc/{child_pid}/stat")) else {
+                    continue;
+                };
+                if parse_state(&stat) == Some('Z') {
+                    continue;
+                }
+                if seen.insert(child_pid) {
+                    out.push(child_pid);
+                }
+            }
+        }
+    }
+    if saw_children_file {
+        Some(out)
+    } else {
+        None
+    }
+}
+
 /// `root` and every live process that descends from it. The jail's processes reparent to the jail's own init
 /// when their parent ends, and that init is a descendant of `root`, so nothing in a machine is outside this.
 pub(crate) fn tree(root: u32) -> Vec<u32> {
-    tree_from(&parents(), root)
+    tree_from_children(root).unwrap_or_else(|| tree_from(&parents(), root))
 }
 
 /// The walk behind [`tree`], over a map of pid to parent, so a test can hand it any map it likes. `root`
@@ -170,6 +230,17 @@ pub(crate) fn parse_pss(rollup: &str) -> Option<u64> {
     kib.checked_mul(1024)
 }
 
+/// System page size in bytes, queried via `sysconf(_SC_PAGESIZE)` with a 4096-byte fallback.
+pub(crate) fn page_size_bytes() -> u64 {
+    // SAFETY: `sysconf` reads a kernel constant and touches no user memory.
+    let size = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    if size > 0 {
+        size as u64
+    } else {
+        4096
+    }
+}
+
 /// One process's memory. `Pss` where the kernel gives it; otherwise the resident size from `statm`, which
 /// counts shared pages in every process that maps them and so can only overstate.
 fn process_bytes(pid: u32) -> u64 {
@@ -186,7 +257,7 @@ fn process_bytes(pid: u32) -> u64 {
                 .nth(1)
                 .and_then(|p| p.parse::<u64>().ok())
         })
-        .map_or(0, |pages| pages * 4096)
+        .map_or(0, |pages| pages.saturating_mul(page_size_bytes()))
 }
 
 /// The memory the jail's whole process tree is using.

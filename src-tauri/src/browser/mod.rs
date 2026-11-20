@@ -240,21 +240,25 @@ pub(crate) enum SeatVisibility {
 /// comes. A page whose tab *is* active keeps the old behaviour, which is also
 /// the boot-time behaviour when nothing has been focused yet.
 pub fn seat_visibility(label: &str) -> SeatVisibility {
-    let active = webview_bridge::active();
-    match active {
+    match webview_bridge::active() {
+        // Boot-time default before the UI's first focus call has landed:
+        // keep showing so a restored page does not miss its first paint.
+        webview_bridge::ActivePage::Unset => SeatVisibility::Shown,
+        // The UI explicitly focused away from all browser tabs (Settings,
+        // Command Palette, Chat, Terminal, etc.): never paint on top of it.
+        webview_bridge::ActivePage::None => SeatVisibility::Hidden,
         // The user has named a tab. Only that tab's page is shown; every other
         // page arrives hidden. The record holds a *tab id* while `label` is a
         // *webview label* (`browser-<tab id>`, the same shape [`webview_label`]
         // builds), so the comparison is made after re-deriving the label —
         // the two namespaces must never be compared raw.
-        Some(active_tab) if format!("{LABEL_PREFIX}{active_tab}") != label => {
-            SeatVisibility::Hidden
+        webview_bridge::ActivePage::Tab(active_tab) => {
+            if format!("{LABEL_PREFIX}{active_tab}") == label {
+                SeatVisibility::Shown
+            } else {
+                SeatVisibility::Hidden
+            }
         }
-        // Either this is the active tab's page, or nothing has been focused
-        // yet and the seat cannot know better — boot restores pages before the
-        // UI's first focus lands, and a page seated hidden then might sit
-        // behind its own first-paint window (see `open`'s bounds note).
-        _ => SeatVisibility::Shown,
     }
 }
 
@@ -417,6 +421,73 @@ pub fn parse_navigation(raw: &str) -> Result<Url, String> {
 /// would stay a no-op on this platform however the tree is arranged.
 mod page_layer;
 
+/// Maximum number of embedded browser tabs that may be open at once.
+///
+/// Caps native WebKitGTK WebView memory and stops a malicious page calling
+/// `window.open()` in a loop from spawning an unbounded number of child views.
+pub const MAX_OPEN_TABS: usize = 24;
+
+/// Maximum popup announcements allowed per source tab inside [`POPUP_BURST_WINDOW`].
+const POPUP_BURST_LIMIT: usize = 3;
+
+/// Sliding window for per-source-tab popup rate limiting.
+const POPUP_BURST_WINDOW: std::time::Duration = std::time::Duration::from_secs(5);
+
+#[derive(Default)]
+struct PopupRateLimiter {
+    by_tab: std::collections::HashMap<String, std::collections::VecDeque<std::time::Instant>>,
+}
+
+impl PopupRateLimiter {
+    fn allow(&mut self, tab_id: &str, now: std::time::Instant) -> bool {
+        if self.by_tab.len() > MAX_OPEN_TABS * 2 {
+            self.by_tab.retain(|_, times| {
+                while times
+                    .front()
+                    .is_some_and(|&ts| now.saturating_duration_since(ts) >= POPUP_BURST_WINDOW)
+                {
+                    times.pop_front();
+                }
+                !times.is_empty()
+            });
+        }
+        let times = self.by_tab.entry(tab_id.to_string()).or_default();
+        while times
+            .front()
+            .is_some_and(|&ts| now.saturating_duration_since(ts) >= POPUP_BURST_WINDOW)
+        {
+            times.pop_front();
+        }
+        if times.len() >= POPUP_BURST_LIMIT {
+            return false;
+        }
+        times.push_back(now);
+        true
+    }
+
+    fn remove_tab(&mut self, tab_id: &str) {
+        self.by_tab.remove(tab_id);
+    }
+}
+
+static POPUP_LIMITER: std::sync::LazyLock<std::sync::Mutex<PopupRateLimiter>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(PopupRateLimiter::default()));
+
+fn allow_popup(tab_id: &str) -> bool {
+    let mut limiter = POPUP_LIMITER.lock().unwrap_or_else(|e| e.into_inner());
+    limiter.allow(tab_id, std::time::Instant::now())
+}
+
+fn forget_popup_tab(tab_id: &str) {
+    let mut limiter = POPUP_LIMITER.lock().unwrap_or_else(|e| e.into_inner());
+    limiter.remove_tab(tab_id);
+}
+
+/// Serialises browser webview lifecycle (`open`, `resize`, `close`) so
+/// concurrent commands on Tokio workers cannot interleave `window.add_child`,
+/// `page_layer::adopt`, `page_layer::place`, and `page_layer::release`.
+static OPEN_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
 /// Open a browser page inside the main window, or navigate the one that
 /// exists.
 ///
@@ -436,16 +507,27 @@ pub fn open(
 ) -> Result<String, String> {
     let label = webview_label(tab_id)?;
     let target = parse_navigation(raw_url)?;
+    let _open_guard = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let window = app
         .get_window("main")
         .ok_or_else(|| "the main window does not exist".to_string())?;
 
     // An existing page navigates in place; only a fresh one is created.
-    let existing = window.webviews().into_iter().find(|w| w.label() == label);
+    let webviews = window.webviews();
+    let existing = webviews.iter().find(|w| w.label() == label);
     if let Some(page) = existing {
         page.navigate(target)
             .map_err(|e| format!("could not navigate browser tab {tab_id:?}: {e}"))?;
         return Ok(label);
+    }
+    let open_count = webviews
+        .iter()
+        .filter(|w| w.label().starts_with(LABEL_PREFIX))
+        .count();
+    if open_count >= MAX_OPEN_TABS {
+        return Err(format!(
+            "at most {MAX_OPEN_TABS} browser tabs may be open at once — close one first"
+        ));
     }
 
     // The popup handler outlives this call — it fires for the life of the
@@ -520,9 +602,15 @@ pub fn open(
                 },
             );
         })
-        // Popups never open windows — see the module docs. Deny and announce.
+        // Popups never open windows — see the module docs. Deny and announce,
+        // bounded by per-tab burst rate limiting and the global open-tab cap.
         .on_new_window(move |url, _features| {
-            if navigation_allowed(&url) {
+            let open_tabs = popup_sink
+                .webviews()
+                .keys()
+                .filter(|label| label.starts_with(LABEL_PREFIX))
+                .count();
+            if navigation_allowed(&url) && open_tabs < MAX_OPEN_TABS && allow_popup(&for_popup) {
                 let _ = popup_sink.emit(
                     POPUP_REQUESTED_EVENT,
                     BrowserPopupRequested {
@@ -775,6 +863,7 @@ pub fn resize(app: &AppHandle, bounds: Bounds) -> Result<(), String> {
         // it is not an error, there is just nothing to size yet.
         return Ok(());
     }
+    let _open_guard = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let window = app
         .get_window("main")
         .ok_or_else(|| "the main window does not exist".to_string())?;
@@ -795,21 +884,25 @@ pub fn resize(app: &AppHandle, bounds: Bounds) -> Result<(), String> {
 /// so the refusal stays loud rather than being mistaken for success.
 pub fn close(app: &AppHandle, tab_id: &str) -> Result<String, String> {
     let label = webview_label(tab_id)?;
-    let window = app
-        .get_window("main")
-        .ok_or_else(|| "the main window does not exist".to_string())?;
-    let page = window
-        .webviews()
-        .into_iter()
-        .find(|w| w.label() == label)
-        .ok_or_else(|| format!("no browser tab {tab_id:?} is open"))?;
-    // Out of the layer first: the widget is about to be destroyed, and a
-    // `gtk::Fixed` that is still holding it would keep the last geometry
-    // around for the next page that reuses this label — which every reopened
-    // tab does.
-    page_layer::release(&window, &label);
-    page.close()
-        .map_err(|e| format!("could not close browser tab {tab_id:?}: {e}"))?;
+    {
+        let _open_guard = OPEN_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let window = app
+            .get_window("main")
+            .ok_or_else(|| "the main window does not exist".to_string())?;
+        let page = window
+            .webviews()
+            .into_iter()
+            .find(|w| w.label() == label)
+            .ok_or_else(|| format!("no browser tab {tab_id:?} is open"))?;
+        // Out of the layer first: the widget is about to be destroyed, and a
+        // `gtk::Fixed` that is still holding it would keep the last geometry
+        // around for the next page that reuses this label — which every reopened
+        // tab does.
+        page_layer::release(&window, &label);
+        page.close()
+            .map_err(|e| format!("could not close browser tab {tab_id:?}: {e}"))?;
+    }
+    forget_popup_tab(tab_id);
     Ok(label)
 }
 

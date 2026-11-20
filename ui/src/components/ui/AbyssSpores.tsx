@@ -52,8 +52,12 @@ const GUTTER = 0.2;
 export function createAbyssSporesPainter(read: (name: string) => string): AtmospherePainter {
 
   let spores: Spore[] = [];
+  let seededW = 0;
+  let seededH = 0;
 
   const seed = (w: number, h: number): void => {
+    seededW = w;
+    seededH = h;
     spores = Array.from({ length: SPORES }, () => {
       // Per spore, not per field: deciding the side once and reusing it gave
       // every spore the same gutter, which is half a theme — the right-hand
@@ -97,18 +101,21 @@ export function createAbyssSporesPainter(read: (name: string) => string): Atmosp
       // waiting for a remount. See the hook's note on live reads.
         const spore = channelsOf(read("--abyss-spore"));
         const deep = channelsOf(read("--abyss-deep"));
-      if (spores.length === 0) seed(size.width, size.height);
+      if (spores.length === 0 || size.width !== seededW || size.height !== seededH) {
+        seed(size.width, size.height);
+      }
       const { width: w, height: h } = size;
       ctx.clearRect(0, 0, w, h);
       for (const s of spores) {
-        // Fade on three axes at once: inward distance from the window's edge,
+        // Fade on three axes at once: inward distance from the window's edge
+        // (brightest at the outer margin, fading out before reaching the middle),
         // height (a spore that has climbed far has burnt out), and a slow
         // breath so the field is not a static constellation of dots.
         const inward = Math.min(s.x, w - s.x) / (w * GUTTER);
         const height = 1 - Math.min(1, Math.max(0, s.y / h));
         const breath = 0.55 + 0.45 * Math.sin(tick.seconds * 0.8 + s.seed);
         const alpha =
-          Math.max(0, Math.min(1, inward)) ** 1.5 *
+          Math.max(0, Math.min(1, 1 - inward)) ** 1.5 *
           (0.25 + 0.75 * height) *
           0.5 *
           breath;

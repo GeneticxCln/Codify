@@ -116,15 +116,21 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
    */
   const justApplied = applied !== null && applied === staged.trim() && staged.trim() !== "";
 
+  const savingRef = React.useRef(false);
   const save = async () => {
+    // Enter in the key field reaches here without the button's disabled state; one save at a time.
+    if (savingKey || savingRef.current) return;
     const trimmed = key.trim();
     if (!trimmed) return;
+    savingRef.current = true;
     setError(null);
     try {
       await onSaveKey(provider, trimmed);
       setKey("");
     } catch (err: any) {
       setError(err?.message || `Could not save the ${provider} key`);
+    } finally {
+      savingRef.current = false;
     }
   };
 

@@ -110,13 +110,17 @@ def _iso_day(value: Any) -> float | None:
     if match is None:
         return None
     year, month, day, hour, minute, second, fraction, zulu, sign, off_h, off_m = match.groups()
-    tz: timezone | None = None
-    if zulu:
-        tz = timezone.utc
-    elif sign:
-        delta = timedelta(hours=int(off_h), minutes=int(off_m))
-        tz = timezone(delta if sign == "+" else -delta)
     try:
+        tz: timezone | None = None
+        if zulu:
+            tz = timezone.utc
+        elif sign:
+            hours_val = int(off_h)
+            minutes_val = int(off_m)
+            if hours_val > 23 or minutes_val > 59:
+                return None
+            delta = timedelta(hours=hours_val, minutes=minutes_val)
+            tz = timezone(delta if sign == "+" else -delta)
         return datetime(
             int(year), int(month), int(day), int(hour or 0), int(minute or 0), int(second or 0),
             # Microseconds are the most a datetime holds: a longer fraction is truncated, never rounded.
@@ -547,11 +551,11 @@ def _targets(registry: Any, keychain: Any) -> list[ProviderTarget]:
             existing_is_default = existing.base_url == BUILTIN_PROVIDERS.get(
                 existing.provider, {}
             ).get("base_url")
-            if not existing_is_default or existing.base_url == "":
-                pass  # existing endpoint is deliberate; keep it
-            else:
+            if existing_is_default or existing.base_url == "":
                 existing.base_url = target.base_url
                 existing.protocol = target.protocol
+            else:
+                pass  # existing endpoint is deliberate; keep it
         existing.sources.extend(s for s in target.sources if s not in existing.sources)
 
     try:
@@ -648,6 +652,7 @@ class ModelCatalogService:
         self._transport = transport
         self._cache: dict[str, Any] | None = None
         self._cached_at = 0.0
+        self._generation = 0
         self._lock = asyncio.Lock()
 
     async def get(self, refresh: bool = False) -> dict[str, Any]:
@@ -656,6 +661,7 @@ class ModelCatalogService:
             if fresh and not refresh:
                 return {**self._cache, "cached": True}  # type: ignore[dict-item]
 
+            gen = self._generation
             targets = _targets(self._registry, self._keychain)
             try:
                 if self._transport is not None:
@@ -685,11 +691,13 @@ class ModelCatalogService:
                 "fetched_at": time.time(),
                 "cached": False,
             }
-            self._cache = payload
-            self._cached_at = time.time()
+            if self._generation == gen:
+                self._cache = payload
+                self._cached_at = time.time()
             return payload
 
     def invalidate(self) -> None:
+        self._generation += 1
         self._cache = None
         self._cached_at = 0.0
 

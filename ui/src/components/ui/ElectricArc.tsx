@@ -96,13 +96,16 @@ const DECAY = 1.6;
 
 export function createElectricArcPainter(
   read: (name: string) => string,
-  active: boolean,
+  active: boolean | (() => boolean),
 ): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let bolts: Bolt[] = [];
-  /** Scaled by `active`, so a busy window strikes more often *and* holds on. */
-  const decay = active ? 1.7 : DECAY;
-  const rest = active ? 0.34 : 0.8;
+  let seededW = 0;
+  let seededH = 0;
+  /** Scaled by `active`, so a busy window strikes more often *and* holds on longer. */
+  const decayNow = (): number => (isActive() ? DECAY * 0.55 : DECAY);
+  const restNow = (): number => (isActive() ? 0.34 : 0.8);
 
   const anchor = (left: boolean, w: number): number => {
     const at = (ANCHOR_MIN + Math.random() * ANCHOR_SPAN) * w;
@@ -147,6 +150,9 @@ export function createElectricArcPainter(
   };
 
   const seed = (w: number, h: number): void => {
+    seededW = w;
+    seededH = h;
+    const rest = restNow();
     bolts = Array.from({ length: BOLTS }, (_, i) => {
       const left = i % 2 === 0;
       const bolt: Bolt = {
@@ -171,6 +177,8 @@ export function createElectricArcPainter(
   return {
     step(dt, tick) {
       const { width: w, height: h } = tick.size;
+      const decay = decayNow();
+      const rest = restNow();
       for (const bolt of bolts) {
         bolt.charge = Math.max(0, bolt.charge - decay * dt);
         bolt.wait -= dt;
@@ -188,9 +196,11 @@ export function createElectricArcPainter(
       // Resolved per frame rather than once at creation, so a theme or a
       // custom tint restyles this canvas on the next frame instead of
       // waiting for a remount. See the hook's note on live reads.
-        const core = channelsOf(read("--arc-core"));
-        const fork = channelsOf(read("--arc-fork"));
-      if (bolts.length === 0) seed(size.width, size.height);
+      const core = channelsOf(read("--arc-core"));
+      const fork = channelsOf(read("--arc-fork"));
+      if (bolts.length === 0 || size.width !== seededW || size.height !== seededH) {
+        seed(size.width, size.height);
+      }
       const { width: w, height: h } = size;
       ctx.clearRect(0, 0, w, h);
       ctx.lineCap = "round";
@@ -224,7 +234,7 @@ export function createElectricArcPainter(
       // the only difference a run makes is a faster strike rate, which is real
       // but easy to miss in peripheral vision; this is the one piece of the
       // effect that says "working" rather than "on".
-      if (!active) return;
+      if (!isActive()) return;
       const bandY = ((tick.seconds * 0.5) % 1) * h;
       for (const side of [0, 1]) {
         const x0 = side === 0 ? 0 : w * (1 - GUTTER);
@@ -246,6 +256,8 @@ export const ElectricArc: React.FC<ElectricArcProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--arc-core": "#dfe4ff",
     "--arc-fork": "#7b6cff",
@@ -257,7 +269,7 @@ export const ElectricArc: React.FC<ElectricArcProps> = ({
     animated,
     active,
     vars,
-    create: (read) => createElectricArcPainter(read, active),
+    create: (read) => createElectricArcPainter(read, () => activeRef.current === true),
   });
 
   return (

@@ -28,8 +28,8 @@ Write these in `todo` before you look at any candidate:
    satisfied; that is not the same as better.
 
 Paid or networked runs (a model-judged benchmark, a load test) cost something.
-Say what a run costs and ask before the first. `docs/08-benchmarks.md` says what
-a number from the project's own harness may claim.
+Say what a run costs and ask before the first. Follow the project's own
+benchmark rules for what a number from its harness may claim.
 
 ## The loop
 

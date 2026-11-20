@@ -243,6 +243,10 @@ def recovered_pairs(rows: list[dict[str, Any]]) -> set[tuple[str, str]]:
             except (TypeError, ValueError):
                 item["payload"] = {}
         normalised.append(item)
+    # `recall_events` returns rows newest-first, while `recovered_steps` requires
+    # chronological order so a `fix_retry` precedes the passing `test_result` or
+    # `COMPLETED` status that proves recovery.
+    normalised.sort(key=lambda e: (float(e.get("timestamp") or 0.0), int(e.get("sequence") or 0)))
     return recovered_steps(normalised)
 
 
@@ -574,7 +578,7 @@ def _one_observation(
         if msg:
             messages.append(msg)
 
-    failure_kinds = kinds & {"error", "agent_call_failed", "fix_retry", "agent_output_invalid"}
+    failure_kinds = kinds & {"error", "agent_call_failed", "fix_retry", "agent_output_invalid", "stage_result"}
     if failure_kinds:
         if recovered:
             lesson = "A retry got past this failure before."
@@ -589,14 +593,19 @@ def _one_observation(
             example = msg[:MAX_FIELD_CHARS]
             break
 
+    newest_first = sorted(
+        group,
+        key=lambda ev: (float(ev.get("timestamp") or 0.0), int(ev.get("sequence") or 0)),
+        reverse=True,
+    )
     return {
         "subject": subject,
         "proof": len(group),
         "lesson": lesson,
         "example": example,
         "evidence": [
-            str(ev.get("id") or "") for ev in reversed(group) if str(ev.get("id") or "")
-        ],
+            str(ev.get("id") or "") for ev in newest_first if str(ev.get("id") or "")
+        ][:20],
         # The newest event behind it, so a reader can age the lesson by what happened and not by when a
         # pass last ran. Not stored (there is no column for it, and none is needed): it is read from the
         # same rows the scan already holds.
@@ -620,6 +629,7 @@ def form_observations(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     the same allow-list reason the tools obey.
     """
     grouped: dict[str, list[dict[str, Any]]] = {}
+    parsed_events: list[dict[str, Any]] = []
     for ev in events:
         payload = ev.get("payload")
         if not isinstance(payload, dict):
@@ -631,8 +641,9 @@ def form_observations(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
             continue
         kind = str(ev.get("type") or "")
         row = {**ev, "payload": payload}
+        parsed_events.append(row)
         subject: str | None = None
-        if kind == "error":
+        if kind in ("error", "agent_call_failed", "agent_output_invalid"):
             subject = _observation_subject(payload)
         elif kind == "stage_result":
             # A stage that *failed* is history; a stage that passed is the
@@ -658,20 +669,12 @@ def form_observations(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     # One definition of "got past it", inherited like `recall`'s own mark:
     # pairing is order-sensitive per goal-and-step, so it is computed over the
-    # whole scan and looked up per subject's evidence rows. `recovered_steps`
-    # wants parsed payloads (its other caller normalises on the way out of the
-    # database), so the grouped rows — whose payloads `form_observations`
-    # already parsed — are what it gets, not the raw rows.
-    #
-    # The rows are re-ordered **oldest-first** for the pairing, because that is
-    # the order its argument assumes: `recall_events` returns newest-first, and
-    # feeding it straight in lets the pass arrive before the retry, scoring
-    # every recovered step unrecovered. `_sweep_metrics` orders on timestamp
-    # then sequence; the same key is used here.
+    # whole scan (including `step_status` COMPLETED rows) and looked up per
+    # subject's evidence rows.
     from engine.metrics import recovered_steps
 
     chronological = sorted(
-        (row for group in grouped.values() for row in group),
+        parsed_events,
         key=lambda r: (float(r.get("timestamp") or 0.0), int(r.get("sequence") or 0)),
     )
     recovered_pairs = recovered_steps(chronological)
@@ -766,12 +769,11 @@ def build_brief(
     """
     sections: list[str] = []
 
-    threads = [
-        t for t in search_threads(
-            thread_rows, None, limit=MAX_THREADS + 1,
-        )["threads"]
-        if current_thread_id is None or t["id"] != current_thread_id
-    ][:MAX_THREADS]
+    filtered_threads = [
+        row for row in thread_rows
+        if current_thread_id is None or str(row.get("id") or "") != current_thread_id
+    ]
+    threads = search_threads(filtered_threads, None, limit=MAX_THREADS)["threads"]
     if threads:
         lines = [
             "Earlier threads in this workspace (newest first). Asks are what "
@@ -785,12 +787,13 @@ def build_brief(
         sections.append("\n".join(lines))
 
     clock = time.time() if now is None else now
-    stored = [
-        o for o in search_observations(
-            observation_rows or [], None, limit=MAX_BRIEF_OBSERVATIONS,
-        )["observations"]
-        if not o["subject"].startswith("step:")
+    non_step_rows = [
+        row for row in (observation_rows or [])
+        if not str(row.get("subject") or "").startswith("step:")
     ]
+    stored = search_observations(
+        non_step_rows, None, limit=MAX_OBSERVATIONS,
+    )["observations"]
     derived: list[dict[str, Any]] = []
     # Refinement lag: the store is refined after each run, so a just-finished
     # run's lessons may not be in it yet. The scan tops the stored proofs up

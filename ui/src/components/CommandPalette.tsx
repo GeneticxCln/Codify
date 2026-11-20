@@ -65,13 +65,27 @@ export const CommandPalette: React.FC<CommandPaletteProps> = ({
   const restoreRef = useRef<HTMLElement | null>(null);
 
   const matches = useMemo(() => filterPalette(items, query), [items, query]);
+  const prevQueryRef = useRef(query);
+  const selectedIdRef = useRef<string | null>(null);
+  selectedIdRef.current = matches[selected]?.id ?? null;
 
-  // A new query or a new world (a tab closed while the palette was up) is a
-  // new list: the selection starts at the top rather than pointing at an old
-  // offset that now names a different row — or none.
+  // A new query or a removed row starts selection at the top rather than pointing
+  // at an old offset that now names a different row — or none; a background refresh
+  // where the highlighted row is still present preserves it.
   useEffect(() => {
-    setSelected(0);
-  }, [query, items]);
+    if (prevQueryRef.current !== query) {
+      prevQueryRef.current = query;
+      setSelected(0);
+      return;
+    }
+    const currentId = selectedIdRef.current;
+    if (!currentId) {
+      setSelected(0);
+      return;
+    }
+    const idx = matches.findIndex((m) => m.id === currentId);
+    setSelected(idx >= 0 ? idx : 0);
+  }, [query, matches]);
 
   // Open: remember who had focus, clear the last search, take focus.
   // Close: give focus back. One effect, because the two halves are one

@@ -36,7 +36,7 @@ export function useSuggestions(engineUp: boolean): SuggestionsApi {
     };
   }, []);
 
-  const refresh = useCallback(async () => {
+  const refresh = useCallback(async (preserveError = false) => {
     try {
       const list = await listSuggestions();
       if (!alive.current) return;
@@ -44,9 +44,11 @@ export function useSuggestions(engineUp: boolean): SuggestionsApi {
       // inbox, not a crash in the component that draws the bell.
       setItems(Array.isArray(list?.suggestions) ? list.suggestions : []);
       setSnoozed(typeof list?.snoozed === "number" ? list.snoozed : 0);
-      setError(null);
+      if (!preserveError) setError(null);
     } catch (err: unknown) {
-      if (alive.current) setError(err instanceof Error ? err.message : "Could not load suggestions");
+      if (alive.current && !preserveError) {
+        setError(err instanceof Error ? err.message : "Could not load suggestions");
+      }
     }
   }, []);
 
@@ -60,15 +62,17 @@ export function useSuggestions(engineUp: boolean): SuggestionsApi {
   const act = useCallback(
     async (id: string, run: () => Promise<unknown>) => {
       setBusyId(id);
+      let failed = false;
       try {
         await run();
         setError(null);
       } catch (err: unknown) {
+        failed = true;
         if (alive.current) setError(err instanceof Error ? err.message : "That did not work");
       } finally {
         if (alive.current) setBusyId(null);
       }
-      await refresh();
+      await refresh(failed);
     },
     [refresh],
   );

@@ -21,7 +21,7 @@
         "py"
       ],
       "where": "code",
-      "pattern": "\\bapp\\.run\\s*\\([^)]*\\bdebug\\s*=\\s*True|^\\s*DEBUG\\s*=\\s*True\\b",
+      "pattern": "\\bapp\\.run\\s*\\((?:[^()\\n]|\\([^()\\n]*\\)){0,300}\\bdebug\\s*=\\s*True|^\\s*DEBUG\\s*=\\s*True\\b",
       "why": "Debug mode can expose a console that runs code, and detailed errors.",
       "fix": "Turn it off outside development, from configuration.",
       "examples": {

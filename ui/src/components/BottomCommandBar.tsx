@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect, useLayoutEffect } from "react";
+import React, { useState, useRef, useEffect, useLayoutEffect, useCallback } from "react";
 import {
   Workspace,
   ModelOption,
@@ -161,7 +161,7 @@ interface BottomCommandBarProps {
   autoFocus?: boolean;
 }
 
-export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
+export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
   workspaces,
   selectedWorkspace,
   onSelectWorkspace,
@@ -224,12 +224,14 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   // sections are a convenience over the same list, not a filter on it.
   const modelSections: ModelSection[] = React.useMemo(
     () =>
-      orderModelMenu(availableModels, {
-        filter: modelFilter,
-        selected: selectedModel,
-        signals: modelSignals,
-      }),
-    [availableModels, modelFilter, selectedModel, modelSignals],
+      isModelOpen
+        ? orderModelMenu(availableModels, {
+            filter: modelFilter,
+            selected: selectedModel,
+            signals: modelSignals,
+          })
+        : [],
+    [isModelOpen, availableModels, modelFilter, selectedModel, modelSignals],
   );
 
   const shownModelCount = modelSections.reduce(
@@ -385,12 +387,29 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   // Auto-resize textarea. The cap is 180px at 100% and grows with the UI scale: the prompt's text is
   // rem, so a fixed cap would hold fewer lines the bigger the window is. The scale is a dependency
   // so a change re-measures instead of waiting for the next keystroke.
+  //
+  // Avoid setting `height = "auto"` (which forces a synchronous full-column reflow) on ordinary
+  // forward typing: only reset to "auto" when text shrinks or UI scale changes, and skip writing
+  // `style.height` when the pixel height did not change.
   const uiScale = useUiScale();
+  const lastPromptLen = useRef(0);
+  const lastUiScale = useRef(uiScale);
+  const lastAppliedHeight = useRef("");
   useEffect(() => {
-    if (textareaRef.current) {
-      textareaRef.current.style.height = "auto";
-      const cap = Math.round(180 * uiScaleFactor());
-      textareaRef.current.style.height = `${Math.min(textareaRef.current.scrollHeight, cap)}px`;
+    const el = textareaRef.current;
+    if (!el) return;
+    const cap = Math.round(180 * uiScaleFactor());
+    const shrank = prompt.length < lastPromptLen.current;
+    const scaleChanged = uiScale !== lastUiScale.current;
+    lastPromptLen.current = prompt.length;
+    lastUiScale.current = uiScale;
+    if (shrank || scaleChanged || prompt.length === 0) {
+      el.style.height = "auto";
+    }
+    const next = `${Math.min(el.scrollHeight, cap)}px`;
+    if (next !== lastAppliedHeight.current || shrank || scaleChanged) {
+      el.style.height = next;
+      lastAppliedHeight.current = next;
     }
   }, [prompt, uiScale]);
 
@@ -399,7 +418,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
   // the click would drop whatever was typed since. The caret is put back after the commit, at the end
   // of the inserted words, so typing can carry straight on.
   const dictatedCaret = useRef<number | null>(null);
-  const insertTranscript = (spoken: string) => {
+  const insertTranscript = useCallback((spoken: string) => {
     const el = textareaRef.current;
     setPrompt((current) => {
       const start = el?.selectionStart ?? current.length;
@@ -408,7 +427,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       dictatedCaret.current = next.caret;
       return next.value;
     });
-  };
+  }, []);
   // A clip from the clipboard drawer goes in the same way, but exactly as it is: no space is added where two
   // words would touch, because a clip is code or a path and a space inside one is a different command. The
   // request already pending when this box mounted is marked handled up front, so a box that is rebuilt (a
@@ -478,6 +497,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       setPrompt("");
       if (textareaRef.current) {
         textareaRef.current.style.height = "auto";
+        lastAppliedHeight.current = "";
       }
     } catch (err) {
       // handleSendMessage catches its own failures, so this is belt-and-braces —
@@ -586,7 +606,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
     <div className="w-full max-w-4xl mx-auto p-4 z-20">
       <div
         ref={barRef}
-        className="bg-codify-surface border border-codify-border rounded-2xl shadow-2xl overflow-visible focus-within:border-codify-accent transition-all duration-200"
+        className="bg-codify-surface border border-codify-border rounded-2xl shadow-lg overflow-visible focus-within:border-codify-accent transition-colors duration-200"
       >
         {/* The pickers sit ABOVE the input, and the submit control sits at the END
             of it.
@@ -1311,4 +1331,4 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = ({
       )}
     </div>
   );
-};
+});

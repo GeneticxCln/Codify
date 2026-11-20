@@ -172,14 +172,16 @@ function matchLink(
     }
     url = src.slice(start, j);
   }
-  // An optional "title" is read and dropped.
-  const title = /^\s+(?:"[^"\n]*"|'[^'\n]*')/.exec(src.slice(j));
+  // An optional "title" is read and dropped using a sticky regex to avoid O(N^2) tail slices.
+  LINK_TITLE.lastIndex = j;
+  const title = LINK_TITLE.exec(src);
   if (title) j += title[0].length;
   if (src[j] !== ")") return null;
   return { label, url: url.trim(), end: j + 1 };
 }
 
 /** Sticky, so a match is tried at one index without copying the rest of the input. */
+const LINK_TITLE = /\s+(?:"[^"\n]*"|'[^'\n]*')/y;
 const AUTOLINK = /<(https?:\/\/[^\s<>]{1,2000})>/iy;
 const BARE_URL = /https?:\/\/[^\s<>]{1,2000}/iy;
 
@@ -527,8 +529,19 @@ function listBlocks(lines: string[], depth: number): Block[] {
     last = entry;
   }
 
-  /** An entry and everything under it as lines of text, for nesting past the cap. */
-  const flatten = (e: Entry): string[] => [...e.text, ...e.kids.flatMap(flatten)];
+  /** An entry and everything under it as lines of text, iterative so arbitrary nesting cannot overflow the stack. */
+  const flatten = (root: Entry): string[] => {
+    const out: string[] = [];
+    const work: Entry[] = [root];
+    while (work.length > 0) {
+      const cur = work.pop()!;
+      out.push(...cur.text);
+      for (let k = cur.kids.length - 1; k >= 0; k -= 1) {
+        work.push(cur.kids[k]!);
+      }
+    }
+    return out;
+  };
 
   const group = (entries: Entry[], level: number): Block[] => {
     const out: Block[] = [];

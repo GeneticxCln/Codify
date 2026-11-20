@@ -58,10 +58,14 @@ export function createNeuralWebPainter(
   /** Read the flag at paint time, not capture it. */
   isActive: () => boolean,
 ): AtmospherePainter {  let nodes: Node[] = [];
+  let seededW = 0;
+  let seededH = 0;
   let energy = 0;
   let pulsePhase = 0;
 
   const seedNodes = (size: AtmosphereSize): void => {
+    seededW = size.width;
+    seededH = size.height;
     nodes = Array.from({ length: NODES }, () => ({
       // Kept inside a margin so no node sits under the window's very edge,
       // where the chrome is and where a link would be clipped mid-stroke.
@@ -106,7 +110,7 @@ export function createNeuralWebPainter(
       const web = channelsOf(read("--neural-web"));
       const node = channelsOf(read("--neural-node"));
       const pulse = channelsOf(read("--neural-pulse"));
-      if (nodes.length === 0) seedNodes(size);
+      if (nodes.length === 0 || size.width !== seededW || size.height !== seededH) seedNodes(size);
 
       ctx.clearRect(0, 0, size.width, size.height);
 
@@ -119,14 +123,16 @@ export function createNeuralWebPainter(
       // line in it is invisible. The brief's ramp is `#1e293b` *to* `#38bdf8`,
       // so the line is mixed toward the node colour even at rest, and the web
       // colour is the far end of that ramp rather than the whole of it.
+      const linkSq = LINK * LINK;
       for (let i = 0; i < nodes.length; i++) {
         for (let j = i + 1; j < nodes.length; j++) {
           const a = nodes[i];
           const b = nodes[j];
           const dx = a.x - b.x;
           const dy = a.y - b.y;
-          const d = Math.sqrt(dx * dx + dy * dy);
-          if (d > LINK) continue;
+          const distSq = dx * dx + dy * dy;
+          if (distSq > linkSq) continue;
+          const d = Math.sqrt(distSq);
           const near = 1 - d / LINK;
           const flicker = 0.85 + 0.15 * Math.sin(tick.seconds * 0.7 + a.seed + b.seed);
           ctx.strokeStyle = withAlpha(

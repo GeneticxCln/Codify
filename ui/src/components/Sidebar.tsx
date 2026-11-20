@@ -259,7 +259,7 @@ const SidebarRow: React.FC<{
   </div>
 );
 
-export const Sidebar: React.FC<SidebarProps> = ({
+export const Sidebar: React.FC<SidebarProps> = React.memo(({
   conversations,
   selectedWorkspaceId,
   workspaces = [],
@@ -655,4 +655,4 @@ export const Sidebar: React.FC<SidebarProps> = ({
         })()}
     </nav>
   );
-};
+});

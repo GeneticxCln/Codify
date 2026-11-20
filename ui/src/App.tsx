@@ -353,6 +353,7 @@ export const App: React.FC = () => {
   // recording is a copy of the model's output about the user's code, and a
   // toggle that stayed on would quietly record every prompt afterwards.
   const [record, setRecord] = useState(false);
+  const msgSeqRef = useRef(0);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   // The shell: what is open, and which one is showing. A pure module holds the
   // arithmetic (`ui/src/tabs.ts`) because "where do I land when a tab closes"
@@ -441,7 +442,10 @@ export const App: React.FC = () => {
       next.delete(active);
       return next;
     });
-  }, [tabState.activeId, unreadTerminalIds]);
+  }, [tabState.activeId]);
+  const pendingTerminalWsRef = useRef<Map<string, string>>(new Map());
+  const machineExitCountRef = useRef<Map<string, number>>(new Map());
+  const popupBurstRef = useRef<Map<string, number[]>>(new Map());
   useEffect(() => {
     let disposed = false;
     const offs: Array<() => void> = [];
@@ -477,13 +481,18 @@ export const App: React.FC = () => {
         const ptyId = readTerminalExit(payload);
         if (!ptyId) return;
         recordExit(ptyId);
+        // Mark the tab exited even when it is in the background so switching back
+        // renders the exit banner and disables stdin.
+        setTabState((prev) => markTerminalExited(prev, ptyId));
         // An unowned shell finished unseen: its record is complete as of
         // now, so file it while the store still holds it. An owned one's
         // pane does this itself — that bargain lives in the store's docs.
         if (!ownsTerminal(ptyId)) {
-          const ws = tabStateRef.current.tabs.find(
-            (t) => t.id === ptyId && t.kind === "terminal"
-          )?.workspaceId;
+          const ws =
+            tabStateRef.current.tabs.find(
+              (t) => t.id === ptyId && t.kind === "terminal"
+            )?.workspaceId ?? pendingTerminalWsRef.current.get(ptyId);
+          pendingTerminalWsRef.current.delete(ptyId);
           retireTerminal(ptyId, ws);
         }
         // The badge outlives the shell: a background exit is precisely the
@@ -528,6 +537,7 @@ export const App: React.FC = () => {
       listenShellEvent<unknown>(MACHINE_EXIT, (payload) => {
         const id = readMachineExit(payload);
         if (!id) return;
+        machineExitCountRef.current.set(id, (machineExitCountRef.current.get(id) ?? 0) + 1);
         machineScreens.exit(id);
         setTabState((prev) => markMachineExited(prev, id));
       }),
@@ -934,9 +944,13 @@ export const App: React.FC = () => {
   // model catalog are re-read here rather than only on mount.
   useEffect(() => {
     let attempts = 0;
+    let cancelled = false;
+    let retryTimer: ReturnType<typeof setTimeout> | null = null;
     const fetchInfo = () => {
+      if (cancelled) return;
       tauriInvoke<EngineInfo>("codify_get_engine_info")
         .then((info) => {
+          if (cancelled) return;
           setEngineInfo(info);
           // Engine just became reachable — re-read workspaces now that the
           // real token/port are set (clears the startup failure banner).
@@ -944,9 +958,10 @@ export const App: React.FC = () => {
           loadModelsRef.current?.(true);
         })
         .catch(async () => {
+          if (cancelled) return;
           attempts++;
           if (attempts < 10) {
-            setTimeout(fetchInfo, 500);
+            retryTimer = setTimeout(fetchInfo, 500);
             return;
           }
           // Out of retries. The pill can only say "offline", but the shell knows
@@ -954,10 +969,14 @@ export const App: React.FC = () => {
           // died before its handshake — so ask it once and let the banner carry the
           // reason. This is the difference between a permanent red dot and a fix.
           const reason = await engineFailureReason();
-          if (reason) setError(reason);
+          if (!cancelled && reason) setError(reason);
         });
     };
     fetchInfo();
+    return () => {
+      cancelled = true;
+      if (retryTimer !== null) clearTimeout(retryTimer);
+    };
   }, []);
 
   // The engine's own words, the moment it stops answering. `engineFailureReason`
@@ -1034,7 +1053,14 @@ export const App: React.FC = () => {
   // Discover the models every configured provider serves. Called with
   // refresh=true whenever the app opens or the settings screen changes
   // something, so newly released models appear without a restart.
+  const modelsInFlightRef = useRef(false);
+  const modelsPendingRefreshRef = useRef(false);
   const loadModels = useCallback(async (refresh = false) => {
+    if (modelsInFlightRef.current) {
+      if (refresh) modelsPendingRefreshRef.current = true;
+      return;
+    }
+    modelsInFlightRef.current = true;
     setModelsLoading(true);
     try {
       const catalog = await fetchModelCatalog(refresh);
@@ -1049,7 +1075,12 @@ export const App: React.FC = () => {
       // and say why the list may be stale.
       setError(readRejection(err, "Failed to discover models from the engine."));
     } finally {
+      modelsInFlightRef.current = false;
       setModelsLoading(false);
+      if (modelsPendingRefreshRef.current) {
+        modelsPendingRefreshRef.current = false;
+        void loadModelsRef.current?.(true);
+      }
     }
   }, []);
 
@@ -1320,11 +1351,15 @@ export const App: React.FC = () => {
     activeTabNow?.kind === "editor" ? activeTabNow : undefined;
   const activeMachineTab =
     activeTabNow?.kind === "machine" ? activeTabNow : undefined;
-  // What the strip says about the editors: text nobody has saved, and text the assistant changed. Read from the store, which
-  // lives above the panes, so a tab that is not on screen still says it.
-  const bufferSnapshot = useSyncExternalStore(editorBuffers.subscribe, editorBuffers.getSnapshot);
-  const unsavedEditorIds = useMemo(() => editorBuffers.unsavedIds(bufferSnapshot), [bufferSnapshot]);
-  const assistantEditedIds = useMemo(() => editorBuffers.assistantEditedIds(bufferSnapshot), [bufferSnapshot]);
+  // What the strip says about the editors: text nobody has saved, and text the assistant changed.
+  // Subscribed to the badge snapshot so cursor moves and keystrokes inside CodeMirror do not
+  // re-render the entire App tree.
+  const editorBadges = useSyncExternalStore(
+    editorBuffers.subscribeBadges,
+    editorBuffers.getBadgeSnapshot,
+  );
+  const unsavedEditorIds = editorBadges.unsavedIds as string[];
+  const assistantEditedIds = editorBadges.assistantEditedIds as string[];
   // The terminal a paste would reach: the focused one, else the one beside the chat that has it.
   const terminalInView =
     activeTerminalTab ??
@@ -1613,16 +1648,19 @@ export const App: React.FC = () => {
 
   const paletteItems = useMemo(
     () =>
-      buildPaletteItems({
-        tabs: tabState.tabs,
-        activeId: tabState.activeId,
-        conversations,
-        split: { showing: Boolean(shownSplit) },
-        files: paletteFiles,
-        unread: inbox.items,
-      }),
-    [tabState, conversations, shownSplit, paletteFiles, inbox.items],
+      paletteOpen
+        ? buildPaletteItems({
+            tabs: tabState.tabs,
+            activeId: tabState.activeId,
+            conversations,
+            split: { showing: Boolean(shownSplit) },
+            files: paletteFiles,
+            unread: inbox.items,
+          })
+        : [],
+    [paletteOpen, tabState, conversations, shownSplit, paletteFiles, inbox.items],
   );
+  const cleanupClosedBrowserRef = useRef<((id: string) => void) | null>(null);
 
   // Every close in the shell goes through here — the strip's close button, the
   // Ctrl+W shortcut, and the browser pane — because a browser tab's page is a
@@ -1640,14 +1678,19 @@ export const App: React.FC = () => {
   // is open" on screen as an error the user caused by closing an empty tab.
   const closeTabNow = useCallback(
     (id: string) => {
+      // Read the latest tab state from `tabStateRef` (not the render closure) so closing a tab
+      // placed synchronously before commit still finds it, queues its removal, and closes its buffer.
+      const current = tabStateRef.current;
       // Closing a showing pane's tab ends the split and goes to the other pane's tab (`panes.closeInSplit`).
-      const inSplit = closeInSplit(tabState, split, id);
+      const inSplit = closeInSplit(current, split, id);
+      const nextSync = closeTab(current, id);
+      tabStateRef.current = inSplit?.activate ? focusTab(nextSync, inSplit.activate) : nextSync;
       setTabState((prev) => {
         const next = closeTab(prev, id);
         return inSplit?.activate ? focusTab(next, inSplit.activate) : next;
       });
       // (A split whose tab has gone ends by itself: `resolveSplit`. What closing adds is where to land.)
-      const tab = tabState.tabs.find((t) => t.id === id);
+      const tab = current.tabs.find((t) => t.id === id);
       // A close is owed to the engine until it confirms the delete. Without this
       // the row outlives the tab and the next pull, or the next boot, adopts it
       // back. Written through at once: the sync effect stands down while the
@@ -1659,7 +1702,7 @@ export const App: React.FC = () => {
       }
       // An editor's text is held by the store, not by its pane, so the pane going does not free it: the buffer goes
       // with the tab, here and nowhere else.
-      if (tab?.kind === "editor") editorBuffers.close(id);
+      if (tab?.kind === "editor" || editorBuffers.get(id)) editorBuffers.close(id);
       // A machine's screen goes with its tab, and so does its jail: everything running in it ends. A closed id stays
       // closed in the store, so output still in flight does not bring the screen back.
       if (tab?.kind === "machine") {
@@ -1697,12 +1740,15 @@ export const App: React.FC = () => {
       // address and no page yet, and telling the shell to close it produced the
       // shell's own "no browser tab is open" as an error the user caused by
       // closing a tab.
-      if (tab?.kind === "browser" && tab.url && attemptedSeats.current.delete(id)) {
-        void closeBrowserWebview(id).catch((err: any) =>
-          setError(
-            readRejection(err, "Could not close that tab's browser page"),
-          ),
-        );
+      if (tab?.kind === "browser") {
+        cleanupClosedBrowserRef.current?.(id);
+        if (tab.url && attemptedSeats.current.delete(id)) {
+          void closeBrowserWebview(id).catch((err: any) =>
+            setError(
+              readRejection(err, "Could not close that tab's browser page"),
+            ),
+          );
+        }
       }
     },
     [tabState, split],
@@ -1758,6 +1804,14 @@ export const App: React.FC = () => {
   // been measured (the shell refuses a zero-sized pane by design, §7.2).
   const [browserBounds, setBrowserBounds] = useState<BrowserBounds | null>(null);
   const browserResizeTimerRef = useRef<number | null>(null);
+  useEffect(() => {
+    return () => {
+      if (browserResizeTimerRef.current !== null) {
+        window.clearTimeout(browserResizeTimerRef.current);
+        browserResizeTimerRef.current = null;
+      }
+    };
+  }, []);
   // Whether a measurement arrived while the last one's quiet period was running, and so is still to be sent.
   const browserResizeDirtyRef = useRef(false);
   const handleBrowserBounds = useCallback((bounds: BrowserBounds) => {
@@ -1916,6 +1970,11 @@ export const App: React.FC = () => {
   // arrive. Recorded *before* the invoke rather than after it, because the
   // load event for this very navigation can beat the invoke's own answer back.
   const inFlightBrowserCommands = useRef<InFlightNavigations>({});
+  cleanupClosedBrowserRef.current = (id: string) => {
+    stopLoading(id);
+    delete inFlightBrowserCommands.current[id];
+    setDevtoolsTabId((current) => (current === id ? null : current));
+  };
 
   const sendToBrowser = useCallback(
     async (tabId: string, url: string, history: BrowserHistory) => {
@@ -1990,21 +2049,22 @@ export const App: React.FC = () => {
     // No pane has reported a size yet (the first link clicked in an answer, in a session that has had no browser
     // tab): the shell refuses a page seated at 0x0 and nothing would ever retry. The tab takes the address instead,
     // and the restore seat below opens it once the pane it mounts has measured itself.
+    const targetUrl = classified.url;
     const measured = browserBoundsRef.current;
     if (!measured || measured.width <= 0 || measured.height <= 0) {
-      setTabState((prev) => openBrowserTab(prev, id, url, selectedWs?.id));
+      setTabState((prev) => openBrowserTab(prev, id, targetUrl, selectedWs?.id));
       setPendingBrowser(null);
       return;
     }
     try {
-      await openBrowserWebview(id, url, measured);
+      await openBrowserWebview(id, targetUrl, measured);
       // The shell has this page now, so the restore seat must not open it a
       // second time (see `attemptedSeats`).
       attemptedSeats.current.add(id);
       // The folder is recorded for the same reason a chat tab records one: the
       // strip says which folder a tab is in, and a browser tab that never did
       // was the odd one out.
-      setTabState((prev) => openBrowserTab(prev, id, url, selectedWs?.id));
+      setTabState((prev) => openBrowserTab(prev, id, targetUrl, selectedWs?.id));
     } catch (err: any) {
       // The tab keeps its empty address bar, so the next attempt is a retype
       // rather than a hunt for the button that made this happen. The shell's
@@ -2077,12 +2137,15 @@ export const App: React.FC = () => {
   // address, which is a different path with a different error.
   useEffect(() => {
     if (!browserBounds) return;
-    const tab = activeTab(tabState);
+    const splitBrowser = drawnSplit
+      ? [drawnSplit.left, drawnSplit.right].find((t) => t.kind === "browser")
+      : undefined;
+    const tab = splitBrowser ?? activeTab(tabState);
     if (!tab || tab.kind !== "browser" || !tab.url) return;
     if (attemptedSeats.current.has(tab.id)) return;
     attemptedSeats.current.add(tab.id);
     void seatBrowserTab(tab.id, tab.url, browserBounds);
-  }, [browserBounds, tabState, seatBrowserTab]);
+  }, [browserBounds, drawnSplit, tabState, seatBrowserTab]);
 
   // Keep the strip remembered, and shared.
   //
@@ -2366,6 +2429,9 @@ export const App: React.FC = () => {
       }
       try {
         const ptyId = await openTerminal(workspaceId, DEFAULT_GRID.cols, DEFAULT_GRID.rows);
+        // Record workspace synchronously before React commits `setTabState` so a fast-exit
+        // `TERMINAL_EXIT` event still files the error backlog to workspace history.
+        pendingTerminalWsRef.current.set(ptyId, workspaceId);
         // The workspace goes on the tab, not just into the open call: the shell's
         // cwd was pinned from it, and it is the key the scrollback is filed under
         // if this tab is closed and reopened.
@@ -2415,9 +2481,14 @@ export const App: React.FC = () => {
   const resetMachineTab = useCallback(
     async (id: string): Promise<{ copyOnWrite: boolean }> => {
       const size = machineScreens.size(id) ?? { cols: DEFAULT_GRID.cols, rows: DEFAULT_GRID.rows };
+      const exitsBefore = machineExitCountRef.current.get(id) ?? 0;
       const opened = await resetMachine(id, size.cols, size.rows);
-      machineScreens.revive(id);
-      setTabState((prev) => markMachineReset(prev, id, { copyOnWrite: opened.copy_on_write, note: opened.note }));
+      // If the new jail already exited before the reset IPC reply arrived, do not flip it back to alive.
+      const exitedDuringReset = (machineExitCountRef.current.get(id) ?? 0) > exitsBefore;
+      if (!exitedDuringReset) {
+        machineScreens.revive(id);
+        setTabState((prev) => markMachineReset(prev, id, { copyOnWrite: opened.copy_on_write, note: opened.note }));
+      }
       return { copyOnWrite: opened.copy_on_write };
     },
     [machineScreens],
@@ -2468,8 +2539,11 @@ export const App: React.FC = () => {
       }
       const id = tabId("editor");
       setTabState((prev) => openEditorTab(prev, file, { show, id }));
-      // The next call in this same breath (an edit right after an open) must find the tab: the ref is a render behind.
-      liveRef.current = { ...liveRef.current, tabState: openEditorTab(liveRef.current.tabState, file, { show, id }) };
+      // The next call in this same breath (an edit or failed-open close right after an open) must find the tab:
+      // the refs are otherwise a render behind.
+      const nextSync = openEditorTab(liveRef.current.tabState, file, { show, id });
+      liveRef.current = { ...liveRef.current, tabState: nextSync };
+      tabStateRef.current = nextSync;
       return { tabId: id, opened: true };
     },
     [],
@@ -2535,7 +2609,10 @@ export const App: React.FC = () => {
         // Only an editor, and only one with nothing in it that is not saved: the assistant undoes its own open, and
         // never throws away a person's text.
         const tab = liveRef.current.tabState.tabs.find((t) => t.id === id);
-        if (tab?.kind === "editor" && !editorBuffers.get(id)?.dirty) closeTabNow(id);
+        if (tab?.kind === "editor" && !editorBuffers.get(id)?.dirty) {
+          closeTabNow(id);
+          liveRef.current = { ...liveRef.current, tabState: tabStateRef.current };
+        }
       },
     }),
     [placeEditorTab, setSplit, closeTabNow],
@@ -2835,6 +2912,16 @@ export const App: React.FC = () => {
     void listenShellEvent<unknown>(BROWSER_POPUP_REQUESTED, (payload) => {
       const popup = readBrowserPopupRequested(payload);
       if (!popup) return;
+      // Rate-limit popups per source tab and cap total open browser tabs so a hostile page
+      // calling `window.open()` in a loop cannot trigger a native WebView bomb.
+      const openBrowsers = tabStateRef.current.tabs.filter((t) => t.kind === "browser").length;
+      if (openBrowsers >= 24) return;
+      const now = Date.now();
+      const source = popup.tab_id || "__global__";
+      const recent = (popupBurstRef.current.get(source) ?? []).filter((ts) => now - ts < 5_000);
+      if (recent.length >= 3) return;
+      recent.push(now);
+      popupBurstRef.current.set(source, recent);
       handleOpenLink(popup.url);
     })
       .then((off) => {
@@ -3048,6 +3135,11 @@ export const App: React.FC = () => {
           prev.map((msg) => {
             if (msg.id !== messageId) return msg;
             const existingEvents = msg.events || [];
+            const last = existingEvents[existingEvents.length - 1];
+            // Fast path: live stream events arrive strictly in order, avoiding O(N log N) sort per delta.
+            if (!last || ev.sequence > last.sequence) {
+              return { ...msg, events: [...existingEvents, ev] };
+            }
             if (existingEvents.some((item) => item.sequence === ev.sequence)) {
               return msg;
             }
@@ -3444,15 +3536,27 @@ export const App: React.FC = () => {
     if (engineUp === true) hydrateThread(activeConversationId);
   }, [activeConversationId, engineUp, hydrateThread]);
 
-  // Poll active goals periodically
+  // Poll active goals periodically. Only armed while at least one goal is
+  // pollable, and reads `messagesRef`/`modeRef` so streaming events do not
+  // reset the 1.5 s timer and idle sessions run no interval at all.
+  const hasPollableGoal = messages.some(
+    (msg) =>
+      msg.goal &&
+      (msg.goal.status === "PLANNING" ||
+        msg.goal.status === "RUNNING" ||
+        (mode === "direct" && msg.goal.status === "PENDING")),
+  );
   useEffect(() => {
+    if (!hasPollableGoal) return;
     const interval = setInterval(() => {
       if (polling.current) return;
       polling.current = true;
       (async () => {
+        const snapshot = messagesRef.current;
+        const currentMode = modeRef.current;
         // Prune entries for goals that already reached a terminal status so
         // the set cannot grow without bound across a long session.
-        for (const m of messages) {
+        for (const m of snapshot) {
           if (m.goal && TERMINAL_STATUSES.has(m.goal.status)) {
             autoStartedGoals.current.delete(m.goal.id);
           }
@@ -3464,12 +3568,12 @@ export const App: React.FC = () => {
           );
           for (const id of ids) autoStartedGoals.current.delete(id);
         }
-        for (const msg of messages) {
+        for (const msg of snapshot) {
           if (
             msg.goal &&
             (msg.goal.status === "PLANNING" ||
               msg.goal.status === "RUNNING" ||
-              (mode === "direct" && msg.goal.status === "PENDING"))
+              (currentMode === "direct" && msg.goal.status === "PENDING"))
           ) {
             const goalId = msg.goal.id;
             try {
@@ -3477,17 +3581,28 @@ export const App: React.FC = () => {
               const ticket = goalReads.current.begin(goalId);
               const refreshed = await getGoal(goalId);
               if (goalReads.current.apply(goalId, ticket)) {
-                setMessages((prev) =>
-                  prev.map((m) =>
+                setMessages((prev) => {
+                  const idx = prev.findIndex((m) => m.id === msg.id);
+                  if (idx === -1) return prev;
+                  const existing = prev[idx].goal;
+                  if (
+                    existing &&
+                    existing.version === refreshed.version &&
+                    existing.status === refreshed.status &&
+                    (existing.steps?.length ?? 0) === (refreshed.steps?.length ?? 0)
+                  ) {
+                    return prev;
+                  }
+                  return prev.map((m) =>
                     m.id === msg.id ? { ...m, goal: refreshed } : m,
-                  ),
-                );
+                  );
+                });
               }
 
               // Direct mode means direct: start as soon as the plan is ready,
               // whatever we happened to observe first.
               if (
-                mode === "direct" &&
+                modeRef.current === "direct" &&
                 refreshed.status === "PENDING" &&
                 !autoStartedGoals.current.has(goalId)
               ) {
@@ -3514,7 +3629,7 @@ export const App: React.FC = () => {
     }, 1500);
 
     return () => clearInterval(interval);
-  }, [messages, mode, TERMINAL_STATUSES]);
+  }, [hasPollableGoal, messages, mode, TERMINAL_STATUSES]);
 
   /** Import a downloaded audit JSON back into the transcript as a readable
    * report. A closed artifact: it needs no engine connection, so a run can be
@@ -3632,8 +3747,10 @@ export const App: React.FC = () => {
       }
     }
 
-    const userMsgId = `user-${Date.now()}`;
-    const assistantMsgId = `assistant-${Date.now() + 1}`;
+    const seq = ++msgSeqRef.current;
+    const now = Date.now();
+    const userMsgId = `user-${now}-${seq}`;
+    const assistantMsgId = `assistant-${now}-${seq}`;
 
     const userMsg: ChatMessage = {
       id: userMsgId,
@@ -3881,9 +3998,9 @@ export const App: React.FC = () => {
   const handleSetGoalTrace = async (goalId: string, enabled: boolean) => {
     setError(null);
     // The engine owns the rule about when a recording may start, and refuses
-    // with `trace_locked` once the run has begun. That refusal is surfaced here
-    // rather than swallowed: a control that silently did nothing is worse than
-    // one that says why.
+    // with `trace_locked` once the run has begun. That refusal is surfaced by
+    // the caller (TracePanel) rather than swallowed: a control that silently
+    // did nothing is worse than one that says why.
     const updated = await setGoalTrace(goalId, enabled);
     setMessages((prev) =>
       prev.map((m) => (m.goal?.id === goalId ? { ...m, goal: updated } : m)),

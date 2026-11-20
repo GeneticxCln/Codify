@@ -66,7 +66,7 @@
 //! so the worst a hostile page can talk the model into is showing the user a
 //! different page, which it could already do by navigating itself.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -99,6 +99,12 @@ pub const CHUNK_CHARS: usize = 2_400;
 /// buffer is a page being able to grow this process's memory one URL at a
 /// time.
 pub const MAX_REPLY_CHARS: usize = 4 * 1024 * 1024;
+
+/// Maximum distinct sequence numbers accepted for one reply. Bounds memory
+/// against a page sending thousands of tiny/empty chunks or absurd sequence
+/// numbers. At [`CHUNK_CHARS`] = 2,400, even a full 4 MiB reply fits well
+/// under this cap.
+const MAX_REPLY_CHUNKS: usize = 4_096;
 
 /// How many links one page read may bring back.
 ///
@@ -140,8 +146,26 @@ pub type Answer = String;
 
 struct Pending {
     sender: oneshot::Sender<Answer>,
-    chunks: Vec<String>,
-    next: usize,
+    chunks: BTreeMap<usize, String>,
+    held_bytes: usize,
+    last_seq: Option<usize>,
+}
+
+/// What the UI's focus state says about browser tabs.
+///
+/// Three distinct states rather than `Option<String>`:
+/// - [`ActivePage::Unset`]: boot-time default before `codify_browser_focus` has
+///   ever been called.
+/// - [`ActivePage::None`]: the UI explicitly called `codify_browser_focus("")`
+///   because a non-browser surface (Settings, Command Palette, Chat, Terminal)
+///   is showing.
+/// - [`ActivePage::Tab`]: the UI explicitly focused that browser tab.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub enum ActivePage {
+    #[default]
+    Unset,
+    None,
+    Tab(String),
 }
 
 /// Everything the bridge remembers between a question and its answer.
@@ -152,7 +176,7 @@ struct State {
     /// when a request names no tab, which is what "the page the user is
     /// looking at" has to mean when the request came from a model that
     /// cannot see the screen.
-    active: Option<String>,
+    active: ActivePage,
 }
 
 static STATE: Mutex<Option<State>> = Mutex::new(None);
@@ -171,11 +195,12 @@ fn with_state<T>(f: impl FnOnce(&mut State) -> T) -> T {
 /// precisely because it cannot ask — so there is nothing to read it from, and
 /// recording it at the one moment it is known is the whole of the mechanism.
 pub fn note_active(tab_id: &str) {
-    if tab_id.is_empty() {
-        with_state(|state| state.active = None);
-        return;
-    }
-    with_state(|state| state.active = Some(tab_id.to_string()));
+    let next = if tab_id.is_empty() {
+        ActivePage::None
+    } else {
+        ActivePage::Tab(tab_id.to_string())
+    };
+    with_state(|state| state.active = next);
 }
 
 /// Which browser tab the user last looked at, if any.
@@ -183,8 +208,8 @@ pub fn note_active(tab_id: &str) {
 /// The read side of [`note_active`]: the focus command records the fact and
 /// `page_layer` consults it when a page is seated, because a background tab's
 /// page must never be made visible by the act of seating it — see
-/// `page_layer::seat_visibility` for the rule this feeds.
-pub fn active() -> Option<String> {
+/// `browser::seat_visibility` for the rule this feeds.
+pub fn active() -> ActivePage {
     with_state(|state| state.active.clone())
 }
 
@@ -197,8 +222,9 @@ pub fn begin(request: &BridgeRequest) -> Result<oneshot::Receiver<Answer>, Strin
             id,
             Pending {
                 sender,
-                chunks: Vec::new(),
-                next: 0,
+                chunks: BTreeMap::new(),
+                held_bytes: 0,
+                last_seq: None,
             },
         );
     });
@@ -209,8 +235,9 @@ pub fn begin(request: &BridgeRequest) -> Result<oneshot::Receiver<Answer>, Strin
 enum Taken {
     /// A chunk of an answer still being assembled. Used, and not finished.
     Chunk,
-    /// The last chunk: the whole answer, decoded, parsed and handed over.
-    Complete,
+    /// The final missing chunk arrived: assembly and JSON parsing happen
+    /// outside the global `STATE` lock.
+    Complete(Pending),
     /// Not ours. The ordinary answer for a page being a page.
     Refused,
 }
@@ -219,51 +246,74 @@ enum Taken {
 ///
 /// Returns whether the reply was *used*, which is not the same as whether the
 /// answer is finished: a page sending a twenty-chunk answer has its first
-/// chunk accepted long before it has anything to say. False is the ordinary
-/// answer for a wrong id, a chunk out of order, a second copy of one already
-/// taken, or a question that was already given up on. None of those are worth
-/// an error — a page is free to fetch anything it likes, and the only thing
-/// that matters is that none of it reaches the model.
+/// chunk accepted long before it has anything to say. Chunks that arrive out
+/// of order are buffered in sequence order up to [`MAX_REPLY_CHARS`]; a second
+/// copy of a sequence number already seen is refused so the first copy always
+/// stands. False is the ordinary answer for a wrong id, a duplicate chunk, or
+/// a question that was already given up on.
 pub fn deliver(url: &str) -> bool {
     let Some(reply) = Reply::parse(url) else {
         return false;
     };
-    // Taken out of the map first and put back if it is not this chunk's turn.
-    // Holding a `&mut` into the map while removing from it is the borrow
-    // error's whole subject, and the entry is a handful of strings either
-    // way — the cost of moving it is nothing next to the clarity.
     let taken = with_state(|state| {
         let Some(mut pending) = state.pending.remove(&reply.id) else {
             return Taken::Refused;
         };
-        // Strictly next, never "the last one we saw": a page that resends
-        // chunk 3 after chunk 4 has already been accepted must not overwrite
-        // it, and the cheapest way to say that is to require the number.
-        if reply.seq != pending.next {
+        // Reject out-of-range sequence numbers, duplicates (first copy always
+        // wins), chunks past a known final sequence, or conflicting `last`
+        // markers.
+        let invalid_seq = reply.seq >= MAX_REPLY_CHUNKS
+            || pending.chunks.contains_key(&reply.seq)
+            || pending.last_seq.is_some_and(|last| reply.seq > last)
+            || (reply.last
+                && (pending.last_seq.is_some()
+                    || pending
+                        .chunks
+                        .keys()
+                        .next_back()
+                        .is_some_and(|&max| max > reply.seq)));
+        if invalid_seq {
             state.pending.insert(reply.id.clone(), pending);
             return Taken::Refused;
         }
-        let held: usize = pending.chunks.iter().map(String::len).sum();
-        if held + reply.chunk.len() > MAX_REPLY_CHARS {
+        let next_held = pending.held_bytes.saturating_add(reply.chunk.len());
+        if next_held > MAX_REPLY_CHARS {
             // Not put back: the question is dropped, and the sender going
             // with it is what tells the waiting read that it will not be
             // answered rather than leaving it to time out.
             return Taken::Refused;
         }
-        pending.chunks.push(reply.chunk);
-        pending.next += 1;
-        if !reply.last {
+        pending.held_bytes = next_held;
+        pending.chunks.insert(reply.seq, reply.chunk);
+        if reply.last {
+            pending.last_seq = Some(reply.seq);
+        }
+        let complete = pending.last_seq.is_some_and(|last| {
+            pending.chunks.len() == last + 1 && pending.chunks.keys().next_back() == Some(&last)
+        });
+        if !complete {
             state.pending.insert(reply.id.clone(), pending);
             return Taken::Chunk;
         }
-        let text = pending.chunks.concat();
-        let decoded = percent_decode(&text).unwrap_or(text);
-        match serde_json::from_str::<serde_json::Value>(&decoded) {
-            Ok(value) if pending.sender.send(value.to_string()).is_ok() => Taken::Complete,
-            _ => Taken::Refused,
-        }
+        Taken::Complete(pending)
     });
-    matches!(taken, Taken::Chunk | Taken::Complete)
+    // Assemble, decode and parse JSON after releasing the global `STATE` mutex
+    // so multi-megabyte replies never stall other bridge operations.
+    match taken {
+        Taken::Chunk => true,
+        Taken::Refused => false,
+        Taken::Complete(pending) => {
+            let mut text = String::with_capacity(pending.held_bytes);
+            for chunk in pending.chunks.values() {
+                text.push_str(chunk);
+            }
+            let decoded = percent_decode(&text).unwrap_or(text);
+            match serde_json::from_str::<serde_json::Value>(&decoded) {
+                Ok(value) => pending.sender.send(value.to_string()).is_ok(),
+                Err(_) => false,
+            }
+        }
+    }
 }
 
 /// Give up on a question: the page never answered, or the tab went away.
@@ -376,7 +426,10 @@ pub fn resolve_tab(app: &AppHandle, requested: Option<&str>) -> Result<String, S
             ))
         };
     }
-    let active = with_state(|state| state.active.clone());
+    let active = with_state(|state| match &state.active {
+        ActivePage::Tab(name) => Some(name.clone()),
+        ActivePage::Unset | ActivePage::None => None,
+    });
     if let Some(name) = active.filter(|name| tabs.iter().any(|t| t == name)) {
         return Ok(name);
     }
@@ -543,7 +596,14 @@ pub fn read_script(request: &BridgeRequest) -> Result<String, String> {
   // runs on whatever it is finally asked to navigate to.
   var links = [];
   try {{
-    var anchors = document.querySelectorAll("a[href]");
+    var anchors = [];
+    if (target !== null) {{
+      if (target.matches && target.matches("a[href]")) {{ anchors.push(target); }}
+      var scoped = target.querySelectorAll("a[href]");
+      for (var j = 0; j < scoped.length; j++) {{ anchors.push(scoped[j]); }}
+    }} else {{
+      anchors = document.querySelectorAll("a[href]");
+    }}
     for (var i = 0; i < anchors.length && links.length < {max_links}; i++) {{
       var anchor = anchors[i];
       var href;
@@ -599,8 +659,8 @@ pub fn click_script(request: &BridgeRequest) -> Result<String, String> {
     answer(disabled);
     return;
   }}
-  try {{ target.click(); }} catch (e) {{
-    var refused = {{ error: "the page refused that click: " + String(e) }};
+  if (typeof target.click !== "function") {{
+    var refused = {{ error: "the page refused that click: " + SELECTOR + " cannot be clicked" }};
     var at_refused = where_you_are();
     refused.url = at_refused.url;
     refused.title = at_refused.title;
@@ -618,6 +678,12 @@ pub fn click_script(request: &BridgeRequest) -> Result<String, String> {
     url: done.url,
     title: done.title
   }});
+  // Queue the click on the next tick after the reply requests are dispatched,
+  // so navigation-triggering clicks (<a href>, form submits) do not tear down
+  // the page and cancel the bridge reply before it reaches the shell.
+  setTimeout(function () {{
+    try {{ target.click(); }} catch (e) {{}}
+  }}, 0);
 }})();"#
     ))
 }
@@ -661,7 +727,11 @@ pub fn type_script(request: &BridgeRequest) -> Result<String, String> {
   if (tag === "input") {{
     var kind = "";
     try {{ kind = String(target.type || "text").toLowerCase(); }} catch (e) {{ kind = ""; }}
-    if (kind === "checkbox" || kind === "radio" || kind === "file") {{
+    if (
+      kind === "hidden" || kind === "submit" || kind === "button" || kind === "reset" ||
+      kind === "image" || kind === "range" || kind === "color" ||
+      kind === "checkbox" || kind === "radio" || kind === "file"
+    ) {{
       var nottext = {{ error: SELECTOR + " is an <input type=" + kind + ">, which is not a field to type into" }};
       var at_nottext = where_you_are();
       nottext.url = at_nottext.url;
@@ -669,6 +739,25 @@ pub fn type_script(request: &BridgeRequest) -> Result<String, String> {
       answer(nottext);
       return;
     }}
+  }}
+  var blocked = false;
+  var blocked_why = "disabled";
+  try {{
+    if (target.disabled === true || target.getAttribute("aria-disabled") === "true") {{
+      blocked = true;
+      blocked_why = "disabled";
+    }} else if (target.readOnly === true) {{
+      blocked = true;
+      blocked_why = "read-only";
+    }}
+  }} catch (e) {{ blocked = false; }}
+  if (blocked) {{
+    var locked = {{ error: SELECTOR + " is " + blocked_why + ", so typing into it would do nothing" }};
+    var at_locked = where_you_are();
+    locked.url = at_locked.url;
+    locked.title = at_locked.title;
+    answer(locked);
+    return;
   }}
   try {{
     target.focus();
@@ -753,6 +842,31 @@ fn navigate_tab(app: &AppHandle, request: &BridgeRequest) -> Result<serde_json::
     }))
 }
 
+/// Drop guard that ensures a registered pending request is always removed from
+/// `STATE.pending` if `ask_page` returns early, errors, or is cancelled.
+struct PendingGuard {
+    id: String,
+    active: bool,
+}
+
+impl PendingGuard {
+    fn new(id: String) -> Self {
+        Self { id, active: true }
+    }
+
+    fn disarm(&mut self) {
+        self.active = false;
+    }
+}
+
+impl Drop for PendingGuard {
+    fn drop(&mut self) {
+        if self.active {
+            abandon(&self.id);
+        }
+    }
+}
+
 /// Ask one page one question, and wait for the answer.
 ///
 /// Returns the answer as the page's parsed JSON. Everything in it is the
@@ -782,17 +896,24 @@ pub async fn ask_page(
     };
 
     let receiver = begin(&request)?;
+    let mut pending_guard = PendingGuard::new(request.id.clone());
     // By label, straight out of the manager — the same reason `open_tabs` does
     // it: `get_webview_window("main")` is `None` from the moment the first
     // page is seated, so going through the window found nothing to ask.
-    let page = app
-        .get_webview(&label)
-        .ok_or_else(|| format!("the tab {tab:?} is not open any more"))?;
-    page.eval(&script)
-        .map_err(|e| format!("could not ask the page in {tab:?}: {e}"))?;
+    let Some(page) = app.get_webview(&label) else {
+        pending_guard.disarm();
+        abandon(&request.id);
+        return Err(format!("the tab {tab:?} is not open any more"));
+    };
+    if let Err(e) = page.eval(&script) {
+        pending_guard.disarm();
+        abandon(&request.id);
+        return Err(format!("could not ask the page in {tab:?}: {e}"));
+    }
 
     match tokio::time::timeout(PAGE_TIMEOUT, receiver).await {
         Ok(Ok(answer)) => {
+            pending_guard.disarm();
             let value: serde_json::Value = serde_json::from_str(&answer)
                 .map_err(|e| format!("the page answered with something that is not JSON: {e}"))?;
             // The page reporting its own failure — a selector that matched
@@ -811,8 +932,12 @@ pub async fn ask_page(
         }
         // The sender is dropped when the pending entry is removed, which is
         // how a question that nothing answered says so instead of waiting.
-        Ok(Err(_)) => Err("the browser dropped that page read".to_string()),
+        Ok(Err(_)) => {
+            pending_guard.disarm();
+            Err("the browser dropped that page read".to_string())
+        }
         Err(_) => {
+            pending_guard.disarm();
             abandon(&request.id);
             Err(format!(
                 "the page in tab {tab:?} did not answer within {}s — it may be \
@@ -878,6 +1003,31 @@ pub fn scheme_handler(
         .unwrap_or_else(|_| tauri::http::Response::new(Vec::new()))
 }
 
+/// How one `/bridge/next` poll response should be handled by [`start`].
+#[derive(Debug)]
+enum PollOutcome {
+    /// A real request to execute against a page.
+    Request(BridgeRequest),
+    /// A normal long-poll timeout (`{"id": null}`): re-poll immediately.
+    Idle,
+    /// A non-2xx HTTP error or unexpected JSON payload: sleep with backoff
+    /// before retrying so the loop can never spin at 100% CPU.
+    Backoff,
+}
+
+fn classify_poll_response(status_ok: bool, body: serde_json::Value) -> PollOutcome {
+    if !status_ok {
+        return PollOutcome::Backoff;
+    }
+    if body.get("id").is_some_and(serde_json::Value::is_null) {
+        return PollOutcome::Idle;
+    }
+    match serde_json::from_value::<BridgeRequest>(body) {
+        Ok(request) => PollOutcome::Request(request),
+        Err(_) => PollOutcome::Backoff,
+    }
+}
+
 /// Poll the engine for questions, for as long as the app runs.
 ///
 /// A long poll and not a WebSocket, which is the engine's decision as much as
@@ -916,12 +1066,22 @@ pub fn start(app: AppHandle, engine: crate::SharedEngineState) {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             };
+            let status_ok = response.status().is_success();
+            if !status_ok {
+                tokio::time::sleep(Duration::from_secs(2)).await;
+                continue;
+            }
             let Ok(body) = response.json::<serde_json::Value>().await else {
                 tokio::time::sleep(Duration::from_secs(2)).await;
                 continue;
             };
-            let Some(request) = serde_json::from_value::<BridgeRequest>(body).ok() else {
-                continue;
+            let request = match classify_poll_response(status_ok, body) {
+                PollOutcome::Request(request) => request,
+                PollOutcome::Idle => continue,
+                PollOutcome::Backoff => {
+                    tokio::time::sleep(Duration::from_secs(2)).await;
+                    continue;
+                }
             };
 
             let app_for_ask = app.clone();
@@ -1036,8 +1196,13 @@ pub fn smoke_bridge_enabled() -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// Reset the recorded focus state back to boot-time [`ActivePage::Unset`].
+    pub(crate) fn reset_active_for_test() {
+        with_state(|state| state.active = ActivePage::Unset);
+    }
 
     fn request(id: &str) -> BridgeRequest {
         BridgeRequest {
@@ -1097,11 +1262,12 @@ mod tests {
     fn a_question_is_answered_only_by_its_own_chunks_in_order() {
         let req = request("ordered1");
         let receiver = begin(&req).unwrap();
-        // Out of order is refused rather than buffered: a page that resends
-        // chunk 1 before chunk 0 must not be able to have its second copy win.
-        assert!(!deliver("codify-bridge://reply/ordered1/1/1/%22b%22%7D"));
-        assert!(deliver("codify-bridge://reply/ordered1/0/0/%7B%22a%22%3A"));
+        // Out-of-order chunks are buffered and reassembled by sequence number,
+        // while a second copy of an already-received sequence number is refused
+        // so the first copy always wins.
         assert!(deliver("codify-bridge://reply/ordered1/1/1/%22b%22%7D"));
+        assert!(!deliver("codify-bridge://reply/ordered1/1/1/%22evil%22%7D"));
+        assert!(deliver("codify-bridge://reply/ordered1/0/0/%7B%22a%22%3A"));
         // `blocking_recv`, not `await`: `begin` and `deliver` are both
         // synchronous, and an async test would need tokio's `macros` and `rt`
         // features in dev-dependencies for a wait that blocks for nothing.
@@ -1700,5 +1866,127 @@ mod tests {
              reaches no arm is refused as an unknown operation"
         );
         assert!(source.contains(r#""navigate" => navigate_tab(app, &request)"#));
+    }
+
+    #[test]
+    fn poll_response_backs_off_on_non_2xx_and_malformed_json_but_not_normal_idle() {
+        assert!(matches!(
+            classify_poll_response(false, serde_json::json!({"detail": "Unauthorized"})),
+            PollOutcome::Backoff
+        ));
+        assert!(matches!(
+            classify_poll_response(true, serde_json::json!({"detail": "unexpected"})),
+            PollOutcome::Backoff
+        ));
+        assert!(matches!(
+            classify_poll_response(true, serde_json::json!({"id": null})),
+            PollOutcome::Idle
+        ));
+        let outcome = classify_poll_response(
+            true,
+            serde_json::json!({"id": "req0001", "op": "read_page"}),
+        );
+        assert!(matches!(outcome, PollOutcome::Request(ref r) if r.id == "req0001"));
+
+        // Ensure `start()` checks `response.status().is_success()` and sleeps on backoff.
+        let source = include_str!("webview_bridge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let start_fn = source
+            .split("pub fn start(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub const SMOKE_BRIDGE_LINE").next())
+            .unwrap_or_default();
+        assert!(start_fn.contains("response.status().is_success()"));
+        assert!(start_fn.contains("PollOutcome::Backoff"));
+    }
+
+    #[test]
+    fn pending_guard_abandons_on_drop_and_ask_page_cleans_up_early_errors() {
+        let req = request("guarddrop1");
+        let _rx = begin(&req).unwrap();
+        {
+            let _guard = PendingGuard::new(req.id.clone());
+        }
+        // Guard dropped while armed -> entry was abandoned.
+        assert!(!deliver("codify-bridge://reply/guarddrop1/0/1/%7B%7D"));
+
+        // Guard disarmed -> entry stays pending until delivered.
+        let req2 = request("guardok01");
+        let rx2 = begin(&req2).unwrap();
+        {
+            let mut guard = PendingGuard::new(req2.id.clone());
+            guard.disarm();
+        }
+        assert!(deliver(
+            "codify-bridge://reply/guardok01/0/1/%7B%22ok%22%3Atrue%7D"
+        ));
+        assert_eq!(rx2.blocking_recv().unwrap(), r#"{"ok":true}"#);
+
+        // Source-pin: ask_page calls abandon on both get_webview and eval failures.
+        let source = include_str!("webview_bridge.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap_or_default();
+        let ask_fn = source
+            .split("pub async fn ask_page(")
+            .nth(1)
+            .and_then(|rest| rest.split("pub fn post_answer(").next())
+            .unwrap_or_default();
+        assert!(ask_fn.contains("PendingGuard::new"));
+        assert!(ask_fn.matches("abandon(&request.id)").count() >= 3);
+    }
+
+    #[test]
+    fn read_script_scopes_links_to_selector_target_when_given() {
+        let script =
+            read_script(&verb_request("scope001", "read_page", Some("main"), None)).unwrap();
+        assert!(script.contains(r#"target.querySelectorAll("a[href]")"#));
+        assert!(script.contains(r#"target.matches("a[href]")"#));
+        assert!(script.contains(r#"document.querySelectorAll("a[href]")"#));
+    }
+
+    #[test]
+    fn click_script_answers_before_deferred_click_so_navigations_do_not_cancel_reply() {
+        let script =
+            click_script(&verb_request("navclk01", "click", Some("a.next"), None)).unwrap();
+        let answer_pos = script
+            .find(r#"acted: "clicked""#)
+            .expect("click_script emits acted: clicked");
+        let click_pos = script
+            .find("target.click()")
+            .expect("click_script invokes target.click()");
+        assert!(
+            answer_pos < click_pos,
+            "click_script must send the reply before triggering target.click() so navigations do not cancel the reply"
+        );
+        assert!(
+            script.contains("setTimeout("),
+            "click_script must defer target.click() so reply requests flush first"
+        );
+    }
+
+    #[test]
+    fn type_script_rejects_disabled_readonly_and_non_text_input_types() {
+        let script = type_script(&verb_request(
+            "typechk1",
+            "type",
+            Some("input#x"),
+            Some("abc"),
+        ))
+        .unwrap();
+        assert!(script.contains("target.disabled === true"));
+        assert!(script.contains(r#"target.getAttribute("aria-disabled") === "true""#));
+        assert!(script.contains("target.readOnly === true"));
+        for forbidden_kind in [
+            "hidden", "submit", "button", "reset", "image", "range", "color", "checkbox", "radio",
+            "file",
+        ] {
+            assert!(
+                script.contains(&format!(r#"kind === "{forbidden_kind}""#)),
+                "type_script must reject <input type={forbidden_kind}>"
+            );
+        }
     }
 }

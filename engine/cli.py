@@ -32,6 +32,7 @@ import time
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any, TextIO
+from urllib.parse import quote
 
 import httpx
 
@@ -85,7 +86,7 @@ async def looks_like_the_engine(client: httpx.AsyncClient, base: str) -> bool:
     try:
         res = await client.get(f"{base}/health", timeout=0.75)
         body = res.json()
-    except (httpx.HTTPError, ValueError):
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError):
         return False
     return res.status_code == 401 and isinstance(body, dict) and body.get("code") == "unauthorized"
 
@@ -119,7 +120,7 @@ class Engine:
                 method, f"{self.base}{path}", json=json_body, params=params,
                 headers={"Authorization": f"Bearer {self.token}"}, timeout=30.0,
             )
-        except httpx.HTTPError as exc:
+        except (httpx.HTTPError, httpx.InvalidURL, ValueError) as exc:
             raise CliError(f"could not reach the engine at {self.base}: {exc}", EXIT_UNREACHABLE) from exc
         if res.status_code == 401:
             raise CliError("the engine refused the token. It changes if the engine's state directory does.", EXIT_REFUSED)
@@ -134,7 +135,10 @@ class Engine:
             raise CliError(f"{res.status_code}: {message or res.text.strip()[:300] or 'refused'}")
         if res.status_code == 204 or not res.content:
             return None
-        return res.json()
+        try:
+            return res.json()
+        except ValueError as exc:
+            raise CliError(f"invalid JSON reply from {self.base}{path}: {exc}", EXIT_REFUSED) from exc
 
 
 # ── commands ──────────────────────────────────────────────────────────────────────────────────────────────────────
@@ -167,18 +171,20 @@ async def cmd_goals(engine: Engine, args: argparse.Namespace, out: TextIO) -> No
 async def cmd_ask(engine: Engine, args: argparse.Namespace, out: TextIO) -> None:
     """A turn, made the way the composer makes one: a thread, then the words and nothing else."""
     convo = await engine.call("POST", "/conversations", json_body={"workspace_id": args.workspace, "title": args.prompt[:60]})
-    goal = await engine.call("POST", f"/conversations/{convo['id']}/turns", json_body={"prompt": args.prompt})
+    convo_id = quote(str(convo["id"]), safe="")
+    goal = await engine.call("POST", f"/conversations/{convo_id}/turns", json_body={"prompt": args.prompt})
     if not args.wait:
         _emit(out, goal, args.json, f"turn {goal['id']} started in thread {convo['id']}")
         return
+    goal_id = quote(str(goal["id"]), safe="")
     deadline = time.monotonic() + args.timeout
     status = goal["status"]
     while status not in SETTLED:
         if time.monotonic() > deadline:
             raise CliError(f"still {status} after {args.timeout:.0f}s; turn {goal['id']} keeps running in the engine")
         await asyncio.sleep(WAIT_POLL_S)
-        status = (await engine.call("GET", f"/goals/{goal['id']}"))["status"]
-    events = await engine.call("GET", f"/goals/{goal['id']}/events")
+        status = (await engine.call("GET", f"/goals/{goal_id}"))["status"]
+    events = await engine.call("GET", f"/goals/{goal_id}/events")
     replies = [e for e in events if e.get("type") == "log" and (e.get("payload") or {}).get("turn") is True]
     reply = str(replies[-1]["payload"].get("message", "")) if replies else ""
     note = ""
@@ -201,10 +207,12 @@ async def cmd_suggestions(engine: Engine, args: argparse.Namespace, out: TextIO)
         made = await engine.call("POST", "/suggestions/scan")
         _emit(out, made, args.json, f"{made['created']} new suggestion(s)")
     elif action == "dismiss":
-        await engine.call("POST", f"/suggestions/{args.id}/dismiss")
+        sug_id = quote(str(args.id), safe="")
+        await engine.call("POST", f"/suggestions/{sug_id}/dismiss")
         _emit(out, {"ok": True}, args.json, "dismissed")
     elif action == "snooze":
-        await engine.call("POST", f"/suggestions/{args.id}/snooze", json_body={"hours": args.hours})
+        sug_id = quote(str(args.id), safe="")
+        await engine.call("POST", f"/suggestions/{sug_id}/snooze", json_body={"hours": args.hours})
         _emit(out, {"ok": True}, args.json, f"snoozed for {args.hours} h")
 
 
@@ -218,7 +226,8 @@ async def cmd_notes(engine: Engine, args: argparse.Namespace, out: TextIO) -> No
         made = await engine.call("POST", "/settings/notes", json_body={"text": args.text})
         _emit(out, made, args.json, f"kept {made['id']}")
     elif args.action == "delete":
-        await engine.call("DELETE", f"/settings/notes/{args.id}")
+        note_id = quote(str(args.id), safe="")
+        await engine.call("DELETE", f"/settings/notes/{note_id}")
         _emit(out, {"ok": True}, args.json, "deleted")
 
 
@@ -230,10 +239,13 @@ async def cmd_profile(engine: Engine, args: argparse.Namespace, out: TextIO) -> 
         document = await engine.call("GET", "/profile/export", params=params)
         text = json.dumps(document, indent=2) + "\n"
         if args.output:
-            # Owner-only, like the state it came from: a profile holds prompts and, if asked for, what a workspace learned.
-            fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
-                handle.write(text)
+            try:
+                # Owner-only, like the state it came from: a profile holds prompts and, if asked for, what a workspace learned.
+                fd = os.open(args.output, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+            except OSError as exc:
+                raise CliError(f"could not write {args.output}: {exc}", EXIT_USAGE) from exc
             out.write(f"wrote {args.output}\n")
         else:
             out.write(text)
@@ -345,6 +357,9 @@ async def run(
     except CliError as exc:
         err.write(f"codify-cli: {exc}\n")
         return exc.code
+    except (httpx.HTTPError, httpx.InvalidURL, ValueError, OSError) as exc:
+        err.write(f"codify-cli: {exc}\n")
+        return EXIT_REFUSED
     return EXIT_OK
 
 

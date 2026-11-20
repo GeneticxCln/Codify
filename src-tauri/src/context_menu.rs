@@ -97,6 +97,13 @@ fn hides(action: webkit2gtk::ContextMenuAction) -> bool {
             | OpenLink
             | OpenLinkInNewWindow
             | OpenFrameInNewWindow
+            | OpenImageInNewWindow
+            | OpenVideoInNewWindow
+            | OpenAudioInNewWindow
+            | DownloadLinkToDisk
+            | DownloadImageToDisk
+            | DownloadVideoToDisk
+            | DownloadAudioToDisk
     )
 }
 
@@ -158,6 +165,13 @@ mod tests {
             OpenLink,
             OpenLinkInNewWindow,
             OpenFrameInNewWindow,
+            OpenImageInNewWindow,
+            OpenVideoInNewWindow,
+            OpenAudioInNewWindow,
+            DownloadLinkToDisk,
+            DownloadImageToDisk,
+            DownloadVideoToDisk,
+            DownloadAudioToDisk,
         ] {
             assert!(hides(action), "{action:?} should not be in the app's menu");
         }

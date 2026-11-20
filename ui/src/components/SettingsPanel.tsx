@@ -10,7 +10,7 @@ import {
   RoleInfo,
 } from "../types";
 import { fetchAgentCallStats, fetchProviders, fetchRoles, getEngineSettings, getLayaStatus, repairAgentConfigs, saveEngineSettings } from "../api";
-import { useAgentConfigs } from "../hooks/useAgentConfigs";
+import { useAgentConfigs, type AgentConfigStore } from "../hooks/useAgentConfigs";
 import { buildModelSignals } from "../modelSignals";
 import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
@@ -46,6 +46,8 @@ interface SettingsPanelProps {
    * be a save behind.
    */
   recentRuns?: RecentRunModel[];
+  /** Shared config store passed down by `SettingsModal` so both tabs observe one source of truth. */
+  store?: AgentConfigStore;
 }
 
 /**
@@ -225,10 +227,12 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   onRefreshModels,
   refreshingModels = false,
   recentRuns = [],
+  store: externalStore,
 }) => {
   // One config store for the whole screen, so every card and the summary below
   // read the same state and a save updates all of them.
-  const store = useAgentConfigs();
+  const localStore = useAgentConfigs(!externalStore);
+  const store = externalStore ?? localStore;
 
   // Which providers the engine ships, asked rather than assumed. This is not a
   // cosmetic list: the role cards use it to decide whether a provider is custom,
@@ -294,7 +298,9 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
   // the screen; an engine without the endpoint simply yields nothing.
   const [callStats, setCallStats] = useState<Record<string, AgentCallStat>>({});
   const [callStatsError, setCallStatsError] = useState<string | null>(null);
+  const [bulkBusy, setBulkBusy] = useState(false);
   useEffect(() => {
+    if (bulkBusy) return;
     let cancelled = false;
     fetchAgentCallStats()
       .then((stats) => {
@@ -312,7 +318,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     return () => {
       cancelled = true;
     };
-  }, [store.configs]);
+  }, [store.configs, bulkBusy]);
 
   const  orderedRoles =  useMemo<AgentRole[]>(
     () => store.configs.map((c) => c.role),
@@ -404,7 +410,6 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
     }
   };
 
-  const [bulkBusy, setBulkBusy] = useState(false);
   const [bulkError, setBulkError] = useState<string | null>(null);
 
   // ── Engine settings (persisted in the store, not env vars) ─────────────

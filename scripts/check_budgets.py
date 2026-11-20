@@ -25,7 +25,6 @@ import json
 import re
 import sys
 from pathlib import Path
-from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_DIST = ROOT / "ui" / "dist"
@@ -59,9 +58,11 @@ def measure(dist: Path) -> dict[str, int]:
 def load_budgets(path: Path) -> tuple[float, dict[str, int]]:
     """`(tolerance as a fraction, {metric: baseline bytes})`, validated."""
     try:
-        data: dict[str, Any] = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         raise BudgetError(f"{path} is not readable JSON: {exc}") from exc
+    if not isinstance(data, dict):
+        raise BudgetError(f"{path} must hold a JSON object, not {type(data).__name__}")
     tolerance = data.get("tolerance_pct")
     if isinstance(tolerance, bool) or not isinstance(tolerance, (int, float)) or not 0 <= tolerance <= 100:
         raise BudgetError(f"{path}: tolerance_pct must be a number from 0 to 100")

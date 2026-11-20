@@ -51,6 +51,8 @@ interface Flake {
   y: number;
   /** Radius in canvas pixels. Tier decides it. */
   r: number;
+  /** Base alpha from the flake's tier, stored once so draw avoids per-flake search. */
+  tierAlpha: number;
   /** Fall speed, canvas pixels per second. Larger for nearer flakes. */
   vy: number;
   /** Peak horizontal speed from this flake's own sway, px/s. */
@@ -121,8 +123,12 @@ export function createSnowFallPainter(read: (name: string) => string): Atmospher
 
   let flakes: Flake[] = [];
   let lights: Light[] = [];
+  let seededW = 0;
+  let seededH = 0;
 
   const seed = (w: number, h: number): void => {
+    seededW = w;
+    seededH = h;
     // Re-read rather than take a parameter: `seed` runs on the first frame and
     // on every resize, and it needs `hasGlow` to decide whether the warm lights
     // exist at all — a fact about the *current* theme, not about the painter.
@@ -136,6 +142,7 @@ export function createSnowFallPainter(read: (name: string) => string): Atmospher
           x: Math.random() * w,
           y: Math.random() * h,
           r: tier.r,
+          tierAlpha: tier.alpha,
           vy: tier.vy * (0.75 + 0.5 * depth),
           sway: 4 + Math.random() * 9,
           phase: Math.random() * Math.PI * 2,
@@ -197,14 +204,14 @@ export function createSnowFallPainter(read: (name: string) => string): Atmospher
       // tint restyles this canvas on the next frame instead of waiting for a
       // remount. See the hook's note on live reads.
       const { flakeA, flakeB, glowA, glowB } = palette();
-      if (flakes.length === 0) seed(size.width, size.height);
+      if (flakes.length === 0 || size.width !== seededW || size.height !== seededH) {
+        seed(size.width, size.height);
+      }
       const { width: w, height: h } = size;
       ctx.clearRect(0, 0, w, h);
 
       for (const f of flakes) {
-        const tier = TIERS.findIndex((t) => t.r === f.r);
-        const base = tier < 0 ? TIERS[0].alpha : TIERS[tier].alpha;
-        const alpha = base * (0.55 + 0.45 * f.depth);
+        const alpha = f.tierAlpha * (0.55 + 0.45 * f.depth);
         if (alpha < 0.02) continue;
         ctx.fillStyle = withAlpha(f.warm ? flakeB : flakeA, alpha);
         ctx.beginPath();

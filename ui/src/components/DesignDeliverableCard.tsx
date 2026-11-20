@@ -9,6 +9,21 @@ import {
 import type { Goal } from "../types";
 import { DeliverableText } from "./DeliverableText";
 
+/**
+ * Only allow literal CSS color tokens for swatch previews so untrusted model
+ * output (e.g. `url("https://...")` or `image-set(...)`) can never trigger
+ * outbound network requests when rendered in the timeline.
+ */
+const SAFE_SWATCH_COLOR =
+  /^(?:#(?:[0-9a-f]{3}|[0-9a-f]{4}|[0-9a-f]{6}|[0-9a-f]{8})|(?:rgb|rgba|hsl|hsla|hwb|lab|lch|oklab|oklch)\(\s*[\d.%+\-\s,/a-z]+\)|[a-z]{3,20})$/i;
+
+export function safeSwatchColor(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const trimmed = value.trim();
+  if (!trimmed || trimmed.length > 64) return undefined;
+  return SAFE_SWATCH_COLOR.test(trimmed) ? trimmed : undefined;
+}
+
 /** The outcome of the last pin attempt, per goal card. */
 export interface PinOutcome {
   goalId: string;
@@ -187,7 +202,11 @@ export const DesignDeliverableCard: React.FC<{
               <span key={i} className="text-xs flex items-center gap-1">
                 <span
                   className="w-2.5 h-2.5 rounded-sm border border-codify-border"
-                  style={{ background: c.value }}
+                  style={
+                    safeSwatchColor(c.value)
+                      ? { background: safeSwatchColor(c.value) }
+                      : undefined
+                  }
                 />
                 <span className="font-mono text-codify-muted">{c.name}</span>
                 <span className="font-mono text-codify-muted">{c.value}</span>

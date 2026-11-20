@@ -35,7 +35,13 @@ pub(crate) fn appdir() -> Option<PathBuf> {
 }
 
 fn appdir_from(appimage: Option<&OsStr>, appdir: Option<&OsStr>) -> Option<PathBuf> {
-    appimage?;
+    let appimage = appimage?;
+    if appimage
+        .to_str()
+        .map_or(appimage.is_empty(), |s| s.trim().is_empty())
+    {
+        return None;
+    }
     let dir = PathBuf::from(appdir?);
     (dir.is_absolute() && dir.parent().is_some()).then_some(dir)
 }
@@ -196,6 +202,13 @@ mod tests {
         );
         // An APPDIR some other tool left behind, with no AppImage running this process.
         assert_eq!(appdir_from(None, Some(OsStr::new(APPDIR))), None);
+        for blank in ["", "   ", "\t\n"] {
+            assert_eq!(
+                appdir_from(Some(OsStr::new(blank)), Some(OsStr::new(APPDIR))),
+                None,
+                "blank APPIMAGE {blank:?} must be treated as unset"
+            );
+        }
         // A relative or root APPDIR would make every entry look like the image's.
         for bad in ["", "relative/dir", "/"] {
             assert_eq!(appdir_from(image, Some(OsStr::new(bad))), None, "{bad:?}");

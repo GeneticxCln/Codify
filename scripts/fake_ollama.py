@@ -7,7 +7,7 @@ Run: python3 scripts/fake_ollama.py
 
 import json
 import os
-from http.server import BaseHTTPRequestHandler, HTTPServer
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
 # FAKE_PLANNER_STEPS=2 turns the plan into two path-disjoint steps, so a live
@@ -524,6 +524,12 @@ class Handler(BaseHTTPRequestHandler):
             # the verifier pick something the allowlist permits; without it this
             # path is only reached if a real refusal happened.
             out = VERIFIER_RETRY
+        elif (
+            os.environ.get("FAKE_DEEP_REVIEW_FINDINGS") == "1"
+            and "reading as the " in prompt
+            and ("zoom-out" in prompt or "comprehension" in prompt)
+        ):
+            out = json.dumps({"findings": []})
         elif "Diffs:" in prompt and "You are Codify Critic" in prompt:
             out = CRITIC
         elif "You are Codify Scribe" in prompt:
@@ -602,4 +608,4 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     port = int(os.environ.get("FAKE_OLLAMA_PORT", "11435"))
-    HTTPServer(("127.0.0.1", port), Handler).serve_forever()
+    ThreadingHTTPServer(("127.0.0.1", port), Handler).serve_forever()

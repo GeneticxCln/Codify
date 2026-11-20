@@ -30,8 +30,10 @@ leaving it implicit.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import secrets
+import stat
 from pathlib import Path
 
 ENV_HOME = "CODIFY_HOME"
@@ -150,32 +152,59 @@ def boot_token() -> str:
     path = boot_token_path()
     existing = _stored_token(path)
     if existing:
+        tighten_to_owner(path)
         return existing
     fresh = secrets.token_hex(32)
+    tmp: Path | None = None
     try:
         ensure_private_dir(path.parent)
+        # Write the complete token to a unique owner-only temp file first so there is never
+        # a 0-byte window visible at `boot_token`, then publish it atomically via `os.link`.
+        tmp = path.parent / f".boot_token.{os.getpid()}.{secrets.token_hex(8)}.tmp"
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(tmp, flags, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(fresh)
+            handle.flush()
         try:
-            # O_EXCL: two engines booting at once have to present one token, so
-            # the loser adopts the winner's file rather than replacing it.
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            # os.link is atomic and never replaces an existing file or symlink: two engines
+            # booting at once present one token, because the loser adopts the winner's file.
+            os.link(tmp, path)
         except FileExistsError:
             adopted = _stored_token(path)
             if adopted:
+                tighten_to_owner(path)
                 return adopted
-            # An empty file is a boot that died between creating and filling
-            # it. No client can have read one, so repairing it invalidates
-            # nothing. `O_NOFOLLOW` because `O_TRUNC` follows a link and would empty
-            # whatever it points at: a link is refused here, and the run falls back to
-            # a per-boot token rather than writing outside the state directory.
-            fd = os.open(
-                path,
-                os.O_WRONLY | os.O_TRUNC | getattr(os, "O_NOFOLLOW", 0),
-                0o600,
-            )
-        with os.fdopen(fd, "w") as handle:
-            handle.write(fresh)
+            # An empty or corrupt regular file is repaired atomically; a symlink is refused
+            # so nothing outside the state directory is ever followed or replaced.
+            if stat.S_ISLNK(os.lstat(path).st_mode):
+                return fresh
+            os.replace(tmp, path)
+            tmp = None
+        except OSError:
+            # Filesystems without hard links fall back to O_EXCL creation.
+            try:
+                fd = os.open(path, flags, 0o600)
+            except FileExistsError:
+                adopted = _stored_token(path)
+                if adopted:
+                    tighten_to_owner(path)
+                    return adopted
+                if stat.S_ISLNK(os.lstat(path).st_mode):
+                    return fresh
+                os.replace(tmp, path)
+                tmp = None
+            else:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(fresh)
+                    handle.flush()
     except OSError:
         return fresh
+    finally:
+        if tmp is not None:
+            with contextlib.suppress(OSError):
+                tmp.unlink()
+    tighten_to_owner(path)
     return fresh
 
 
@@ -200,22 +229,28 @@ def ensure_private_file(path: Path) -> None:
 
     Created with the mode rather than chmod-ed afterwards, so there is no moment at which a
     fresh database is readable by anyone else; SQLite then gives the `-wal` and `-shm` files it
-    creates later the same mode as this one.
+    creates later the same mode as this one. Refuses to follow a symlink at `path`.
     """
     try:
-        os.close(os.open(path, os.O_WRONLY | os.O_CREAT, 0o600))
+        os.close(os.open(path, os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0), 0o600))
     except OSError:
         return
     tighten_to_owner(path)
 
 
 def tighten_to_owner(path: Path) -> None:
-    """Remove the group and other bits from `path`, if this user owns it. Best effort."""
+    """Remove the group and other bits from `path`, if this user owns it. Best effort.
+
+    Uses `lstat` and refuses symlinks so a link inside a state directory can never cause
+    `chmod` on a target outside it.
+    """
     try:
-        info = path.stat()
+        info = os.lstat(path)
+        if stat.S_ISLNK(info.st_mode):
+            return
         if info.st_uid != os.getuid() or not info.st_mode & 0o077:
             return
-        os.chmod(path, info.st_mode & ~0o077)
+        os.chmod(path, stat.S_IMODE(info.st_mode) & ~0o077)
     except OSError:
         # Best effort by design: a state directory on a filesystem that cannot chmod (a
         # mounted share) must not stop the engine booting, and there is nothing else to do.
@@ -245,10 +280,16 @@ def startup_notice() -> str:
     """One line, for stderr: where this run's state actually lands.
 
     Printed at boot so an isolated run is visibly isolated, and so the
-    half-redirected case — database moved, credentials not — is stated rather than
-    discovered later by finding a test key in a real keychain.
+    half-redirected cases — database moved without credentials, or credentials
+    moved without the database — are stated rather than discovered later.
     """
     where = f"database {db_path()}"
+    if _env(ENV_SECRETS) and not _env(ENV_HOME) and not _env(ENV_DB):
+        return (
+            f"warning: {ENV_SECRETS} is set but {ENV_HOME} and {ENV_DB} are not — credentials are "
+            f"redirected to {secrets_path()} (the OS keychain is left untouched) while the database "
+            f"and boot token still resolve to {codify_home()} ({where}). Set {ENV_HOME} to redirect both."
+        )
     if is_isolated():
         return (
             f"CODIFY_HOME {codify_home()} — isolated: {where}, credentials "

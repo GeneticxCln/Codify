@@ -110,7 +110,11 @@ def _facts(event: dict[str, Any]) -> CallFacts | None:
     )
 
 
-def _cache_report(events: list[dict[str, Any]], totals: dict[str, int]) -> dict[str, Any]:
+def _cache_report(
+    events: list[dict[str, Any]],
+    totals: dict[str, int],
+    by_goal: dict[str, list[dict[str, Any]]] | None = None,
+) -> dict[str, Any]:
     """Cache reads against writes, and why the cache missed where it was in play and then read nothing.
 
     A call is a *miss* when the call before it in the same goal and role wrote to or read from a cache and this one
@@ -121,7 +125,8 @@ def _cache_report(events: list[dict[str, Any]], totals: dict[str, int]) -> dict[
     reasons: dict[str, int] = {}
     fingerprinted = 0
     misses = 0
-    for goal_events in _by_goal(events).values():
+    grouped = by_goal if by_goal is not None else _by_goal(events)
+    for goal_events in grouped.values():
         last: dict[str, tuple[CallFacts, int]] = {}
         compacted_at = [int(e.get("sequence") or 0) for e in goal_events if e.get("type") == "session_compacted"]
         for event in goal_events:
@@ -187,11 +192,15 @@ def _outcome_after(goal_events: list[dict[str, Any]], at: int, step_id: Any, rol
     return "unknown"
 
 
-def _reasks(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+def _reasks(
+    events: list[dict[str, Any]],
+    by_goal: dict[str, list[dict[str, Any]]] | None = None,
+) -> tuple[list[dict[str, Any]], int]:
     """Every same-model re-ask: the call that was wasted, its tokens, and how it ended. Also how many had no `usage` to price."""
     found: list[dict[str, Any]] = []
     unpriced = 0
-    for goal_id, goal_events in _by_goal(events).items():
+    grouped = by_goal if by_goal is not None else _by_goal(events)
+    for goal_id, goal_events in grouped.items():
         last_usage: dict[tuple[Any, str], dict[str, Any]] = {}
         for at, event in enumerate(goal_events):
             payload = _payload(event)
@@ -216,7 +225,10 @@ def _reasks(events: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
     return found, unpriced
 
 
-def _fix_loops(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+def _fix_loops(
+    events: list[dict[str, Any]],
+    by_goal: dict[str, list[dict[str, Any]]] | None = None,
+) -> list[dict[str, Any]]:
     """Fix attempts a later retry got past: the fixer and verifier tokens spent before the step's last `fix_retry`.
 
     Which steps were retried and then got past it is `metrics.recovered_steps`, so this agrees with the statistics screen. Only
@@ -224,7 +236,8 @@ def _fix_loops(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """
     recovered = recovered_steps(events)
     out: list[dict[str, Any]] = []
-    for goal_id, goal_events in _by_goal(events).items():
+    grouped = by_goal if by_goal is not None else _by_goal(events)
+    for goal_id, goal_events in grouped.items():
         last_retry: dict[Any, int] = {}
         for event in goal_events:
             if event.get("type") == "fix_retry":
@@ -268,7 +281,11 @@ def _finding_retry(reasks: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
-def _loops(events: list[dict[str, Any]], turn_cap: int) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
+def _loops(
+    events: list[dict[str, Any]],
+    turn_cap: int,
+    by_goal: dict[str, list[dict[str, Any]]] | None = None,
+) -> tuple[int, list[dict[str, Any]], list[dict[str, Any]]]:
     """Conductor loops: how many there were, which grew their prompt a lot, and which used most of the turn cap.
 
     A loop is the run of conductor `usage` events after one `agent_assigned{conductor: true}` marker in a goal.
@@ -287,7 +304,8 @@ def _loops(events: list[dict[str, Any]], turn_cap: int) -> tuple[int, list[dict[
         if turn_cap > 0 and len(sizes) >= turn_cap * DEEP_LOOP_SHARE:
             deep.append({"goal_id": goal_id, "calls": len(sizes), "turn_cap": turn_cap})
 
-    for goal_id, goal_events in _by_goal(events).items():
+    grouped = by_goal if by_goal is not None else _by_goal(events)
+    for goal_id, goal_events in grouped.items():
         sizes: list[int] = []
         for event in goal_events:
             payload = _payload(event)
@@ -303,6 +321,9 @@ def _loops(events: list[dict[str, Any]], turn_cap: int) -> tuple[int, list[dict[
 def _signals(
     events: list[dict[str, Any]], reasks: list[dict[str, Any]], calls: dict[str, list[int]], turn_cap: int,
     cache: dict[str, int],
+    *,
+    model_calls: dict[tuple[str, str], int] | None = None,
+    by_goal: dict[str, list[dict[str, Any]]] | None = None,
 ) -> list[dict[str, Any]]:
     out: list[dict[str, Any]] = []
 
@@ -323,7 +344,7 @@ def _signals(
             "share": _share(cache["read"], cache["input"]),
         })
 
-    seen, growth, deep = _loops(events, turn_cap)
+    seen, growth, deep = _loops(events, turn_cap, by_goal=by_goal)
     if growth:
         out.append({"id": "context-growth", "loops": len(growth), "of": seen,
                     "examples": sorted(growth, key=lambda g: -g["last_input"])[:EXAMPLES]})
@@ -336,7 +357,7 @@ def _signals(
     for item in reasks:
         asked[(item["role"], item["model"])] = asked.get((item["role"], item["model"]), 0) + 1
     for (role, model), n in sorted(asked.items()):
-        total_calls = len(calls.get(role, []))
+        total_calls = model_calls.get((role, model), 0) if model_calls is not None else len(calls.get(role, []))
         if n >= REASK_MIN and total_calls and n / total_calls >= REASK_RATE:
             out.append({"id": "reask-rate", "role": role, "model": model, "reasks": n, "calls": total_calls,
                         "rate": round(n / total_calls, 3)})
@@ -360,6 +381,7 @@ def audit(
     )
 
     calls: dict[str, list[int]] = {}
+    model_calls: dict[tuple[str, str], int] = {}
     totals = {"calls": 0, "input_tokens": 0, "output_tokens": 0, "cache_read_tokens": 0, "cache_write_tokens": 0}
     role_tokens: dict[str, int] = {}
     cache: dict[str, int] = {"read": 0, "write": 0, "calls": 0, "of": 0, "input": 0}
@@ -370,7 +392,9 @@ def audit(
             tokens_in, tokens_out = _tokens(payload)
             cache_read, cache_write = _cache_tokens(payload)
             role = str(payload.get("role") or "")
+            model = str(payload.get("model") or "")
             calls.setdefault(role, []).append(tokens_in)
+            model_calls[(role, model)] = model_calls.get((role, model), 0) + 1
             totals["calls"] += 1
             totals["input_tokens"] += tokens_in
             totals["output_tokens"] += tokens_out
@@ -387,9 +411,10 @@ def audit(
             failed_without_tokens += 1
     total = totals["input_tokens"] + totals["output_tokens"]
 
-    reasks, unpriced = _reasks(inside)
+    by_goal = _by_goal(inside)
+    reasks, unpriced = _reasks(inside, by_goal=by_goal)
     retry = _finding_retry(reasks)
-    fix_loops = _fix_loops(inside)
+    fix_loops = _fix_loops(inside, by_goal=by_goal)
     findings = [
         retry,
         {
@@ -399,7 +424,7 @@ def audit(
             "examples": sorted(fix_loops, key=lambda f: -f["tokens"])[:EXAMPLES],
         },
     ]
-    signals = _signals(inside, reasks, calls, turn_cap, cache)
+    signals = _signals(inside, reasks, calls, turn_cap, cache, model_calls=model_calls, by_goal=by_goal)
     if total > 0:
         top_role, top_tokens = max(role_tokens.items(), key=lambda kv: kv[1])
         if _share(top_tokens, total) >= CONCENTRATION_SHARE:
@@ -412,7 +437,7 @@ def audit(
             "event_cap": limit,
             "truncated": len(events) >= limit,
             "window_days": window_days,
-            "goals": len({e.get("goal_id") for e in inside}),
+            "goals": len(by_goal),
             "span_days": round((max(stamps) - min(stamps)) / 86400, 1) if len(stamps) > 1 else 0.0,
             "failed_calls_without_tokens": failed_without_tokens,
             "reasks_without_usage": unpriced,
@@ -422,7 +447,7 @@ def audit(
         "totals": {**totals, "total_tokens": total, "by_role": sorted(role_tokens.items(), key=lambda kv: -kv[1])},
         "findings": findings,
         "signals": signals,
-        "cache": _cache_report(inside, totals),
+        "cache": _cache_report(inside, totals, by_goal=by_goal),
     }
 
 

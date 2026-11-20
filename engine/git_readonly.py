@@ -34,6 +34,7 @@ from __future__ import annotations
 
 import os
 import re
+import stat
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,7 +141,7 @@ _SPECS: dict[str, str] = {
         --files-without-match -n --line-number -H -h -I -E --extended-regexp -G --basic-regexp
         -P --perl-regexp --fixed-strings --count --heading --break --full-name --null
         --cached --max-depth= --text -o --only-matching -q --quiet --and --or --not
-        -A=+ -B=+ -C=+ --context= --after-context= --before-context= -e=+ --threads=
+        -A=+ -B=+ -C=+ --context= --after-context= --before-context= -e=+
         --max-count= -p --show-function -W --function-context --no-color --color[=]
         --all-match --no-exclude-standard
     """,
@@ -328,7 +329,10 @@ def runner_env(base: Mapping[str, str], root: str | None = None) -> dict[str, st
         "GIT_TERMINAL_PROMPT": "0",
     })
     if root is not None:
-        env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(os.path.realpath(root))
+        real_root = os.path.realpath(root)
+        env["GIT_CEILING_DIRECTORIES"] = os.path.dirname(real_root)
+        if _git_dir(Path(real_root)) is not None:
+            env["GIT_WORK_TREE"] = real_root
     return env
 
 
@@ -349,7 +353,7 @@ _NO_DRIVERS: dict[str, tuple[str, ...]] = {
 }
 
 
-def runner_args(args: Sequence[str]) -> list[str]:
+def runner_args(args: Sequence[str], *, work_tree: str | None = None) -> list[str]:
     """`args` (subcommand first) with the hardening git needs, ready to follow the binary.
 
     The global options go before the subcommand and the per-command ones directly after it,
@@ -358,8 +362,11 @@ def runner_args(args: Sequence[str]) -> list[str]:
     if not args:
         return []
     sub, rest = args[0], list(args[1:])
+    head = ["--no-pager"]
+    if work_tree is not None and sub != "init":
+        head.append(f"--work-tree={work_tree}")
     return [
-        "--no-pager",
+        *head,
         # Runs the configured "filesystem monitor" program, and `status`, `diff` and
         # `ls-files` all consult it.
         "-c", "core.fsmonitor=false",
@@ -399,6 +406,12 @@ def runner_args(args: Sequence[str]) -> list[str]:
 # costs a program run as the person (and, in the jail, a write into the workspace).
 _CONFIG_FILTER = re.compile(r"\[\s*filter\b", re.IGNORECASE)
 _CONFIG_INCLUDE = re.compile(r"\[\s*include(?:if)?\b", re.IGNORECASE)
+_CONFIG_SECTION = re.compile(r"^\s*\[\s*([A-Za-z0-9-]+)(?:\s+\"[^\"]*\")?\s*\]")
+_CONFIG_CORE_WORKTREE = re.compile(r"^\s*worktree(?:\s*=|\s*$)", re.IGNORECASE)
+_CONFIG_CORE_BARE_TRUE = re.compile(
+    r"^\s*bare(?:\s*=\s*\"?\s*(?:true|yes|on|1)\s*\"?\s*(?:[#;].*)?|\s*(?:[#;].*)?)$",
+    re.IGNORECASE,
+)
 _MAX_CONFIG_BYTES = 1024 * 1024
 
 
@@ -418,29 +431,75 @@ def _git_dir(root: Path) -> Path | None:
     return None
 
 
+def _config_files(root: str) -> list[Path]:
+    """The repository config files for `root` (local, worktree, and linked commondir config)."""
+    gitdir = _git_dir(Path(root))
+    if gitdir is None:
+        return []
+    files = [gitdir / "config", gitdir / "config.worktree"]
+    commondir = gitdir / "commondir"
+    common = ""
+    if commondir.is_file():
+        try:
+            common = commondir.read_text(encoding="utf-8", errors="replace").strip()
+        except OSError:
+            common = ""
+    if common:
+        shared = Path(common)
+        files.append((shared if shared.is_absolute() else gitdir / shared) / "config")
+    return files
+
+
+def _core_redirect_reason(body: str, filename: str, command: str) -> str | None:
+    """Refuse `[core] worktree = ...` and `[core] bare = true` so git cannot read outside the workspace."""
+    section = ""
+    for line in body.splitlines():
+        header = _CONFIG_SECTION.match(line)
+        if header:
+            section = header.group(1).lower()
+            rest = line[header.end():].strip()
+            if not rest:
+                continue
+            line = rest
+        if section != "core":
+            continue
+        if _CONFIG_CORE_WORKTREE.match(line):
+            return (
+                f"this repository's {filename} sets `core.worktree`, which points git outside the workspace, "
+                f"so Codify did not run `{command}`."
+            )
+        if _CONFIG_CORE_BARE_TRUE.match(line):
+            return (
+                f"this repository's {filename} sets `core.bare = true`, "
+                f"so Codify did not run `{command}`."
+            )
+    return None
+
+
 def untrusted_config(root: str, command: str = "git") -> str | None:
     """Why this repository's config cannot be trusted to run `git <command>`, or None.
 
     Reads `<gitdir>/config`, `<gitdir>/config.worktree` and, for a linked worktree, the main repository's `config`
-    (found through `commondir`). A config that names a filter, or that includes another file (which could), is refused.
-    A directory that is not a repository has no config and is left for git to report. The user's and the system's
-    config are not consulted by the read-only child (`runner_env`), so they are not read here either.
+    (found through `commondir`). A config that names a filter, includes another file, or redirects the worktree
+    (`core.worktree` / `core.bare = true`) is refused. A directory that is not a repository has no config and is
+    left for git to report. The user's and the system's config are not consulted by the read-only child
+    (`runner_env`), so they are not read here either.
     """
-    gitdir = _git_dir(Path(root))
-    if gitdir is None:
+    files = _config_files(root)
+    if not files:
         return None
-    files = [gitdir / "config", gitdir / "config.worktree"]
-    try:
-        common = (gitdir / "commondir").read_text(encoding="utf-8", errors="replace").strip()
-    except OSError:
-        common = ""
-    if common:
-        shared = Path(common)
-        files.append((shared if shared.is_absolute() else gitdir / shared) / "config")
     for path in files:
         try:
-            if path.stat().st_size > _MAX_CONFIG_BYTES:
-                return f"this repository's {path.name} is larger than {_MAX_CONFIG_BYTES} bytes, so Codify did not read it; it did not run `{command}`"
+            st = path.stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            return f"this repository's {path.name} could not be read ({exc.strerror or exc}), so Codify did not run `{command}`"
+        if not stat.S_ISREG(st.st_mode):
+            return f"this repository's {path.name} is not a regular file, so Codify did not read it; it did not run `{command}`"
+        if st.st_size > _MAX_CONFIG_BYTES:
+            return f"this repository's {path.name} is larger than {_MAX_CONFIG_BYTES} bytes, so Codify did not read it; it did not run `{command}`"
+        try:
             text = path.read_text(encoding="utf-8", errors="replace")
         except FileNotFoundError:
             continue
@@ -457,4 +516,7 @@ def untrusted_config(root: str, command: str = "git") -> str | None:
                 f"this repository's {path.name} includes another config file, which could name a git filter, so "
                 f"Codify did not run `{command}`. Run it yourself, or remove the include and try again."
             )
+        redirect = _core_redirect_reason(body, path.name, command)
+        if redirect is not None:
+            return redirect
     return None

@@ -66,11 +66,19 @@ const MAX_LEN = 190;
  * `active`: it changes at runtime, and a dependency would restart the
  * effect. Here it is simply the one value the body used to close over.
  */
-export function createSolarWindPainter(read: (name: string) => string, active: boolean): AtmospherePainter {
+export function createSolarWindPainter(
+  read: (name: string) => string,
+  active: boolean | (() => boolean),
+): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let flares: Flare[] = [];
+  let seededW = 0;
+  let seededH = 0;
 
   const seed = (w: number, h: number): void => {
+    seededW = w;
+    seededH = h;
     flares = Array.from({ length: FLARES }, () => {
       const left = Math.random() < 0.5;
       return {
@@ -91,12 +99,13 @@ export function createSolarWindPainter(read: (name: string) => string, active: b
   return {
     step(dt, tick) {
       const { width: w, height: h } = tick.size;
+      const busy = isActive();
       for (const f of flares) {
         // The 1.8× is the hook's own `active` rate, applied to growth: while a
         // turn is in flight the flares visibly run, which is the one thing
         // here that reports state. The clock is in seconds, so the cap on
         // frames cannot slow it.
-        f.len += f.grow * dt * (active ? 1.8 : 1);
+        f.len += f.grow * dt * (busy ? 1.8 : 1);
         f.y += 26 * dt;
         if (f.len > MAX_LEN || f.y > h + MAX_LEN) {
           f.len = 0;
@@ -113,9 +122,11 @@ export function createSolarWindPainter(read: (name: string) => string, active: b
       // Resolved per frame rather than once at creation, so a theme or a
       // custom tint restyles this canvas on the next frame instead of
       // waiting for a remount. See the hook's note on live reads.
-        const core = channelsOf(read("--sun-core"));
-        const edge = channelsOf(read("--sun-edge"));
-      if (flares.length === 0) seed(size.width, size.height);
+      const core = channelsOf(read("--sun-core"));
+      const edge = channelsOf(read("--sun-edge"));
+      if (flares.length === 0 || size.width !== seededW || size.height !== seededH) {
+        seed(size.width, size.height);
+      }
       const { width: w, height: h } = size;
       ctx.clearRect(0, 0, w, h);
       // A slow shared pulse, so the gutters brighten together the way a
@@ -148,7 +159,7 @@ export function createSolarWindPainter(read: (name: string) => string, active: b
         ctx.lineTo(f.x, f.y + f.len);
         ctx.stroke();
       }
-      if (!active) return;
+      if (!isActive()) return;
       // The heat pulse. One soft band per gutter, travelling down, and only
       // while the agent is working — the single piece of this effect that
       // reports state rather than being weather.
@@ -173,13 +184,21 @@ export const SolarWind: React.FC<SolarWindProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--sun-core": "#ffb000",
     "--sun-edge": "#ffd700",
   };
 
-
-  const canvasRef = useAtmosphereCanvas({ maxDimension, fps, animated, active, vars, create: (read) => createSolarWindPainter(read, active) });
+  const canvasRef = useAtmosphereCanvas({
+    maxDimension,
+    fps,
+    animated,
+    active,
+    vars,
+    create: (read) => createSolarWindPainter(read, () => activeRef.current === true),
+  });
 
   return (
     <canvas

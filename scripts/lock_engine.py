@@ -143,7 +143,12 @@ def resolve(python: Path, pin: bundle_engine.Pin, report: Path) -> dict[str, Any
         *bundle_engine.target_flags(pin),
         "-r", str(REQUIREMENTS),
     ]
-    done = subprocess.run(argv, timeout=RESOLVE_TIMEOUT_S, check=False)  # noqa: S603 — the pinned interpreter's own pip resolving engine/requirements.txt with --dry-run; no shell, nothing installed
+    done = subprocess.run(  # noqa: S603 — the pinned interpreter's own pip resolving engine/requirements.txt with --dry-run; no shell, nothing installed
+        argv,
+        timeout=RESOLVE_TIMEOUT_S,
+        check=False,
+        env=bundle_engine._clean_python_env(),
+    )
     if done.returncode != 0:
         raise LockError(f"pip could not resolve engine/requirements.txt (exit {done.returncode})")
     data: dict[str, Any] = json.loads(report.read_text(encoding="utf-8"))

@@ -84,6 +84,22 @@ impl EngineLog {
         complete
     }
 
+    /// Flush any unterminated trailing bytes when the pipe reaches EOF.
+    ///
+    /// A process killed or exiting abruptly may write its last diagnostic without
+    /// a trailing newline; without this flush, that final line stays trapped in
+    /// `partial` and never reaches the terminal echo or the retained tail.
+    pub fn flush(&self) -> Option<String> {
+        let mut buffer = self.lock();
+        if buffer.partial.is_empty() {
+            return None;
+        }
+        let taken = std::mem::take(&mut buffer.partial);
+        let line = finish_line(&taken);
+        buffer.push(line.clone());
+        Some(line)
+    }
+
     /// The last `max` lines, oldest first — the order they were said in.
     ///
     /// Clamped rather than trusted: this is reached from a window that can send
@@ -283,5 +299,19 @@ mod tests {
         // And the bytes that were pending are not prepended to the next run.
         let said = fed(&log, &[b"new run\n"]);
         assert_eq!(vec!["new run".to_string()], said);
+    }
+
+    #[test]
+    fn flushing_emits_a_final_line_without_a_trailing_newline() {
+        let log = EngineLog::default();
+        assert!(log.feed(b"fatal: out of memory").is_empty());
+        assert!(log.tail(10).is_empty());
+        assert_eq!(
+            log.flush(),
+            Some("fatal: out of memory".to_string()),
+            "an unterminated final line must be retained on EOF"
+        );
+        assert_eq!(vec!["fatal: out of memory".to_string()], log.tail(10));
+        assert_eq!(log.flush(), None, "flush is once-only");
     }
 }

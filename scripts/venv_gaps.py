@@ -24,20 +24,39 @@ from importlib import metadata
 from pathlib import Path
 
 _COMMENT = re.compile(r"#.*")
-# The two arrays that install something: `[project] dependencies` and the `dev` extra.
-_ARRAYS = (r"^dependencies\s*=\s*\[(.*?)^\]", r"^dev\s*=\s*\[(.*?)^\]")
+# The two arrays that install something: `[project] dependencies` and the `dev` extra. Each may be
+# written on one line or many, and with either quote style; a block that ends on its own line is
+# tried first, then a single-line array.
+_ARRAYS = (
+    (r"^dependencies\s*=\s*\[(.*?)^\]", r"^dependencies\s*=\s*\[([^\n]*)\]"),
+    (r"^dev\s*=\s*\[(.*?)^\]", r"^dev\s*=\s*\[([^\n]*)\]"),
+)
+_SPEC = re.compile(r"\"([^\"]+)\"|'([^']+)'")
 _NAME_END = re.compile(r"[<>=!~\[;@ ]")
 
 
 def declared(text: str) -> list[str]:
     """Distribution names from the runtime dependencies and the `dev` extra, in file order."""
     names: list[str] = []
-    for pattern in _ARRAYS:
-        match = re.search(pattern, text, re.S | re.M)
+    for label, patterns in zip(("dependencies", "dev"), _ARRAYS, strict=True):
+        present = re.search(rf"^{label}\s*=", text, re.M) is not None
+        match = None
+        for pattern in patterns:
+            match = re.search(pattern, text, re.S | re.M)
+            if match:
+                break
         if not match:
+            if present:
+                raise ValueError(f"could not parse `{label}` array")
             continue
-        for spec in re.findall(r'"([^"]+)"', _COMMENT.sub("", match.group(1))):
-            names.append(_NAME_END.split(spec.strip(), 1)[0])
+        found_in_block = 0
+        for double, single in _SPEC.findall(_COMMENT.sub("", match.group(1))):
+            spec = (double or single).strip()
+            if spec:
+                names.append(_NAME_END.split(spec, 1)[0])
+                found_in_block += 1
+        if found_in_block == 0:
+            raise ValueError(f"`{label}` array holds no readable dependency specs")
     if not names:
         raise ValueError("no `dependencies` or `dev` array found")
     return names

@@ -1,7 +1,8 @@
-import React, { useCallback, useEffect, useId, useMemo, useState } from "react";
+import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { AlertCircle, CheckCircle2, Loader2, Mic, Play, Square, Volume2 } from "lucide-react";
 
 import {
+  cancelDictation,
   fetchProviders,
   getAudioInputs,
   getAudioStatus,
@@ -148,6 +149,8 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
   });
   const [sample, setSample] = useState<{ busy: boolean; error?: string }>({ busy: false });
   const micField = useId();
+  const recordingRef = useRef(false);
+  const mountedRef = useRef(true);
 
   const refreshStatus = useCallback(async () => {
     try {
@@ -159,6 +162,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
 
   useEffect(() => {
     let cancelled = false;
+    mountedRef.current = true;
     Promise.all([getEngineSettings(), fetchProviders(), getAudioInputs(), getAudioStatus()])
       .then(([settings, catalog, mics, audio]) => {
         if (cancelled) return;
@@ -175,7 +179,12 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
       });
     return () => {
       cancelled = true;
+      mountedRef.current = false;
       stopPlayback();
+      if (recordingRef.current) {
+        recordingRef.current = false;
+        void cancelDictation().catch(() => {});
+      }
     };
   }, []);
 
@@ -206,6 +215,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
 
   const tryDictation = async () => {
     if (trial.phase === "recording") {
+      recordingRef.current = false;
       setTrial({ phase: "transcribing" });
       try {
         const { text } = await stopDictation();
@@ -217,6 +227,11 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
     }
     try {
       await startDictation();
+      if (!mountedRef.current) {
+        void cancelDictation().catch(() => {});
+        return;
+      }
+      recordingRef.current = true;
       setTrial({ phase: "recording" });
     } catch (err) {
       setTrial({ phase: "idle", error: readRejection(err, "Could not start recording.") });

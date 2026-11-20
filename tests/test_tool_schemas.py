@@ -183,7 +183,10 @@ class TestGoogleKeepsWhatTheModelNeeds(unittest.TestCase):
 
     def test_required_is_still_a_subset_of_properties(self) -> None:
         for spec in TOOLS:
-            shaped = spec.to_google()["parameters"]
+            shaped = spec.to_google().get("parameters")
+            if shaped is None:
+                self.assertEqual(spec.parameters.get("properties") or {}, {}, spec.name)
+                continue
             self.assertTrue(set(shaped["required"]) <= set(shaped["properties"]), spec.name)
 
     def test_nested_object_properties_are_translated(self) -> None:

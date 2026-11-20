@@ -324,6 +324,11 @@ pub(crate) fn engine_interpreter(project_root: &Path) -> PathBuf {
     }
 }
 
+/// Maximum `hard_exit_s` accepted from an engine handshake. Bounds the shell's
+/// shutdown wait so a bogus or huge value can neither panic `Duration::from_secs_f64`
+/// nor hang `stop_engine` indefinitely.
+pub(crate) const MAX_HANDSHAKE_HARD_EXIT_S: f64 = 60.0;
+
 /// Parse the engine's boot line: `CODIFY_ENGINE token=<hex> port=<int>`.
 ///
 /// `None` for anything else, including a line carrying the marker but no usable
@@ -335,23 +340,26 @@ pub(crate) fn parse_handshake(line: &str) -> Option<Handshake> {
     if !line.starts_with(HANDSHAKE_MARKER) {
         return None;
     }
+    let mut parts = line.split_whitespace();
+    if parts.next() != Some(HANDSHAKE_MARKER) {
+        return None;
+    }
     let mut token = None;
     let mut port = None;
     let mut hard_exit_s = None;
-    for field in line.split_whitespace().skip(1) {
+    for field in parts {
         if let Some(value) = field.strip_prefix("token=") {
-            token = Some(value.to_string());
+            token = (!value.is_empty()).then(|| value.to_string());
         } else if let Some(value) = field.strip_prefix("port=") {
-            port = value.parse::<u16>().ok();
+            port = value.parse::<u16>().ok().filter(|&p| p != 0);
         } else if let Some(value) = field.strip_prefix(&format!("{HANDSHAKE_HARD_EXIT_FIELD}=")) {
             // Nonsense is `None` rather than a refusal: a bad bound must not stop
-            // the app from booting. `NaN` and the infinities parse as floats and
-            // are exactly the values that would turn the stop path's arithmetic
-            // into a wait of no length or no end.
-            hard_exit_s = value
-                .parse::<f64>()
-                .ok()
-                .filter(|seconds| seconds.is_finite() && *seconds > 0.0);
+            // the app from booting. `NaN`, infinities, non-positive values, and huge
+            // bounds (> MAX_HANDSHAKE_HARD_EXIT_S) are rejected so the stop path can
+            // neither panic nor wait indefinitely.
+            hard_exit_s = value.parse::<f64>().ok().filter(|seconds| {
+                seconds.is_finite() && *seconds > 0.0 && *seconds <= MAX_HANDSHAKE_HARD_EXIT_S
+            });
         }
     }
     Some(Handshake {
@@ -591,10 +599,11 @@ mod tests {
     #[test]
     fn a_bound_that_could_not_be_waited_on_is_ignored_rather_than_obeyed() {
         // Every one of these parses as a float except the last, and every one of
-        // them is worse than no answer: `NaN` and the infinities make the stop
-        // path's arithmetic meaningless, and a zero or negative bound would have
-        // the shell kill an engine before it had been asked politely.
-        for announced in ["0", "-3", "nan", "inf", "-inf", "soon"] {
+        // them is worse than no answer: `NaN`, infinities, and huge values like
+        // `1e20` make the stop path's arithmetic panic or hang forever, and a zero
+        // or negative bound would have the shell kill an engine before it had been
+        // asked politely.
+        for announced in ["0", "-3", "nan", "inf", "-inf", "1e20", "60.1", "soon"] {
             let handshake = parse_handshake(&format!(
                 "CODIFY_ENGINE token=9f2c port=7430 hard_exit_s={announced}"
             ))
@@ -604,6 +613,10 @@ mod tests {
                 "must not be believed: {announced}"
             );
         }
+        // The inclusive upper bound itself is accepted.
+        let at_cap = parse_handshake("CODIFY_ENGINE token=9f2c port=7430 hard_exit_s=60")
+            .expect("handshake");
+        assert_eq!(Some(60.0), at_cap.hard_exit_s);
     }
 
     #[test]
@@ -612,6 +625,7 @@ mod tests {
             "",
             "no handshake here token=9f2c port=7430",
             "CODIFY_ENGINE_STARTING",
+            "CODIFY_ENGINE_DEBUG token=9f2c port=7430",
             // Wrapped in something else: only the start of the line is the contract.
             // A parser that searched anywhere in the line would accept a log
             // prefix as a handshake, which is the difference `starts_with` buys.
@@ -628,6 +642,8 @@ mod tests {
         for line in [
             "CODIFY_ENGINE token=9f2c",
             "CODIFY_ENGINE port=7430",
+            "CODIFY_ENGINE token= port=7430",
+            "CODIFY_ENGINE token=9f2c port=0",
             "CODIFY_ENGINE token=9f2c port=not-a-number",
             "CODIFY_ENGINE token=9f2c port=99999",
             "CODIFY_ENGINE",

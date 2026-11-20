@@ -51,6 +51,9 @@ export const TracePanel: React.FC<{
 
   useEffect(() => {
     let live = true;
+    // A different goal: the last one's count must not be what Delete confirms against.
+    setSummary(null);
+    setError(null);
     fetchGoalTrace(goalId)
       .then((s) => {
         if (live) setSummary(s);

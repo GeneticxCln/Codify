@@ -757,7 +757,9 @@ class _Conduct(_Plan):
             # goal's stored status is RUNNING. A tool the stored rows do not admit
             # is not a slot a model should spend a call discovering (docs/20 §5).
             mcp = getattr(self, "mcp", None)
-            if mcp is not None and mcp.has_admitted_tools(goal.status == "RUNNING"):
+            if mcp is not None and mcp.has_admitted_tools(
+                goal.status == "RUNNING" and not goal.dry_run and not goal.plan_only
+            ):
                 offered.extend(MCP_TOOLS)
             # The person's standing notes, only while they switched them on and wrote at least one.
             notes = getattr(self, "notes", None)
@@ -1180,28 +1182,31 @@ class _Conduct(_Plan):
         # A count left by an earlier run of this goal (a step that was cancelled mid-edit) must not be this run's.
         self._editor_edits.pop(goal_id, None)
         try:
-            answer = await conductor.run(prompt, history)
-        except ProviderError as exc:
-            self._log(
-                goal_id, None, "warn",
-                f"the conductor could not run ({exc.code}: {exc.message})",
-            )
+            try:
+                answer = await conductor.run(prompt, history)
+            except ProviderError as exc:
+                self._log(
+                    goal_id, None, "warn",
+                    f"the conductor could not run ({exc.code}: {exc.message})",
+                )
+                return _Conducted(
+                    answer=None, exhausted=conductor.exhausted,
+                    # It may have planned before the provider failed: whether a plan exists is a fact about the
+                    # goal's rows, not something the failure path may assume.
+                    planned=bool(self.goals.steps(goal_id)),
+                    failure_code=exc.code,
+                    buffer_edited=self._editor_edits.pop(goal_id, 0) > 0,
+                )
             return _Conducted(
-                answer=None, exhausted=conductor.exhausted,
-                # It may have planned before the provider failed: whether a plan exists is a fact about the
-                # goal's rows, not something the failure path may assume.
+                answer=answer,
+                exhausted=conductor.exhausted,
                 planned=bool(self.goals.steps(goal_id)),
-                failure_code=exc.code,
+                cancelled=conductor.was_cancelled or self._is_cancelled(goal_id),
+                question=conductor.ended.question if conductor.ended is not None else None,
                 buffer_edited=self._editor_edits.pop(goal_id, 0) > 0,
             )
-        return _Conducted(
-            answer=answer,
-            exhausted=conductor.exhausted,
-            planned=bool(self.goals.steps(goal_id)),
-            cancelled=conductor.was_cancelled or self._is_cancelled(goal_id),
-            question=conductor.ended.question if conductor.ended is not None else None,
-            buffer_edited=self._editor_edits.pop(goal_id, 0) > 0,
-        )
+        finally:
+            self._editor_edits.pop(goal_id, None)
 
     def _conductor_fallback_notice(
         self, goal_id: str, role: AgentRole, targets: list[tuple[Any, str, Any]]

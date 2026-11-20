@@ -587,11 +587,11 @@ class TestWorkspaceProfiles(Workspace):
     def test_a_profile_cannot_name_a_path_a_command_or_anything_the_worker_would_act_on(self) -> None:
         # The worker is handed exactly these keys and none of the prose, so a profile has nothing to widen.
         rule = load_profiles(None).get("secrets").rules[0]  # type: ignore[union-attr]
-        self.assertEqual(set(rule.to_worker()), {"id", "pattern", "flags", "languages", "where"})
+        self.assertEqual(set(rule.to_worker()), {"id", "severity", "pattern", "flags", "languages", "where"})
         self.profile(rules=[self.rule(paths=["/etc/passwd"], command=["rm", "-rf", "/"], write="/tmp/x")], root="/", run="x")
         mine = load_profiles(str(self.root)).get("mine")
         assert mine is not None
-        self.assertEqual(set(mine.rules[0].to_worker()), {"id", "pattern", "flags", "languages", "where"})
+        self.assertEqual(set(mine.rules[0].to_worker()), {"id", "severity", "pattern", "flags", "languages", "where"})
 
 
 class TestRunningAScan(Workspace):

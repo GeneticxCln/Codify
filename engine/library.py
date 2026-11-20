@@ -80,6 +80,7 @@ SKIP_DIRS = {
     ".mypy_cache", ".pytest_cache", ".ruff_cache", ".tox", "dist", "build",
     "target", ".next", ".nuxt", ".cache", "vendor", ".idea", ".vscode",
 }
+_SKIP_DIR_CANONICAL: dict[str, str] = {name.casefold(): name for name in SKIP_DIRS}
 
 # How many of the pruned directories a reply names before it counts the rest. There are twenty names in
 # `SKIP_DIRS` and a workspace can nest them, so the header's job is to point at where an answer might be, not to
@@ -108,8 +109,9 @@ def _walkable(dirnames: list[str], pruned: set[str]) -> list[str]:
     """
     kept: list[str] = []
     for name in dirnames:
-        if name in SKIP_DIRS:
-            pruned.add(name)
+        canonical = _SKIP_DIR_CANONICAL.get(name.casefold())
+        if canonical is not None:
+            pruned.add(canonical)
         else:
             kept.append(name)
     return sorted(kept)
@@ -165,11 +167,11 @@ def _is_outside_symlink(root: Path, path: Path) -> bool:
     try:
         if not path.is_symlink():
             return False
-        real = path.resolve()
+        real = path.resolve(strict=True)
         if real != root and root not in real.parents:
             return True
-        return GIT_DIRNAME in real.relative_to(root).parts
-    except OSError:
+        return any(part.casefold() == GIT_DIRNAME for part in real.relative_to(root).parts)
+    except (OSError, RuntimeError):
         return True
 
 
@@ -260,7 +262,8 @@ def scan_regex(root_path: str, pattern: str, glob: str | None, budget_s: float) 
                 if size > MAX_INDEX_BYTES:
                     files_skipped += 1
                     continue
-                raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                with full.open("rb") as fh:
+                    raw = fh.read(MAX_SCAN_BYTES)
                 if size > MAX_SCAN_BYTES:
                     byte_capped += 1
             except OSError:
@@ -361,20 +364,31 @@ def _run_regex_worker(request: dict[str, Any], cancel: threading.Event | None = 
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        encoding="utf-8",
+        errors="replace",
         start_new_session=True,
     )
     try:
-        # The hard limit is the request's own soft budget plus the same margin for start-up and the reply that a
-        # regex search has always had, so a longer job (a scan) is not killed at a search's two and a half seconds.
-        hard_limit = float(request["budget_s"]) + (REGEX_HARD_LIMIT_S - REGEX_BUDGET_S)
+        # The hard limit is the request's own soft budget plus start-up/serialization headroom:
+        # scan jobs serialize larger rule/finding payloads, so they get at least 2.0s headroom
+        # while regex searches keep the tight 3s production ceiling.
+        base_margin = REGEX_HARD_LIMIT_S - REGEX_BUDGET_S
+        margin = max(base_margin, 2.0) if request.get("op") == "scan" else base_margin
+        hard_limit = float(request["budget_s"]) + margin
         out, err = _wait_for_worker(proc, json.dumps(request), hard_limit, cancel)
     except subprocess.TimeoutExpired:
         SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
-        proc.communicate()
+        try:
+            proc.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
         raise RegexWorkerTimeout(_TOO_EXPENSIVE.format(seconds=request["budget_s"])) from None
     except BaseException:
         SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
-        proc.communicate()
+        try:
+            proc.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
         raise
     try:
         reply = json.loads(out)
@@ -389,9 +403,11 @@ def _run_regex_worker(request: dict[str, Any], cancel: threading.Event | None = 
 class LibraryService:
     """Read-only reconnaissance for one workspace."""
 
-    def __init__(self, root_path: str):
+    def __init__(self, root_path: str, settings: Any = None, sandbox: SandboxService | None = None):
         self.root = str(Path(root_path).resolve())
         self._fs = FileSystemService(self.root)
+        self.settings = settings
+        self._sandbox = sandbox
 
     # ── reading ────────────────────────────────────────────────────────────────
 
@@ -419,7 +435,7 @@ class LibraryService:
             # tell (and say) when it is seeing a slice rather than the file.
             return self._read_line_window(
                 resolved, rel, total_size,
-                max(1, offset or 1), min(limit or MAX_READ_LINES, MAX_READ_LINES),
+                max(1, offset or 1), max(1, min(limit or MAX_READ_LINES, MAX_READ_LINES)),
             )
         # Read only the prefix the cap can use — a multi-GB log file is a real
         # workspace resident, and read_bytes() on it is an OOM for a window we
@@ -528,11 +544,20 @@ class LibraryService:
             total += 1
         # A window that hits the char cap still stops cleanly: slice, then
         # re-trim to MAX_READ_CHARS so one read cannot balloon the prompt.
-        text = "\n".join(window_lines[:window])[:MAX_READ_CHARS]
-        # Count the lines actually sliced, not newlines in the joined text:
-        # an empty window is 0 lines (the old +1 turned an empty file read
-        # into "1 line" and produced ranges like "lines 100-99").
-        shown = len(window_lines[:window])
+        sliced = window_lines[:window]
+        joined = "\n".join(sliced)
+        char_truncated = len(joined) > MAX_READ_CHARS
+        if char_truncated:
+            text = joined[:MAX_READ_CHARS]
+            # Count only the lines actually retained after char truncation so
+            # callers paging through large files do not skip cut-off lines.
+            shown = text.count("\n") + (0 if not text or text.endswith("\n") else 1)
+        else:
+            text = joined
+            # Count the lines actually sliced, not newlines in the joined text:
+            # an empty window is 0 lines (the old +1 turned an empty file read
+            # into "1 line" and produced ranges like "lines 100-99").
+            shown = len(sliced)
         return {
             "path": rel,
             "text": text,
@@ -542,6 +567,7 @@ class LibraryService:
             "total_lines": total,
             # Range reads never claim to be the whole file.
             "truncated": True,
+            **({"char_truncated": True} if char_truncated else {}),
         }
 
     def _walk_files(self, depth: int | None, odd: list[int] | None = None) -> Iterator[str]:
@@ -554,7 +580,7 @@ class LibraryService:
         base_depth = len(Path(self.root).parts)
         root = Path(self.root).resolve()
         for dirpath, dirnames, filenames in os.walk(self.root):
-            dirnames[:] = sorted(d for d in dirnames if d not in SKIP_DIRS)
+            dirnames[:] = sorted(d for d in dirnames if d.casefold() not in _SKIP_DIR_CANONICAL)
             if odd is not None:
                 odd[0] += sum(not is_text_name(d) for d in dirnames)
             dirnames[:] = [d for d in dirnames if is_text_name(d)]
@@ -563,9 +589,11 @@ class LibraryService:
             for d in dirnames:
                 full = Path(dirpath) / d
                 try:
-                    if full.is_symlink() and full.resolve() != root and root not in full.resolve().parents:
-                        continue
-                except OSError:
+                    if full.is_symlink():
+                        resolved_dir = full.resolve(strict=True)
+                        if resolved_dir != root and root not in resolved_dir.parents:
+                            continue
+                except (OSError, RuntimeError):
                     continue
                 kept.append(d)
             dirnames[:] = kept
@@ -700,7 +728,8 @@ class LibraryService:
                     if size > MAX_INDEX_BYTES:
                         files_skipped += 1
                         continue
-                    raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                    with full.open("rb") as fh:
+                        raw = fh.read(MAX_SCAN_BYTES)
                     if size > MAX_SCAN_BYTES:
                         byte_capped += 1
                 except OSError:
@@ -805,7 +834,8 @@ class LibraryService:
                     if size > MAX_INDEX_BYTES:
                         files_skipped += 1
                         continue
-                    raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                    with full.open("rb") as fh:
+                        raw = fh.read(MAX_SCAN_BYTES)
                     if size > MAX_SCAN_BYTES:
                         byte_capped += 1
                 except OSError:
@@ -931,7 +961,8 @@ class LibraryService:
     def _command(self, argv: list[str]) -> dict[str, Any]:
         # Raises CommandNotAllowed; the caller records the refusal and moves on
         # rather than failing the goal, exactly like the verifier's refusals.
-        return SandboxService().run_command(
+        sandbox = self._sandbox if self._sandbox is not None else SandboxService(settings=self.settings)
+        return sandbox.run_command(
             self.root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only", network=False,
         )
 
@@ -947,9 +978,10 @@ def format_read(result: dict[str, Any]) -> str:
                 f"--- {result['path']} (line {result['offset']} requested — empty range)"
             )
             return f"{head} of {result['total_lines']}"
+        note = f" [truncated at {MAX_READ_CHARS} chars]" if result.get("char_truncated") else ""
         head = (
             f"--- {result['path']} lines {result['offset']}-{result['offset'] + result['lines'] - 1} "
-            f"of {result['total_lines']}"
+            f"of {result['total_lines']}{note}"
         )
         body = result["text"]
         return f"{head}\n{body}" if body else f"{head} (empty range)"

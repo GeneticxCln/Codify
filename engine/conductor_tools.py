@@ -8,6 +8,7 @@ the state these act on and is named here only for its type.
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any, cast
@@ -201,11 +202,20 @@ class _StepState:
     last_failure: str | None = None
     #: The critic approved the files as they are now.
     reviewed: bool = False
+    #: Original pre-step file content per touched path, captured before the first write in this step,
+    #: so multi-pass writes recompute the full cumulative diff for review lenses, critic, and scribe.
+    baselines: dict[str, str | None] = field(default_factory=dict)
 
     def summaries(self) -> list[dict[str, Any]]:
         return list(self.files.values())
 
-    def wrote(self, written: list[dict[str, Any]]) -> None:
+    def wrote(
+        self,
+        written: list[dict[str, Any]],
+        *,
+        fs: FileSystemService | None = None,
+        dry_run: bool = False,
+    ) -> None:
         for entry in written:
             path = str(entry.get("path"))
             earlier = self.files.get(path)
@@ -213,7 +223,36 @@ class _StepState:
             # erase the diff of the write that did change the file.
             if earlier is not None and earlier.get("changed", True) and not entry.get("changed", True):
                 continue
-            self.files[path] = entry
+            updated = dict(entry)
+            if earlier is not None:
+                if path in self.baselines and fs is not None and not dry_run:
+                    orig = self.baselines[path]
+                    after = None if updated.get("action") == "delete" else fs.read_text_or_none(path)
+                    before_text = orig or ""
+                    after_text = after or ""
+                    updated["unified_diff"] = (
+                        ""
+                        if before_text == after_text
+                        else "".join(
+                            difflib.unified_diff(
+                                before_text.splitlines(keepends=True),
+                                after_text.splitlines(keepends=True),
+                                fromfile=f"a/{path}",
+                                tofile=f"b/{path}",
+                            )
+                        )
+                    )
+                    updated["changed"] = (
+                        (orig is not None) if updated.get("action") == "delete" else (orig != after)
+                    )
+                    if orig is None and updated.get("action") in ("edit", "update"):
+                        updated["action"] = "create"
+                elif earlier.get("unified_diff") and updated.get("unified_diff"):
+                    earlier_diff = str(earlier["unified_diff"]).rstrip("\n")
+                    latest_diff = str(updated["unified_diff"]).lstrip("\n")
+                    if earlier_diff and latest_diff and earlier_diff != latest_diff:
+                        updated["unified_diff"] = f"{earlier_diff}\n{latest_diff}"
+            self.files[path] = updated
         self.test = None
         self.test_failed = False
         self.reviewed = False
@@ -308,7 +347,7 @@ class ConductorTools:
         self.root = root
         self.skills = skills
         # Resolved once, here, rather than in every tool that needs one.
-        self.library = LibraryService(root)
+        self.library = LibraryService(root, sandbox=getattr(service, "sandbox", None))
         self.git = service.git
         self.ws = service.workspaces.get(goal.workspace_id)
         # `state` is what one move hands to the next inside a single conductor
@@ -421,10 +460,12 @@ class ConductorTools:
 
         Read from the row at call time, not from the `Goal` a run was built with: a
         plan can be approved after the run started, and a status can change under
-        it. A goal deleted mid-run has no stored status, and is not running.
+        it. Dry-run and plan-only goals never permit external `act` side effects.
+        A goal deleted mid-run has no stored status, and is not running.
         """
         try:
-            return self.service.goals.get(self.goal_id).status == "RUNNING"
+            g = self.service.goals.get(self.goal_id)
+            return g.status == "RUNNING" and not g.dry_run and not g.plan_only
         except ApiError:
             return False
 
@@ -459,6 +500,7 @@ class ConductorTools:
             result = await mcp.call_tool(
                 server, tool, arguments,
                 goal_running=self._goal_running(),
+                check_running=self._goal_running,
                 announce=announce,
             )
         except McpError as exc:
@@ -595,7 +637,9 @@ class ConductorTools:
         """
         days = args.get("days")
         window = max(0, min(days, 730)) if isinstance(days, int) and not isinstance(days, bool) else 0
-        events = self.service.goals.usage_audit_events(self.goal.workspace_id, window_days=window)
+        events = await asyncio.to_thread(
+            self.service.goals.usage_audit_events, self.goal.workspace_id, window_days=window,
+        )
         turn_cap = self.service._settings_int("conductor_max_turns", DEFAULT_MAX_TURNS)
         result = await asyncio.to_thread(usage_audit.audit, events, window, turn_cap=turn_cap)
         self.service._log(
@@ -733,20 +777,26 @@ class ConductorTools:
             return f"That page read did not come back. {exc}"
         return format_page(page)
 
+    def _resolve_editor_path(self, path: str) -> tuple[str | None, str | None]:
+        """Return `(canonical_relative_posix_path, None)` when inside this workspace, else `(None, refusal)`."""
+        fs = FileSystemService(self.root)
+        try:
+            target = fs.resolve(path)
+        except PathEscapeError:
+            return None, (
+                f"{path!r} is outside this workspace, or is git's own metadata, so it cannot be shown in the editor. "
+                "Paths are relative to the workspace root."
+            )
+        return target.relative_to(fs.root).as_posix(), None
+
     def _outside(self, path: str) -> str | None:
         """A sentence when `path` cannot be inside this workspace, else None.
 
         The same confinement every other file door uses (`FileSystemService.resolve`), asked before the round trip, so the
         model is told at once and the window is never asked to open somebody else's file. It only resolves: nothing is read.
         """
-        try:
-            FileSystemService(self.root).resolve(path)
-        except PathEscapeError:
-            return (
-                f"{path!r} is outside this workspace, or is git's own metadata, so it cannot be shown in the editor. "
-                "Paths are relative to the workspace root."
-            )
-        return None
+        _, refusal = self._resolve_editor_path(path)
+        return refusal
 
     async def read_editor(self, args: dict[str, Any]) -> str:
         """What the person's editor holds: the open files, the cursor and selection, and a file's unsaved text.
@@ -759,8 +809,11 @@ class ConductorTools:
         if surfaces is None:
             return _NO_EDITOR
         path = str(args.get("path") or "").strip() or None
-        if path is not None and (refusal := self._outside(path)) is not None:
-            return refusal
+        if path is not None:
+            canonical, refusal = self._resolve_editor_path(path)
+            if refusal is not None:
+                return refusal
+            path = canonical
         self.service._log(
             self.goal_id, None, "info",
             f"conductor looked at the editor{f' ({path})' if path else ''}",
@@ -780,8 +833,11 @@ class ConductorTools:
         if surfaces is None:
             return _NO_EDITOR
         path = str(args.get("path") or "").strip()
-        if path and (refusal := self._outside(path)) is not None:
-            return refusal
+        if path:
+            canonical, refusal = self._resolve_editor_path(path)
+            if refusal is not None:
+                return refusal
+            path = canonical or ""
         self.service._log(self.goal_id, None, "info", f"conductor opened {path or '(no path)'} in the editor")
         asked = {"path": path, "line": args.get("line"), "end_line": args.get("end_line")}
         try:
@@ -804,8 +860,11 @@ class ConductorTools:
         if surfaces is None:
             return _NO_EDITOR
         path = str(args.get("path") or "").strip()
-        if path and (refusal := self._outside(path)) is not None:
-            return refusal
+        if path:
+            canonical, refusal = self._resolve_editor_path(path)
+            if refusal is not None:
+                return refusal
+            path = canonical or ""
         self.service._log(self.goal_id, None, "info", f"conductor edited {path or '(no path)'} in the editor")
         asked = {
             "path": path,
@@ -926,12 +985,15 @@ class ConductorTools:
                 "message fragment, a path or a stage name."
             )
         days = args.get("days")
+        window_days = int(days) if isinstance(days, int) and not isinstance(days, bool) else 0
         rows = await asyncio.to_thread(
             self.service.goals.recall_events,
             self.goal.workspace_id,
-            window_days=int(days) if isinstance(days, int) else 0,
+            window_days=window_days,
         )
-        result = search_recall(rows, query, limit=int(args.get("limit") or 8))
+        limit_raw = args.get("limit")
+        limit = int(limit_raw) if isinstance(limit_raw, int) and not isinstance(limit_raw, bool) and limit_raw > 0 else 8
+        result = search_recall(rows, query, limit=limit)
         self.service._log(
             self.goal_id, None, "info",
             f"conductor recalled {result.get('matched', 0)} past event(s) "
@@ -947,8 +1009,14 @@ class ConductorTools:
         `goal.workspace_id` in the same way, for the same reason — another
         workspace's threads are never read to be discarded.
         """
-        rows = self.service.goals.thread_recall(self.goal.workspace_id)
-        result = search_threads(rows, args.get("query"), limit=int(args.get("limit") or MAX_THREADS))
+        rows = await asyncio.to_thread(self.service.goals.thread_recall, self.goal.workspace_id)
+        limit_raw = args.get("limit")
+        limit = (
+            int(limit_raw)
+            if isinstance(limit_raw, int) and not isinstance(limit_raw, bool) and limit_raw > 0
+            else MAX_THREADS
+        )
+        result = search_threads(rows, args.get("query"), limit=limit)
         query = str(args.get("query") or "").strip()
         self.service._log(
             self.goal_id, None, "info",
@@ -1249,7 +1317,7 @@ class ConductorTools:
             async with self.service._stage(self.goal_id, "fixer", "fixer", step.id) as fix_stage:
                 summaries, wants_pass = await self.service._fixer(
                     self.goal_id, step, fs, self.goal.dry_run, self.service._evidence_for(self.goal_id),
-                    guidance=instructions,
+                    guidance=instructions, baselines=state.baselines,
                 )
                 changed = [s for s in summaries if s.get("changed", True)]
                 fix_stage.record("wrote" if changed else "no_change")
@@ -1260,7 +1328,7 @@ class ConductorTools:
                 f"The fixer failed on that step ({getattr(exc, 'code', 'error')}: "
                 f"{exc}). Nothing further was written for it."
             )
-        state.wrote(summaries)
+        state.wrote(summaries, fs=fs, dry_run=self.goal.dry_run)
         if self.goal.dry_run:
             note = "This was a dry run: the files were proposed, not written. "
         elif wants_pass:
@@ -1404,17 +1472,6 @@ class ConductorTools:
                 )
                 c.record("approve")
         except CriticRejection as exc:
-            # Recorded here because the stage block above never reaches its
-            # `record` on this path, and a critic that asked for changes is
-            # the one outcome a reader most needs to see.
-            self.service.goals.publish(self.service._event(
-                self.goal_id, step.id, "stage_result",
-                {
-                    "stage": "critic", "role": "critic", "ordinal": 0,
-                    "outcome": "request_changes", "detail": str(exc),
-                    "duration_ms": 0, "tokens": 0, "calls": 0,
-                },
-            ))
             state.reviewed = False
             reasons = "\n".join(f"{i}. {r}" for i, r in enumerate(exc.reasons, 1))
             return (
@@ -1432,6 +1489,11 @@ class ConductorTools:
         step = self.step_for(step_id)
         if isinstance(step, str):
             return step
+        if step.status == "COMPLETED":
+            return (
+                "That step is already complete and committed. Summarizing it again would "
+                "duplicate its commit and completion record."
+            )
         state = self._state_of(step.id)
         if not state.files:
             return "That step was not written in this run, so there is nothing to record."
@@ -1460,6 +1522,7 @@ class ConductorTools:
                 "complete."
             )
         self.service._set_step(self.goal_id, step, "COMPLETED")
+        state.reviewed = False
         return {
             "committed": "That step is recorded and committed.",
             "nothing_to_commit": (

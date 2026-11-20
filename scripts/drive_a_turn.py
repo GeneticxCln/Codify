@@ -23,6 +23,7 @@ from __future__ import annotations
 import argparse
 import asyncio
 import os
+import shutil
 import sys
 import tempfile
 import time
@@ -170,6 +171,11 @@ async def main() -> int:
             "given"
         ),
     )
+    parser.add_argument(
+        "--keep-scratch",
+        action="store_true",
+        help="keep the throwaway workspace/DB directory after exit (secrets.json is always removed)",
+    )
     args = parser.parse_args()
 
     # A throwaway home before anything reads one. The engine must never see the
@@ -182,7 +188,7 @@ async def main() -> int:
     from httpx import ASGITransport
     import httpx
 
-    from engine.app import BOOT_TOKEN, app
+    from engine.app import BOOT_TOKEN, _BACKGROUND_TASKS, app
     from engine.db import connect
     from engine.executor import ExecutorService
     from engine.laya import LayaService
@@ -202,195 +208,207 @@ async def main() -> int:
         WorkspaceService,
     )
 
-    conn = connect(Path(scratch) / "drive.db")
-    keychain = Keychain(secrets_path=Path(scratch) / "secrets.json")
-    factory = ProviderFactory(keychain)
-    registry = AgentRegistryService(conn, factory, keychain)
-    workspaces = WorkspaceService(conn)
-    conversations = ConversationService(conn)
-    goals = GoalService(conn)
-    settings = SettingsService(conn)
-    laya = LayaService(registry=registry)
-    executor = ExecutorService(
-        goals, workspaces, registry, SandboxService(), laya=laya
-    )
-    executor.settings = settings
+    conn: Any = None
+    try:
+        conn = connect(Path(scratch) / "drive.db")
+        keychain = Keychain(secrets_path=Path(scratch) / "secrets.json")
+        factory = ProviderFactory(keychain)
+        registry = AgentRegistryService(conn, factory, keychain)
+        workspaces = WorkspaceService(conn)
+        conversations = ConversationService(conn)
+        goals = GoalService(conn)
+        settings = SettingsService(conn)
+        laya = LayaService(registry=registry)
+        executor = ExecutorService(
+            goals, workspaces, registry, SandboxService(), laya=laya
+        )
+        executor.settings = settings
 
-    # Wired onto the app, so the request goes through the real route rather than
-    # reaching past it: `_spawn` is what runs `run_chat` in the background, and
-    # a script that bypassed it would be testing something the client never uses.
-    app.state.conn = conn
-    app.state.registry = registry
-    app.state.workspaces = workspaces
-    app.state.conversations = conversations
-    app.state.goals = goals
-    app.state.sandbox = SandboxService()
-    app.state.settings = settings
-    app.state.executor = executor
-    app.state.token = BOOT_TOKEN
+        # Wired onto the app, so the request goes through the real route rather than
+        # reaching past it: `_spawn` is what runs `run_chat` in the background, and
+        # a script that bypassed it would be testing something the client never uses.
+        app.state.conn = conn
+        app.state.registry = registry
+        app.state.workspaces = workspaces
+        app.state.conversations = conversations
+        app.state.goals = goals
+        app.state.sandbox = SandboxService()
+        app.state.settings = settings
+        app.state.executor = executor
+        app.state.token = BOOT_TOKEN
 
-    # Every role at the same target. The point is that the *whole* path runs —
-    # a real gate, a real conductor, a real provider. Whatever dialect
-    # `--provider` selects is the one exercised end to end, which is the only
-    # way a wire-format mistake shows up: a converter that is wrong compiles,
-    # passes its own tests, and then returns someone else's 400.
-    api_key: str | None = None
-    if args.api_key_env:
-        api_key = os.environ.get(args.api_key_env) or None
-        if api_key is None:
-            print(f"{args.api_key_env} is not set (or is empty)")
-            return 2
-    patch = AgentConfigUpdate(provider=args.provider, model_name=args.model)
-    if args.base_url:
-        patch.base_url = args.base_url
-    if api_key is not None:
-        patch.api_key = api_key
-    for role in ROLES:
-        registry.set_config(role, patch)
-
-    repo = Path(scratch) / "workspace"
-    repo.mkdir()
-    (repo / "greeter.py").write_text(
-        "def greet(name):\n"
-        '    """Return a greeting for `name`."""\n'
-        '    return f"Hello, {name}!"\n'
-    )
-    ws = workspaces.create(WorkspaceCreate(name="demo", root_path=str(repo)))
-    thread = conversations.create(ConversationCreate(workspace_id=ws.id, title="drive"))
-
-    # The real route, over ASGI, with the boot token — invariant 3. Everything
-    # from here is the client's path: POST the turn, poll the ordinary goal
-    # events, read the answer off the log. Several prompts become several turns
-    # in one thread, which is also the only way to see memory and a mid-thread
-    # escalation.
-    transport = ASGITransport(app=app)
-    headers = {"Authorization": f"Bearer {BOOT_TOKEN}"}
-    print(f"workspace: {repo}")
-    print(f"thread:    {thread.id}")
-    print(f"model:     {args.provider}/{args.model}")
-    print("-" * 68)
-
-    failed = False
-    tallies: list[dict[str, Any]] = []
-    run_tallies: list[dict[str, Any]] = []
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://testserver", headers=headers,
-        timeout=60.0,
-    ) as client:
-        for index, prompt in enumerate(args.prompt, start=1):
-            started = time.monotonic()
-            posted = await client.post(
-                f"/conversations/{thread.id}/turns", json={"prompt": prompt}
-            )
-            if posted.status_code != 200:
-                print(f"POST failed: {posted.status_code} {posted.text}")
+        # Every role at the same target. The point is that the *whole* path runs —
+        # a real gate, a real conductor, a real provider. Whatever dialect
+        # `--provider` selects is the one exercised end to end, which is the only
+        # way a wire-format mistake shows up: a converter that is wrong compiles,
+        # passes its own tests, and then returns someone else's 400.
+        api_key: str | None = None
+        if args.api_key_env:
+            api_key = os.environ.get(args.api_key_env) or None
+            if api_key is None:
+                print(f"{args.api_key_env} is not set (or is empty)")
                 return 2
-            goal_id: str = posted.json()["id"]
-            print(f"\n--- turn {index}: {prompt[:96]!r}")
-            print(f"    goal: {goal_id}")
+        patch = AgentConfigUpdate(provider=args.provider, model_name=args.model)
+        if args.base_url:
+            patch.base_url = args.base_url
+        if api_key is not None:
+            patch.api_key = api_key
+        for role in ROLES:
+            registry.set_config(role, patch)
 
-            events: list[dict[str, Any]] = []
-            deadline = time.monotonic() + args.timeout
-            while time.monotonic() < deadline:
-                resp = await client.get(f"/goals/{goal_id}/events")
-                events = resp.json()
-                terminal = [
-                    e for e in events
-                    if e["type"] == "goal_status"
-                    and (e["payload"] or {}).get("status") in (
-                        "COMPLETED", "FAILED", "CANCELLED", "PENDING"
-                    )
-                ]
-                if terminal:
-                    break
-                await asyncio.sleep(0.25)
+        repo = Path(scratch) / "workspace"
+        repo.mkdir()
+        (repo / "greeter.py").write_text(
+            "def greet(name):\n"
+            '    """Return a greeting for `name`."""\n'
+            '    return f"Hello, {name}!"\n'
+        )
+        ws = workspaces.create(WorkspaceCreate(name="demo", root_path=str(repo)))
+        thread = conversations.create(ConversationCreate(workspace_id=ws.id, title="drive"))
 
-            status = goals.get(goal_id).status
-            steps = goals.steps(goal_id)
-            print(f"    status: {status}   ({time.monotonic() - started:.1f}s)   "
-                  f"steps: {len(steps)}")
+        # The real route, over ASGI, with the boot token — invariant 3. Everything
+        # from here is the client's path: POST the turn, poll the ordinary goal
+        # events, read the answer off the log. Several prompts become several turns
+        # in one thread, which is also the only way to see memory and a mid-thread
+        # escalation.
+        transport = ASGITransport(app=app)
+        headers = {"Authorization": f"Bearer {BOOT_TOKEN}"}
+        print(f"workspace: {repo}")
+        print(f"thread:    {thread.id}")
+        print(f"model:     {args.provider}/{args.model}")
+        print("-" * 68)
 
-            reply = ""
-            for event in events:
-                payload = event["payload"] or {}
-                kind = event["type"]
-                if kind == "log":
-                    text = str(payload.get("message", ""))
-                    if payload.get("turn"):
-                        reply = text
-                        print(f"    [ANSWER] {text}")
-                    elif not payload.get("level") == "info" or "conductor" in text:
-                        print(f"    [{payload.get('level', 'log')}] {text[:200]}")
-                elif kind == "agent_assigned":
-                    suffix = " (conductor)" if payload.get("conductor") else ""
-                    print(
-                        f"    [agent] {payload.get('role')} -> "
-                        f"{payload.get('provider')}/{payload.get('model')}{suffix}"
-                    )
-                elif kind == "laya_decision":
-                    answers = payload.get("answers") or {}
-                    print(
-                        f"    [gate]  engine={payload.get('engine')} "
-                        f"intent={answers.get('intent')} "
-                        f"injection={(answers.get('prompt_injection') or {}).get('noul')}"
-                    )
-                elif kind == "error":
-                    print(f"    [ERROR] {payload.get('code')}: {payload.get('message')}")
+        failed = False
+        tallies: list[dict[str, Any]] = []
+        run_tallies: list[dict[str, Any]] = []
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver", headers=headers,
+            timeout=60.0,
+        ) as client:
+            for index, prompt in enumerate(args.prompt, start=1):
+                started = time.monotonic()
+                posted = await client.post(
+                    f"/conversations/{thread.id}/turns", json={"prompt": prompt}
+                )
+                if posted.status_code != 200:
+                    print(f"POST failed: {posted.status_code} {posted.text}")
+                    return 2
+                goal_id: str = posted.json()["id"]
+                print(f"\n--- turn {index}: {prompt[:96]!r}")
+                print(f"    goal: {goal_id}")
 
-            tally = turn_tally(events, goals.get(goal_id).status)
-            tallies.append(tally)
-            print(f"    [tally] {tally}")
-
-            # PENDING means the pipeline took over and is waiting for a person
-            # to approve the plan — the expected end of a code change, and not
-            # something that has "answered" yet.
-            final_status = goals.get(goal_id).status
-            if final_status != "PENDING" and not reply:
-                print("    (no answer)")
-                failed = True
-
-            if args.approve:
-                if final_status != "PENDING" or not steps:
-                    print("    (nothing to start: this turn made no plan)")
-                    continue
-                # The real route, with the version the plan was made at: the same press a person makes.
-                before = max((e["sequence"] for e in events), default=0)
-                started_at = time.monotonic()
-                def version_now(gid: str = goal_id) -> int:
-                    return int(goals.get(gid).version)
-
-                pressed = await press_start(client, goal_id, version_now, time.monotonic() + args.timeout)
-                if pressed.status_code != 200:
-                    print(f"    Start refused: {pressed.status_code} {pressed.text}")
-                    failed = True
-                    continue
-                print(f"\n--- start: goal {goal_id}")
-                run_status = "RUNNING"
+                events: list[dict[str, Any]] = []
                 deadline = time.monotonic() + args.timeout
                 while time.monotonic() < deadline:
-                    run_status = goals.get(goal_id).status
-                    if run_status not in ("RUNNING", "PENDING"):
+                    resp = await client.get(f"/goals/{goal_id}/events")
+                    events = resp.json()
+                    terminal = [
+                        e for e in events
+                        if e["type"] == "goal_status"
+                        and (e["payload"] or {}).get("status") in (
+                            "COMPLETED", "FAILED", "CANCELLED", "PENDING", "PAUSED"
+                        )
+                    ]
+                    if terminal:
                         break
                     await asyncio.sleep(0.25)
-                after = (await client.get(f"/goals/{goal_id}/events")).json()
-                run_events = [e for e in after if e["sequence"] > before]
-                listed = ", ".join(f"{step.title}: {step.status}" for step in goals.steps(goal_id))
-                print(f"    status: {run_status}   ({time.monotonic() - started_at:.1f}s)   steps: {listed}")
-                for event in run_events:
+
+                status = goals.get(goal_id).status
+                steps = goals.steps(goal_id)
+                print(f"    status: {status}   ({time.monotonic() - started:.1f}s)   "
+                      f"steps: {len(steps)}")
+
+                reply = ""
+                for event in events:
                     payload = event["payload"] or {}
-                    if event["type"] == "log" and str(payload.get("message", "")).startswith("conductor called "):
-                        print(f"    [call] {str(payload['message'])[len('conductor called '):][:120]}")
-                    elif event["type"] == "error":
+                    kind = event["type"]
+                    if kind == "log":
+                        text = str(payload.get("message", ""))
+                        if payload.get("turn"):
+                            reply = text
+                            print(f"    [ANSWER] {text}")
+                        elif not payload.get("level") == "info" or "conductor" in text:
+                            print(f"    [{payload.get('level', 'log')}] {text[:200]}")
+                    elif kind == "agent_assigned":
+                        suffix = " (conductor)" if payload.get("conductor") else ""
+                        print(
+                            f"    [agent] {payload.get('role')} -> "
+                            f"{payload.get('provider')}/{payload.get('model')}{suffix}"
+                        )
+                    elif kind == "laya_decision":
+                        answers = payload.get("answers") or {}
+                        print(
+                            f"    [gate]  engine={payload.get('engine')} "
+                            f"intent={answers.get('intent')} "
+                            f"injection={(answers.get('prompt_injection') or {}).get('noul')}"
+                        )
+                    elif kind == "error":
                         print(f"    [ERROR] {payload.get('code')}: {payload.get('message')}")
-                outcome = run_tally(run_events, run_status)
-                if outcome["pause"]:
-                    print(f"    [PAUSED] {outcome['pause']['code']}: {outcome['pause']['reason']}")
-                print(f"    [run] {outcome}")
-                run_tallies.append(outcome)
-                if run_status != "COMPLETED":
+
+                tally = turn_tally(events, goals.get(goal_id).status)
+                tallies.append(tally)
+                print(f"    [tally] {tally}")
+
+                # PENDING means the pipeline took over and is waiting for a person
+                # to approve the plan — the expected end of a code change, and not
+                # something that has "answered" yet.
+                final_status = goals.get(goal_id).status
+                if final_status != "PENDING" and not reply:
+                    print("    (no answer)")
                     failed = True
 
-    conn.close()
+                if args.approve:
+                    if final_status != "PENDING" or not steps:
+                        print("    (nothing to start: this turn made no plan)")
+                        continue
+                    # The real route, with the version the plan was made at: the same press a person makes.
+                    before = max((e["sequence"] for e in events), default=0)
+                    started_at = time.monotonic()
+
+                    def version_now(gid: str = goal_id) -> int:
+                        return int(goals.get(gid).version)
+
+                    pressed = await press_start(client, goal_id, version_now, time.monotonic() + args.timeout)
+                    if pressed.status_code != 200:
+                        print(f"    Start refused: {pressed.status_code} {pressed.text}")
+                        failed = True
+                        continue
+                    print(f"\n--- start: goal {goal_id}")
+                    run_status = "RUNNING"
+                    deadline = time.monotonic() + args.timeout
+                    while time.monotonic() < deadline:
+                        run_status = goals.get(goal_id).status
+                        if run_status not in ("RUNNING", "PENDING"):
+                            break
+                        await asyncio.sleep(0.25)
+                    after = (await client.get(f"/goals/{goal_id}/events")).json()
+                    run_events = [e for e in after if e["sequence"] > before]
+                    listed = ", ".join(f"{step.title}: {step.status}" for step in goals.steps(goal_id))
+                    print(f"    status: {run_status}   ({time.monotonic() - started_at:.1f}s)   steps: {listed}")
+                    for event in run_events:
+                        payload = event["payload"] or {}
+                        if event["type"] == "log" and str(payload.get("message", "")).startswith("conductor called "):
+                            print(f"    [call] {str(payload['message'])[len('conductor called '):][:120]}")
+                        elif event["type"] == "error":
+                            print(f"    [ERROR] {payload.get('code')}: {payload.get('message')}")
+                    outcome = run_tally(run_events, run_status)
+                    if outcome["pause"]:
+                        print(f"    [PAUSED] {outcome['pause']['code']}: {outcome['pause']['reason']}")
+                    print(f"    [run] {outcome}")
+                    run_tallies.append(outcome)
+                    if run_status != "COMPLETED":
+                        failed = True
+    finally:
+        pending = [t for t in list(_BACKGROUND_TASKS) if not t.done()]
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        if conn is not None:
+            conn.close()
+        (Path(scratch) / "secrets.json").unlink(missing_ok=True)
+        if not args.keep_scratch:
+            shutil.rmtree(scratch, ignore_errors=True)
     outcomes: dict[str, int] = {}
     for tally in tallies:
         outcomes[tally["outcome"]] = outcomes.get(tally["outcome"], 0) + 1

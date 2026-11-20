@@ -39,13 +39,54 @@ unset GIT_DIR GIT_WORK_TREE GIT_INDEX_FILE GIT_PREFIX GIT_COMMON_DIR GIT_OBJECT_
 # that way. The local sha is how a deletion is told apart from an update — it is all
 # zeros (40 of them for sha1, 64 for sha256, hence the pattern rather than a literal).
 gated=0
-while read -r _local_ref local_sha remote_ref _remote_sha; do
+history_ranges=()
+while read -r _local_ref local_sha remote_ref remote_sha; do
   case "$local_sha" in
     *[!0]*) ;;
     *) continue ;;  # all zeros: a deletion, nothing added to the remote
   esac
   case "$remote_ref" in
-    refs/heads/*) gated=1 ;;
+    refs/heads/*)
+      gated=1
+      range=""
+      case "$remote_sha" in
+        *[!0]*)
+          range="${remote_sha}..${local_sha}"
+          ;;
+        *)
+          # New branch on the remote: walk only commits not yet reachable on this remote.
+          new_commits="$(git rev-list --reverse "$local_sha" --not --remotes="$remote" 2>/dev/null || true)"
+          if [ -n "$new_commits" ]; then
+            first_new="${new_commits%%$'\n'*}"
+            if parent="$(git rev-parse --verify --quiet "${first_new}^" 2>/dev/null)"; then
+              range="${parent}..${local_sha}"
+            else
+              range="$local_sha"
+            fi
+          elif base="$(git merge-base "$local_sha" "${remote}/HEAD" 2>/dev/null \
+            || git merge-base "$local_sha" "${remote}/master" 2>/dev/null \
+            || git merge-base "$local_sha" "${remote}/main" 2>/dev/null)"; then
+            range="${base}..${local_sha}"
+          elif git rev-parse --verify --quiet "$local_sha" >/dev/null 2>&1; then
+            range="${local_sha}..${local_sha}"
+          fi
+          ;;
+      esac
+      if [ -n "$range" ]; then
+        seen=0
+        if [ "${#history_ranges[@]}" -gt 0 ]; then
+          for existing in "${history_ranges[@]}"; do
+            if [ "$existing" = "$range" ]; then
+              seen=1
+              break
+            fi
+          done
+        fi
+        if [ "$seen" -eq 0 ]; then
+          history_ranges+=("$range")
+        fi
+      fi
+      ;;
   esac
 done
 
@@ -85,7 +126,18 @@ fi
 echo
 echo "pre-push: checking that every commit in this push builds, not just the tip."
 
-if ! make check-history; then
+run_history_check() {
+  if [ "${#history_ranges[@]}" -eq 0 ]; then
+    make check-history
+    return $?
+  fi
+  for range in "${history_ranges[@]}"; do
+    HISTORY_RANGE="$range" make check-history || return 1
+  done
+  return 0
+}
+
+if ! run_history_check; then
   cat >&2 <<'EOF'
 
 pre-push: BLOCKED — a commit in this push does not build, so nothing was pushed.

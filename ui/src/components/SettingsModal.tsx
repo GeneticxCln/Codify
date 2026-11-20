@@ -125,6 +125,15 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   const lastFetchAt = useRef(0);
   /** An explicit refresh that arrived during a request, to run the moment it ends. */
   const askAgain = useRef(false);
+  const savedTimersRef = useRef<Record<string, ReturnType<typeof setTimeout>>>({});
+  useEffect(() => {
+    return () => {
+      for (const timer of Object.values(savedTimersRef.current)) {
+        clearTimeout(timer);
+      }
+      savedTimersRef.current = {};
+    };
+  }, []);
   /**
    * The current `loadCatalog`, for the re-run below. A ref, because the function
    * refers to itself and a `useCallback` cannot hold the value it is producing.
@@ -336,10 +345,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
     if (isOpen && tab === "keys") {
       loadKeys();
     }
+  }, [isOpen, tab]);
+
+  useEffect(() => {
     if (isOpen) {
-      loadCatalog(true);
+      void loadCatalog(true);
     }
-  }, [isOpen, tab, loadCatalog]);
+  }, [isOpen, loadCatalog]);
 
   /**
    * The engine announced that a provider's list moved. Re-read it from the cache
@@ -348,7 +360,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
    */
   useEffect(() => {
     if (!isOpen || catalogTick === 0) return;
-    void loadCatalog(false);
+    void loadCatalog(false, "auto");
   }, [isOpen, catalogTick, loadCatalog]);
 
   // Escape closes, like every other overlay in the app.
@@ -595,10 +607,13 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                         // again — that is what fills the picker beside this field
                         // without a second visit.
                         await loadCatalog(true);
-                        setTimeout(
-                          () => setSavedSuccess((prev) => ({ ...prev, [provider]: false })),
-                          2500,
-                        );
+                        if (savedTimersRef.current[provider]) {
+                          clearTimeout(savedTimersRef.current[provider]);
+                        }
+                        savedTimersRef.current[provider] = setTimeout(() => {
+                          delete savedTimersRef.current[provider];
+                          setSavedSuccess((prev) => ({ ...prev, [provider]: false }));
+                        }, 2500);
                       } finally {
                         setSaving((prev) => ({ ...prev, [provider]: false }));
                       }
@@ -625,6 +640,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
           {tab === "agents" && (
             <SettingsPanel
               embedded
+              store={store}
               models={models}
               providerStatus={modelStatus}
               recentRuns={recentRuns}

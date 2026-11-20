@@ -103,7 +103,7 @@ export interface TabBarProps {
   onMenu?: (tabId: string, x: number, y: number) => void;
 }
 
-export const TabBar: React.FC<TabBarProps> = ({
+export const TabBar: React.FC<TabBarProps> = React.memo(({
   tabs,
   activeId,
   onFocus,
@@ -296,4 +296,4 @@ export const TabBar: React.FC<TabBarProps> = ({
       </div>
     </div>
   );
-};
+});

@@ -59,9 +59,10 @@ class NotesService:
             raise ApiError(409, "note_exists", "that note is already kept")
         note_id = str(uuid.uuid4())
         moment = time.time() if now is None else now
+        source = source if source in ("person", "imported") else "person"
         self._db.execute(
             "INSERT INTO global_notes (id, text, source, created_at) VALUES (?, ?, ?, ?)",
-            (note_id, clean, source if source in ("person", "imported") else "person", moment),
+            (note_id, clean, source, moment),
         )
         self._db.commit()
         return {"id": note_id, "text": clean, "source": source, "created_at": moment}

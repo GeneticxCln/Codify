@@ -112,6 +112,15 @@ export type LayoutStorage = TabStorage;
 
 const KEY_PREFIX = "k_";
 let keyCounter = 1;
+// Per-window random nonce so two windows minting tabs in the same millisecond never collide.
+const WINDOW_NONCE = (() => {
+  if (typeof crypto !== "undefined" && typeof crypto.getRandomValues === "function") {
+    const buf = new Uint32Array(1);
+    crypto.getRandomValues(buf);
+    return buf[0].toString(36);
+  }
+  return Math.random().toString(36).slice(2, 8) || "0";
+})();
 
 /**
  * A durable tab identity.
@@ -119,15 +128,11 @@ let keyCounter = 1;
  * The prefix is there so a key can never be mistaken for a `Tab.id` in a log or
  * a test failure: they are different namespaces, minted by different counters,
  * and confusing them is exactly the bug that would make a restored tab seat the
- * wrong webview. A monotonic counter rather than `crypto.randomUUID` because the
- * only collision that matters is two windows minting at the same instant, and
- * both would have to produce the same integer — which the engine's upsert makes
- * a merge rather than a failure. `Date.now()` alone would not be enough: two
- * windows opened in the same millisecond are the ordinary case, not the exotic
- * one.
+ * wrong webview. Combining timestamp, per-window nonce, and monotonic counter
+ * ensures two windows opened in the same millisecond never mint the same key.
  */
 export function tabKey(): string {
-  return `${KEY_PREFIX}${Date.now().toString(36)}_${(keyCounter++).toString(36)}`;
+  return `${KEY_PREFIX}${Date.now().toString(36)}_${WINDOW_NONCE}_${(keyCounter++).toString(36)}`;
 }
 
 /** Is this a key this app minted? Used to refuse a stranger's row. */
@@ -409,16 +414,17 @@ export function planChanges(
   const removals = mirror.pendingRemovals.filter((key) => known.has(key));
   const pendingWrites = new Set(mirror.pendingWrites);
   // What the engine last said each row holds. Without it "known" could only mean
-  // "the key exists", and a tab that navigated after its first push was never
-  // sent again: its address changed here and stayed what it was there.
-  const held = new Map(engineRows.map((row) => [row.key, row.payload]));
+  // "the key exists", and a tab that navigated or moved after its first push was
+  // never sent again: its address or order changed here and stayed what it was there.
+  const held = new Map(engineRows.map((row) => [row.key, row]));
   state.tabs.forEach((tab, index) => {
     if (isLocalTab(tab) || !isTabKey(tab.key)) return;
     const payload = encodeTab(tab);
+    const existing = held.get(tab.key);
     if (
       known.has(tab.key) &&
       !pendingWrites.has(tab.key) &&
-      (!held.has(tab.key) || held.get(tab.key) === payload)
+      (!existing || (existing.payload === payload && existing.position === index))
     ) {
       return;
     }

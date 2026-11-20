@@ -238,19 +238,33 @@ def _parse_compound(text: str) -> _Compound:
             operator = ""
             name = body
             value = ""
-            for candidate in ("~=", "|=", "^=", "$=", "*=", "="):
-                if candidate in body:
-                    name, _, raw = body.partition(candidate)
-                    operator = candidate
-                    value = raw.strip()
-                    if len(value) >= 2 and value[0] == value[-1] and value[0] in "\"'":
-                        value = value[1:-1]
+            raw = ""
+            eq = -1
+            for pos, ch in enumerate(body):
+                if ch in "\"'":
                     break
+                if ch == "=":
+                    eq = pos
+                    break
+            if eq != -1:
+                if eq > 0 and body[eq - 1] in "~|^$*":
+                    operator = body[eq - 1:eq + 1]
+                    name = body[:eq - 1]
+                else:
+                    operator = "="
+                    name = body[:eq]
+                raw = body[eq + 1:].strip()
+                if not raw:
+                    raise SelectorError("an attribute value was expected")
+                if len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "\"'":
+                    value = raw[1:-1]
+                elif any(c in raw for c in " \t\r\n\"'"):
+                    raise SelectorError("an attribute value was expected")
+                else:
+                    value = raw
             name = name.strip().lower()
-            if not name or any(c in name for c in " \t\r\n"):
+            if not name or any(c in name for c in " \t\r\n\"'=~|^$*"):
                 raise SelectorError("an attribute name was expected")
-            if operator and not value:
-                raise SelectorError("an attribute value was expected")
             attrs.append((name, operator, value))
             index = close + 1
         else:
@@ -273,6 +287,8 @@ def _parse_group(group: str) -> list[_Part]:
                 current = []
                 combinator = " "
             if char == ">":
+                if not parts or combinator == ">":
+                    raise SelectorError("a selector cannot start with a combinator")
                 combinator = ">"
             index += 1
             continue
@@ -297,6 +313,8 @@ def _parse_group(group: str) -> list[_Part]:
         index += 1
     if current:
         parts.append(_Part(_parse_compound("".join(current)), combinator if parts else ""))
+    elif combinator == ">":
+        raise SelectorError("a selector cannot end with a combinator")
     if not parts:
         raise SelectorError("an empty selector")
     if parts[0].combinator:
@@ -326,10 +344,12 @@ def _matches_attr(node: Node, name: str, operator: str, value: str) -> bool:
         return True
     if operator == "=":
         return actual == value
-    if operator == "~=":
-        return value in actual.split()
     if operator == "|=":
         return actual == value or actual.startswith(value + "-")
+    if not value:
+        return False
+    if operator == "~=":
+        return value in actual.split()
     if operator == "^=":
         return actual.startswith(value)
     if operator == "$=":
@@ -350,23 +370,54 @@ def _matches_compound(node: Node, compound: _Compound) -> bool:
     return all(_matches_attr(node, name, operator, value) for name, operator, value in compound.attrs)
 
 
-def _matches_parts(node: Node, parts: list[_Part]) -> bool:
-    if not _matches_compound(node, parts[-1].compound):
-        return False
-    current: Node | None = node
-    for index in range(len(parts) - 1, 0, -1):
-        relation = parts[index].combinator
-        wanted = parts[index - 1].compound
-        current = current.parent if current is not None else None
-        if relation == ">":
-            if current is None or not _matches_compound(current, wanted):
-                return False
-            continue
-        while current is not None and not _matches_compound(current, wanted):
-            current = current.parent
-        if current is None:
-            return False
-    return True
+def _matches_chain(
+    node: Node,
+    parts: list[_Part],
+    index: int,
+    memo: dict[tuple[int, int], bool] | None = None,
+) -> bool:
+    if index == 0:
+        return True
+    key = (id(node), index)
+    if memo is not None and key in memo:
+        return memo[key]
+    relation = parts[index].combinator
+    wanted = parts[index - 1].compound
+    current = node.parent
+    if relation == ">":
+        matched = (
+            current is not None
+            and _matches_compound(current, wanted)
+            and _matches_chain(current, parts, index - 1, memo)
+        )
+        if memo is not None:
+            memo[key] = matched
+        return matched
+    visited: list[Node] = []
+    matched = False
+    while current is not None:
+        if _matches_compound(current, wanted) and _matches_chain(current, parts, index - 1, memo):
+            matched = True
+            break
+        parent_key = (id(current), index)
+        if memo is not None and parent_key in memo:
+            matched = memo[parent_key]
+            break
+        visited.append(current)
+        current = current.parent
+    if memo is not None:
+        memo[key] = matched
+        for ancestor in visited:
+            memo[(id(ancestor), index)] = matched
+    return matched
+
+
+def _matches_parts(
+    node: Node,
+    parts: list[_Part],
+    memo: dict[tuple[int, int], bool] | None = None,
+) -> bool:
+    return _matches_compound(node, parts[-1].compound) and _matches_chain(node, parts, len(parts) - 1, memo)
 
 
 def select(node: Node, selector: str) -> list[Node]:
@@ -376,6 +427,7 @@ def select(node: Node, selector: str) -> list[Node]:
     groups is returned once.
     """
     groups = parse_selector(selector)
+    memos: list[dict[tuple[int, int], bool]] = [{} for _ in groups]
     candidates = [node] if node.tag != "#document" else []
     candidates.extend(iter_nodes(node))
     found: list[Node] = []
@@ -383,7 +435,7 @@ def select(node: Node, selector: str) -> list[Node]:
     for candidate in candidates:
         if id(candidate) in seen:
             continue
-        if any(_matches_parts(candidate, parts) for parts in groups):
+        if any(_matches_parts(candidate, parts, memo) for parts, memo in zip(groups, memos, strict=True)):
             seen.add(id(candidate))
             found.append(candidate)
     return found

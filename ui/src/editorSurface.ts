@@ -160,13 +160,14 @@ export function createEditorSurface(
       if (placed.opened) host.closeFile(placed.tabId);
       return refuse(outcome.reason);
     }
+    const after = buffers.get(placed.tabId);
     return done({
-      path,
+      path: after?.path ?? path,
       replaced: outcome.replaced,
       from_line: outcome.fromLine,
       to_line: outcome.toLine,
       opened: placed.opened,
-      dirty: true,
+      dirty: Boolean(after?.dirty),
     });
   };
 

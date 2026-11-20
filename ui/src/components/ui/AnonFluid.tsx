@@ -59,16 +59,19 @@ const SHEAR = 26;
 
 export function createAnonFluidPainter(
   read: (name: string) => string,
-  active: boolean,
+  active: boolean | (() => boolean),
 ): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let rows: Row[] = [];
+  let seededH = 0;
   const reach = (w: number): number => GUTTER * w + SHEAR;
 
   // Only the height matters here: a row's position along its axis is derived
   // from `head` at draw time, so seeding against the width would freeze a
   // number that the cap may still change on the first resize.
   const seed = (h: number): void => {
+    seededH = h;
     rows = Array.from({ length: ROWS }, (_, i) => {
       const left = i % 2 === 0;
       return {
@@ -84,10 +87,11 @@ export function createAnonFluidPainter(
 
   return {
     step(dt) {
+      const busy = isActive();
       for (const row of rows) {
         // The hook's 1.8×, applied to the head, so a run in flight is a faster
         // stream as well as a sheared one.
-        row.head += row.speed * dt * (active ? 1.8 : 1);
+        row.head += row.speed * dt * (busy ? 1.8 : 1);
         row.phase += dt * 0.7;
       }
     },
@@ -95,9 +99,9 @@ export function createAnonFluidPainter(
       // Resolved per frame rather than once at creation, so a theme or a
       // custom tint restyles this canvas on the next frame instead of
       // waiting for a remount. See the hook's note on live reads.
-        const bit = channelsOf(read("--fluid-bit"));
-        const cursor = channelsOf(read("--fluid-cursor"));
-      if (rows.length === 0) seed(size.height);
+      const bit = channelsOf(read("--fluid-bit"));
+      const cursor = channelsOf(read("--fluid-cursor"));
+      if (rows.length === 0 || size.height !== seededH) seed(size.height);
       const { width: w, height: h } = size;
       ctx.clearRect(0, 0, w, h);
       ctx.lineCap = "butt";
@@ -106,7 +110,7 @@ export function createAnonFluidPainter(
       // displaced sideways and drawn in blocks while the agent is working. At
       // rest `bandCentre` is below zero and every row takes the ordinary path,
       // so the two states share one code path rather than two.
-      const bandCentre = active ? ((tick.seconds * 0.2) % 1.5) - 0.25 : -1;
+      const bandCentre = isActive() ? ((tick.seconds * 0.2) % 1.5) - 0.25 : -1;
       const bandHalf = 0.06;
 
       // How far a row's train marches, and where it starts. `travel` is the
@@ -167,6 +171,8 @@ export const AnonFluid: React.FC<AnonFluidProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--fluid-bit": "#00ff9c",
     "--fluid-cursor": "#a8ffd8",
@@ -178,7 +184,7 @@ export const AnonFluid: React.FC<AnonFluidProps> = ({
     animated,
     active,
     vars,
-    create: (read) => createAnonFluidPainter(read, active),
+    create: (read) => createAnonFluidPainter(read, () => activeRef.current === true),
   });
 
   return (

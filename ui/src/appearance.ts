@@ -1264,8 +1264,14 @@ export const THEME_CHANGE_EVENT = "codify:theme-changed";
 /** The slice of `Storage` this module needs, so a test can pass a fake. */
 export type ThemeStorage = Pick<Storage, "getItem" | "setItem">;
 
+const THEME_IDS = new Set<string>(THEMES.map((t) => t.id));
+
 function store(): ThemeStorage | undefined {
-  return typeof localStorage !== "undefined" ? localStorage : undefined;
+  try {
+    return typeof localStorage !== "undefined" ? localStorage : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1274,15 +1280,23 @@ function store(): ThemeStorage | undefined {
  * than throwing or rendering an unnamed state.
  */
 export function readStoredThemeId(storage: ThemeStorage | undefined = store()): string {
-  const raw = storage?.getItem(STORAGE_KEY) ?? "";
-  return THEMES.some((t) => t.id === raw) ? raw : DEFAULT_THEME_ID;
+  try {
+    const raw = storage?.getItem(STORAGE_KEY) ?? "";
+    return THEME_IDS.has(raw) ? raw : DEFAULT_THEME_ID;
+  } catch {
+    return DEFAULT_THEME_ID;
+  }
 }
 
 export function storeThemeId(
   id: string,
   storage: ThemeStorage | undefined = store(),
 ): void {
-  storage?.setItem(STORAGE_KEY, id);
+  try {
+    storage?.setItem(STORAGE_KEY, id);
+  } catch {
+    // Blocked or full storage must not crash theme selection.
+  }
 }
 
 /** What `applyTheme` writes to: `document.documentElement.style` in the app. */

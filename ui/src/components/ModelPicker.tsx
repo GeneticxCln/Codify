@@ -146,12 +146,14 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
     };
   }, [open]);
 
-  // The search box takes the keystrokes as soon as the menu opens, so typing
-  // goes to the filter rather than into the id field behind it. Without this,
-  // "llama" would rewrite the chosen model id one character at a time and filter
-  // nothing.
+  // Focus the search filter only when the menu was opened via the Browse button,
+  // never when the user focuses or types directly into the free-text model id input.
+  const focusSearchRef = useRef(false);
   useEffect(() => {
-    if (open) searchRef.current?.focus();
+    if (open && focusSearchRef.current) {
+      focusSearchRef.current = false;
+      searchRef.current?.focus();
+    }
   }, [open]);
 
   const matches = useMemo(() => {
@@ -286,7 +288,6 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
           disabled={disabled}
           onChange={(e) => {
             onChange(e.target.value);
-            setOpen(true);
           }}
           onFocus={() => setOpen(true)}
           onKeyDown={(e) => {
@@ -299,7 +300,14 @@ export const ModelPicker: React.FC<ModelPickerProps> = ({
           aria-label={`Browse ${name} models`}
           aria-expanded={open}
           disabled={disabled}
-          onClick={() => (open ? close() : setOpen(true))}
+          onClick={() => {
+            if (open) {
+              close();
+            } else {
+              focusSearchRef.current = true;
+              setOpen(true);
+            }
+          }}
           title={
             options.length === 0
               ? `${name} has not reported any models`

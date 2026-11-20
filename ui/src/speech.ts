@@ -81,6 +81,7 @@ type PlaybackListener = (playing: string | null) => void;
 let current: { id: string; audio: HTMLAudioElement; url: string } | null = null;
 /** The answer whose audio is being fetched, so its button shows "starting" rather than idle. */
 let pending: string | null = null;
+let pendingToken = 0;
 const listeners = new Set<PlaybackListener>();
 
 function emit(): void {
@@ -103,6 +104,7 @@ export function onPlayback(listener: PlaybackListener): () => void {
 
 /** Stop whatever is playing, or about to. */
 export function stopPlayback(): void {
+  pendingToken += 1;
   pending = null;
   if (current) {
     current.audio.pause();
@@ -124,19 +126,20 @@ export async function playSpeech(
   fetchAudio: (text: string) => Promise<Blob>,
 ): Promise<void> {
   stopPlayback();
+  const token = ++pendingToken;
   pending = id;
   emit();
   let blob: Blob;
   try {
     blob = await fetchAudio(text);
   } catch (err) {
-    if (pending === id) {
+    if (pendingToken === token) {
       pending = null;
       emit();
     }
     throw err;
   }
-  if (pending !== id) return;
+  if (pendingToken !== token) return;
   pending = null;
   const url = URL.createObjectURL(blob);
   const audio = document.createElement("audio");

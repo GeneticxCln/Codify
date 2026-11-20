@@ -9,6 +9,8 @@ reconstruction (see `executor_design`).
 from __future__ import annotations
 
 import asyncio
+import contextlib
+import difflib
 import os
 import subprocess
 import time
@@ -79,43 +81,108 @@ MAX_FIXER_PASSES = 2
 MAX_CRITIC_COMMANDS = 2
 
 
-def _norm_path(p: str) -> str:
+_LENS_REPLY_SCHEMA: dict[str, Any] = {
+    "type": "object",
+    "additionalProperties": False,
+    "required": ["findings"],
+    "properties": {
+        "findings": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "required": ["severity", "category", "scope", "evidence", "recommendation"],
+                "properties": {
+                    "severity": {"type": "string", "enum": ["blocker", "major", "nit"]},
+                    "category": {"type": "string"},
+                    "scope": {"type": "string"},
+                    "evidence": {"type": "string"},
+                    "recommendation": {"type": "string"},
+                },
+            },
+        },
+    },
+}
+
+
+def _norm_path(p: str, ws_root: str | None = None) -> str:
     """Normalize a suggested path for disjointness checks.
 
     Raw strings diverge for the same file (`a/b` vs `./a/b` vs `a//b`);
-    normpath + casefold closes the cheap aliases. Absolute spellings that
-    stay inside the workspace are reduced to their relative form. Anything
-    unparseable falls back to the stripped raw string — a conservative
-    mismatch (refuse the batch) beats a torn write.
+    normpath + casefold closes the cheap aliases. When `ws_root` is provided,
+    absolute spellings that stay inside the workspace are reduced to their
+    relative form (and outside absolute paths keep their leading `/` so they
+    cannot silently alias an in-workspace relative path). Anything unparseable
+    falls back to the stripped raw string — a conservative mismatch (refuse
+    the batch) beats a torn write.
     """
     s = (p or "").strip()
     if not s:
         return ""
-    if s.startswith("/"):
-        s = s.lstrip("/")
+    if os.path.isabs(s):
+        if ws_root:
+            try:
+                rel = os.path.relpath(os.path.realpath(s), os.path.realpath(ws_root))
+                if rel != ".." and not rel.startswith(".." + os.sep):
+                    s = rel
+                else:
+                    return os.path.normpath(s).casefold()
+            except ValueError:
+                pass
+        else:
+            s = s.lstrip("/")
     norm = os.path.normpath(s)
     if norm == ".":
         return ""
     return norm.casefold()
 
 
+def _cumulative_diff(path: str, before: str | None, after: str | None) -> str:
+    before_text = before or ""
+    after_text = after or ""
+    if before_text == after_text:
+        return ""
+    return "".join(
+        difflib.unified_diff(
+            before_text.splitlines(keepends=True),
+            after_text.splitlines(keepends=True),
+            fromfile=f"a/{path}",
+            tofile=f"b/{path}",
+        )
+    )
+
+
 def _merge_summaries(
-    earlier: list[dict[str, Any]], latest: list[dict[str, Any]],
+    earlier: list[dict[str, Any]],
+    latest: list[dict[str, Any]],
+    *,
+    baselines: dict[str, str | None] | None = None,
+    fs: FileSystemService | None = None,
+    dry_run: bool = False,
 ) -> list[dict[str, Any]]:
     """Every file this step has written, latest entry per path, in first-written order.
 
-    A step's change is all of its fixer passes and retries together. The last pass used to replace the
-    list, so a second pass (or a retry after a failed test) left the first pass's files out of the
-    critic's review and out of the commit, while the step still reported COMPLETED. This is the rule the
-    conductor already applies to its own writes (`_StepState.wrote`): a later entry wins, except that a
-    no-change proposal must not erase the diff of the write that did change the file.
+    A step's change is all of its fixer passes and retries together. When a path is
+    written more than once in the same step and `baselines` holds its original
+    pre-step content, `unified_diff` is recomputed from original pre-step content
+    to the latest content so review lenses, critic, and scribe always see the
+    FULL cumulative diff rather than only the final incremental edit.
     """
-    merged = {s["path"]: s for s in earlier}
+    merged = {s["path"]: dict(s) for s in earlier}
     for entry in latest:
-        prior = merged.get(entry["path"])
+        path = str(entry["path"])
+        prior = merged.get(path)
         if prior is not None and prior.get("changed", True) and not entry.get("changed", True):
             continue
-        merged[entry["path"]] = entry
+        updated = dict(entry)
+        if prior is not None and baselines is not None and path in baselines and fs is not None and not dry_run:
+            orig = baselines[path]
+            after = None if updated.get("action") == "delete" else fs.read_text_or_none(path)
+            updated["unified_diff"] = _cumulative_diff(path, orig, after)
+            updated["changed"] = (orig is not None) if updated.get("action") == "delete" else (orig != after)
+            if orig is None and updated.get("action") in ("edit", "update"):
+                updated["action"] = "create"
+        merged[path] = updated
     return list(merged.values())
 
 
@@ -162,6 +229,9 @@ class _Steps(_Design):
                 summaries: list[dict[str, Any]] | None = None
                 prior_failure: dict[str, Any] | None = None
                 passes_left = MAX_FIXER_PASSES
+                # Pre-step file content per path, captured before Pass 1 touches disk,
+                # so multi-pass / retry writes preserve the cumulative diff per file.
+                baselines: dict[str, str | None] = {}
                 # One counter across attempts and the fixer's own extra passes,
                 # so every fixer call this step makes is a distinct measured
                 # stage rather than two rows claiming to be attempt 1.
@@ -176,8 +246,12 @@ class _Steps(_Design):
                             pass_summaries, wants_pass = await self._fixer(
                                 goal_id, step, fs, goal.dry_run, evidence,
                                 failure_feedback=prior_failure, allowed_paths=allowed_paths,
+                                baselines=baselines,
                             )
-                            summaries = _merge_summaries(summaries or [], pass_summaries)
+                            summaries = _merge_summaries(
+                                summaries or [], pass_summaries,
+                                baselines=baselines, fs=fs, dry_run=goal.dry_run,
+                            )
                             fix_stage.record(
                                 "wrote" if any(s.get("changed", True) for s in pass_summaries)
                                 else "no_change"
@@ -208,8 +282,12 @@ class _Steps(_Design):
                                 pass_summaries, wants_pass = await self._fixer(
                                     goal_id, step, fs, goal.dry_run, evidence,
                                     failure_feedback=prior_failure, allowed_paths=allowed_paths,
+                                    baselines=baselines,
                                 )
-                                summaries = _merge_summaries(summaries, pass_summaries)
+                                summaries = _merge_summaries(
+                                    summaries, pass_summaries,
+                                    baselines=baselines, fs=fs, dry_run=goal.dry_run,
+                                )
                                 pass_stage.record(
                                     "wrote" if any(s.get("changed", True) for s in pass_summaries)
                                     else "no_change"
@@ -365,6 +443,97 @@ class _Steps(_Design):
         finally:
             self.release_driver(goal_id)
 
+    def _stored_proposals(
+        self, goal_id: str,
+    ) -> tuple[dict[str, list[dict[str, Any]]], dict[str, dict[str, str | None]]] | None:
+        """Return `(by_step, by_base)` when `goal_id` is replaying dry-run proposals, else `None`."""
+        goal = self.goals.get(goal_id)
+        if goal.dry_run:
+            return None
+        rows = self.goals._db.execute(
+            "SELECT step_id, path, action, content, base_version FROM proposed_files "
+            "WHERE goal_id = ? ORDER BY rowid",
+            (goal_id,),
+        ).fetchall()
+        if not rows:
+            return None
+        by_step: dict[str, list[dict[str, Any]]] = {}
+        by_base: dict[str, dict[str, str | None]] = {}
+        for r in rows:
+            by_step.setdefault(r["step_id"], []).append(
+                {"path": r["path"], "action": r["action"], "content": r["content"]}
+            )
+            if r["base_version"] is not None:
+                by_base.setdefault(r["step_id"], {})[r["path"]] = r["base_version"]
+        return by_step, by_base
+
+    async def _drive_replay_steps(
+        self,
+        goal_id: str,
+        by_step: dict[str, list[dict[str, Any]]],
+        by_base: dict[str, dict[str, str | None]],
+    ) -> Goal:
+        """Replay remaining uncompleted steps using stored `proposed_files` (for `apply_goal` and resumes)."""
+        ws_root = self.workspaces.get(self.goals.get(goal_id).workspace_id).root_path
+
+        def effective_paths(step_id: str) -> set[str]:
+            paths = {
+                _norm_path(f["path"], ws_root)
+                for f in by_step.get(step_id, [])
+                if f.get("path") and _norm_path(f["path"], ws_root)
+            }
+            if paths:
+                return paths
+            step = next((s for s in self.goals.steps(goal_id) if s.id == step_id), None)
+            if step is None:
+                return set()
+            return {_norm_path(p, ws_root) for p in (step.suggested_paths or []) if _norm_path(p, ws_root)}
+
+        remaining = [s for s in self.goals.steps(goal_id) if s.status != "COMPLETED"]
+        while remaining:
+            refreshed = self.goals.get(goal_id)
+            if refreshed.status != "RUNNING":
+                return refreshed
+            if refreshed.parallel:
+                batch = self._independent_batch(remaining, paths_for=effective_paths, ws_root=ws_root)
+                batch_ids = {s.id for s in batch}
+                remaining = [s for s in remaining if s.id not in batch_ids]
+                if len(batch) > 1:
+                    try:
+                        await self._run_parallel(
+                            goal_id, batch, by_step, paths_for=effective_paths,
+                            base_versions=by_base,
+                        )
+                    except ApiError as exc:
+                        self._log(goal_id, None, "warn", f"batch refused, re-batching: {exc.message}")
+                        remaining = [s for s in self.goals.steps(goal_id) if s.status != "COMPLETED"]
+                        continue
+                elif batch:
+                    await self.run_step(
+                        goal_id, batch[0].id, stored_files=by_step.get(batch[0].id, []),
+                        base_versions=by_base.get(batch[0].id, {}),
+                    )
+                else:
+                    head = remaining.pop(0)
+                    await self.run_step(
+                        goal_id, head.id, stored_files=by_step.get(head.id, []),
+                        base_versions=by_base.get(head.id, {}),
+                    )
+            else:
+                step = remaining.pop(0)
+                await self.run_step(
+                    goal_id, step.id, stored_files=by_step.get(step.id, []),
+                    base_versions=by_base.get(step.id, {}),
+                )
+            if self.goals.get(goal_id).status != "RUNNING":
+                return self.goals.get(goal_id)
+
+        try:
+            self._set_status(goal_id, "COMPLETED", None)
+        except ApiError:
+            pass
+        return self.goals.get(goal_id)
+
     async def _apply_goal_locked(self, goal_id: str) -> Goal:
         rows = self.goals._db.execute(
             "SELECT step_id, path, action, content, base_version FROM proposed_files "
@@ -387,85 +556,26 @@ class _Steps(_Design):
 
         # The apply run is a real execution: clear the dry_run flag and reset
         # every step so statuses/events tell the true story.
+        was_dry_run = self.goals.get(goal_id).dry_run
         self.goals.set_dry_run(goal_id, False)
-        for step in self.goals.steps(goal_id):
-            self._reset_step(goal_id, step)
-        self._set_status(goal_id, "RUNNING", None)
-
-        # Batch on what will actually be WRITTEN, not on the plan's guesses.
-        # apply replays stored proposals byte-identically, so a step's real
-        # filesystem footprint is its proposed_files rows — which diverge from
-        # suggested_paths whenever the plan was edited after the dry run (the
-        # edit API allows it) or the fixer wrote somewhere the plan never
-        # named. Batching on the guess here would prove disjointness for paths
-        # nothing writes while two replays race on the same real file.
-        def effective_paths(step_id: str) -> set[str]:
-            """A step's real apply footprint: its stored proposals, falling back
-            to suggested_paths for a step that proposed nothing (it still runs
-            its verifier/critic/scribe tail, so it needs *some* footprint to be
-            provable). Steps are looked up from the store each call — a step
-            deleted mid-run must yield an empty set, not an AttributeError."""
-            paths = {_norm_path(f["path"]) for f in by_step.get(step_id, []) if f.get("path") and _norm_path(f["path"])}
-            if paths:
-                return paths
-            step = next((s for s in self.goals.steps(goal_id) if s.id == step_id), None)
-            if step is None:
-                return set()
-            return {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
-
-        remaining = list(self.goals.steps(goal_id))
-        while remaining:
-            refreshed = self.goals.get(goal_id)
-            if refreshed.status != "RUNNING":
-                return refreshed
-            if refreshed.parallel:
-                batch = self._independent_batch(remaining, paths_for=effective_paths)
-                batch_ids = {s.id for s in batch}
-                remaining = [s for s in remaining if s.id not in batch_ids]
-                if len(batch) > 1:
-                    try:
-                        await self._run_parallel(
-                            goal_id, batch, by_step, paths_for=effective_paths,
-                            base_versions=by_base,
-                        )
-                    except ApiError as exc:
-                        # Dispatch re-check found the disjointness proof stale
-                        # (the plan changed under us). Not a failure: re-read
-                        # the plan and let the loop re-batch from reality.
-                        self._log(goal_id, None, "warn", f"batch refused, re-batching: {exc.message}")
-                        remaining = [s for s in self.goals.steps(goal_id) if s.status != "COMPLETED"]
-                        continue
-                elif batch:
-                    await self.run_step(
-                        goal_id, batch[0].id, stored_files=by_step.get(batch[0].id, []),
-                        base_versions=by_base.get(batch[0].id, {}),
-                    )
-                else:
-                    # The head step's footprint is unprovable (no proposals, no
-                    # suggested paths): it runs alone, same contract as the
-                    # normal driver.
-                    head = remaining.pop(0)
-                    await self.run_step(
-                        goal_id, head.id, stored_files=by_step.get(head.id, []),
-                        base_versions=by_base.get(head.id, {}),
-                    )
-            else:
-                step = remaining.pop(0)
-                await self.run_step(
-                    goal_id, step.id, stored_files=by_step.get(step.id, []),
-                    base_versions=by_base.get(step.id, {}),
-                )
-            if self.goals.get(goal_id).status != "RUNNING":
-                return self.goals.get(goal_id)
-
         try:
-            self._set_status(goal_id, "COMPLETED", None)
-        except ApiError:
-            pass
-        return self.goals.get(goal_id)
+            for step in self.goals.steps(goal_id):
+                self._reset_step(goal_id, step)
+            self._set_status(goal_id, "RUNNING", None)
+            if self.goals.get(goal_id).status != "RUNNING":
+                if was_dry_run:
+                    self.goals.set_dry_run(goal_id, True)
+                return self.goals.get(goal_id)
+        except BaseException:
+            if was_dry_run:
+                with contextlib.suppress(Exception):
+                    self.goals.set_dry_run(goal_id, True)
+            raise
+
+        return await self._drive_replay_steps(goal_id, by_step, by_base)
 
     def _independent_batch(
-        self, steps: list[PlanStep], paths_for: Any = None,
+        self, steps: list[PlanStep], paths_for: Any = None, *, ws_root: str | None = None,
     ) -> list[PlanStep]:
         """The longest prefix of steps that provably cannot observe each other.
 
@@ -495,7 +605,7 @@ class _Steps(_Design):
         def paths(s: PlanStep) -> set[str]:
             if paths_for is not None:
                 return set(paths_for(s.id))
-            return {_norm_path(p) for p in (s.suggested_paths or []) if _norm_path(p)}
+            return {_norm_path(p, ws_root) for p in (s.suggested_paths or []) if _norm_path(p, ws_root)}
 
         batch: list[PlanStep] = []
         taken: set[str] = set()
@@ -539,6 +649,7 @@ class _Steps(_Design):
         re-check refuse every batch the batcher legitimately proved — a
         refuse/re-batch loop that never runs a step. One proof, one source.
         """
+        ws_root = self.workspaces.get(self.goals.get(goal_id).workspace_id).root_path
         current = {s.id: s for s in self.goals.steps(goal_id)}
         resolved: list[PlanStep] = []
         taken: set[str] = set()
@@ -550,9 +661,9 @@ class _Steps(_Design):
                     f"step {snap.id} disappeared between batching and dispatch",
                 )
             if paths_for is not None:
-                mine = {_norm_path(p) for p in paths_for(step.id) if p and _norm_path(p)}
+                mine = {_norm_path(p, ws_root) for p in paths_for(step.id) if p and _norm_path(p, ws_root)}
             else:
-                mine = {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
+                mine = {_norm_path(p, ws_root) for p in (step.suggested_paths or []) if _norm_path(p, ws_root)}
             if not mine or mine & taken:
                 # The proof is stale: this step now shares a path with a batch
                 # sibling (or has no provable paths). Refuse the whole batch —
@@ -568,12 +679,15 @@ class _Steps(_Design):
             resolved.append(step)
 
         async def run_one(step: PlanStep) -> None:
-            stored = (stored_files or {}).get(step.id)
+            # In replay mode (`stored_files is not None`), a zero-change step has no
+            # entry in `stored_files` and MUST replay `[]` rather than falling back to
+            # `None` (which would run the fixer LLM live with `dry_run=False`).
+            stored = stored_files.get(step.id, []) if stored_files is not None else None
             # A fresh write may only touch the paths the batch proved disjoint. A replay writes
             # exactly its stored proposal, which `paths_for` already proved, so it needs no scope.
             allowed = None
             if stored is None:
-                allowed = {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
+                allowed = {_norm_path(p, ws_root) for p in (step.suggested_paths or []) if _norm_path(p, ws_root)}
             await self.run_step(
                 goal_id, step.id, stored_files=stored,
                 allowed_paths=allowed,
@@ -625,18 +739,19 @@ class _Steps(_Design):
             raise ApiError(409, "driver_busy", "another driver is already running this goal")
         goal = self.goals.get(goal_id)
         if goal.parallel:
+            ws_root = self.workspaces.get(goal.workspace_id).root_path
             others = {
-                _norm_path(p)
+                _norm_path(p, ws_root)
                 for s in self.goals.steps(goal_id)
-                if s.id != step_id and s.status != "COMPLETED"
+                if s.id != step_id and s.status == "IN_PROGRESS"
                 for p in (s.suggested_paths or [])
-                if _norm_path(p)
+                if _norm_path(p, ws_root)
             }
-            mine = {_norm_path(p) for p in (step.suggested_paths or []) if _norm_path(p)}
+            mine = {_norm_path(p, ws_root) for p in (step.suggested_paths or []) if _norm_path(p, ws_root)}
             if mine & others:
                 raise ApiError(
                     409, "retry_collides_with_running",
-                    f"step {step.title!r} now shares paths with a step that has not finished "
+                    f"step {step.title!r} now shares paths with a step that is currently running "
                     "— edit the plan (or finish the other step) before retrying",
                 )
         if not self.claim_driver(goal_id):
@@ -658,11 +773,35 @@ class _Steps(_Design):
         Read from the event log, not memory, like every other piece of goal
         state — a resumed goal replays the same evidence.
         """
+        if hasattr(self.goals, "latest_event"):
+            try:
+                ev = self.goals.latest_event(goal_id, "test_result", step_id=step_id)
+                return (ev.payload or {}) if ev is not None else {}
+            except TypeError:
+                pass
         latest: dict[str, Any] = {}
         for ev in self.goals.events_after(goal_id, 0):
             if ev.type == "test_result" and ev.step_id == step_id:
                 latest = ev.payload or {}
         return latest
+
+    def _step_proposed_map(
+        self, goal_id: str, step_id: str, fs: FileSystemService,
+    ) -> dict[str, tuple[str, str | None]]:
+        """Proposed file changes already recorded for `(goal_id, step_id)`, keyed by canonical rel path."""
+        rows = self.goals._db.execute(
+            "SELECT path, action, content FROM proposed_files WHERE goal_id = ? AND step_id = ? ORDER BY rowid",
+            (goal_id, step_id),
+        ).fetchall()
+        out: dict[str, tuple[str, str | None]] = {}
+        for r in rows:
+            raw_path = str(r["path"] or "")
+            try:
+                rel = fs.resolve(raw_path).relative_to(fs.root).as_posix()
+            except PathEscapeError:
+                rel = raw_path
+            out[rel] = (str(r["action"] or "update"), r["content"])
+        return out
 
     async def _fixer(
         self,
@@ -674,6 +813,7 @@ class _Steps(_Design):
         failure_feedback: dict[str, Any] | None = None,
         guidance: str = "",
         allowed_paths: set[str] | None = None,
+        baselines: dict[str, str | None] | None = None,
     ) -> tuple[list[dict[str, Any]], bool]:
         """Write one step's files.
 
@@ -689,6 +829,19 @@ class _Steps(_Design):
         # `_fixer` call, and so per step: a parallel batch never shares one baseline across its siblings.
         versions: dict[str, str | None] = {}
         ctx, unreadable = self._suggested_paths_context(fs, step.suggested_paths, versions=versions)
+        # In dry-run multi-pass / retry, earlier passes wrote to `proposed_files` rather than disk.
+        # Overlay those proposed contents so the fixer sees what it already wrote and edits resolve
+        # against the prior pass instead of unmodified disk bytes.
+        step_proposals = self._step_proposed_map(goal_id, step.id, fs) if dry_run else {}
+        if step_proposals:
+            overlay_lines = ["\n\nProposed changes already queued for this step (dry-run — base edits on these):"]
+            for rel, (act, content) in step_proposals.items():
+                if act == "delete":
+                    overlay_lines.append(f"--- {rel} (proposed for deletion) ---")
+                else:
+                    snippet = (content or "")[:4000]
+                    overlay_lines.append(f"--- {rel} (proposed) ---\n{snippet}")
+            ctx += "\n".join(overlay_lines)
 
         # On a retry, the failed run's evidence is the most important part of
         # the prompt: what the model wrote did not work, and here is exactly
@@ -763,7 +916,8 @@ class _Steps(_Design):
             for note in notes:
                 self._log(goal_id, step.id, "info", note)
             if allowed_paths is not None:
-                outside = sorted({f["path"] for f in files if _norm_path(f["path"]) not in allowed_paths})
+                ws_root_str = str(fs.root)
+                outside = sorted({f["path"] for f in files if _norm_path(f["path"], ws_root_str) not in allowed_paths})
                 if outside:
                     # The batch runs under a disjointness proof that covers only the plan's paths. A write
                     # anywhere else can race a sibling step — two steps writing one file, one change lost,
@@ -793,12 +947,55 @@ class _Steps(_Design):
                 withdrawn = self._approval_withdrawn(goal_id)
                 if withdrawn:
                     raise WriteWithdrawn(withdrawn)
+            if baselines is not None:
+                for f in files:
+                    raw_path = str(f.get("path") or "")
+                    if not raw_path:
+                        continue
+                    try:
+                        rel_key = fs.resolve(raw_path).relative_to(fs.root).as_posix()
+                    except PathEscapeError:
+                        continue
+                    if rel_key not in baselines:
+                        baselines[rel_key] = fs.read_text_or_none(rel_key)
+                    if raw_path not in baselines:
+                        baselines[raw_path] = baselines[rel_key]
+            apply_files: list[dict[str, Any]] = files
             try:
+                if dry_run and step_proposals:
+                    resolved_ops: list[dict[str, Any]] = []
+                    for f in files:
+                        if f.get("action") == "edit":
+                            raw_path = str(f.get("path") or "")
+                            target = fs.resolve(raw_path)
+                            rel_key = target.relative_to(fs.root).as_posix()
+                            if rel_key in step_proposals:
+                                prev_act, prev_content = step_proposals[rel_key]
+                                if prev_act == "delete":
+                                    raise ValueError(
+                                        f"edit failed for {raw_path}: file was proposed for deletion in an earlier pass"
+                                    )
+                                edits = f.get("edits") or []
+                                if not edits:
+                                    raise ValueError(
+                                        f"an edit for {raw_path} needs at least one {{old_text, new_text}} op"
+                                    )
+                                resolved_text, edit_note = fs._resolve_edits(prev_content or "", target, edits)
+                                if edit_note:
+                                    raise ValueError(f"edit failed for {raw_path}: {edit_note}")
+                                resolved_ops.append({
+                                    "path": raw_path,
+                                    "action": "create" if not target.is_file() else "update",
+                                    "content": resolved_text,
+                                })
+                                continue
+                        resolved_ops.append(f)
+                    apply_files = resolved_ops
                 # Apply runs BEFORE storage now: an `edit` op is only a description
                 # ("replace this exact text") until the engine resolves it against
                 # the file as it exists, and only the resolved full content is a
                 # proposal "Apply" can replay deterministically later.
-                summaries = fs.apply(files, dry_run=dry_run, expected_versions=versions)
+                summaries = fs.apply(apply_files, dry_run=dry_run, expected_versions=versions)
             except FileMovedUnderProposalError as exc:
                 # A file the fixer was shown moved while it was answering. Nothing has been written (apply
                 # resolves everything before it touches the disk), and the caller asks once more with the
@@ -829,7 +1026,7 @@ class _Steps(_Design):
                         "new content."
                     )
                 raise AgentOutputInvalid(message, role="fixer") from exc
-            applied.update(files=files, summaries=summaries, wants_pass=wants_pass)
+            applied.update(files=apply_files, summaries=summaries, wants_pass=wants_pass)
 
         def prompt(moved_note: str) -> str:
             return (
@@ -883,7 +1080,10 @@ class _Steps(_Design):
             # Persist the proposal so "Apply" can write these exact contents
             # later. An empty list clears the step's previous proposal — a retry
             # that now proposes nothing must not leave stale files applyable.
-            self._store_proposed_files(goal_id, step.id, files, summaries)
+            if not files:
+                self._clear_proposed_files(goal_id, step.id)
+            else:
+                self._store_proposed_files(goal_id, step.id, files, summaries)
         self._publish_changes(goal_id, step.id, summaries, dry_run)
         self._set_step(goal_id, step, "IN_PROGRESS", last_agent_role="fixer")
         return summaries, wants_pass
@@ -1297,6 +1497,9 @@ class _Steps(_Design):
                     )
                 except CommandNotAllowed as exc:
                     output = f"The command was NOT run — the sandbox refused it: {exc}. Decide from what you have."
+                except subprocess.TimeoutExpired:
+                    self._log(goal_id, step.id, "warn", f"Critic inspection command timed out: {' '.join(argv)}")
+                    output = "Critic inspection command timed out. Decide from what you have."
                 except OSError as exc:
                     output = f"The command could not be run: {exc}. Decide from what you have."
                 self._log(goal_id, step.id, "info", f"critic inspection: {' '.join(argv)}")
@@ -1373,6 +1576,7 @@ class _Steps(_Design):
                 reply = await self.orchestrator.run_agent(
                     "critic", goal_id, step.id, packet.text(),
                     system=review.lens_system_prompt(lens), accept=accept,
+                    json_schema=_LENS_REPLY_SCHEMA,
                 )
                 lens_findings = review.parse_findings(reply, lens)
                 status, detail = "ran", ""

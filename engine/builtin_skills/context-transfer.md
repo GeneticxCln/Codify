@@ -48,22 +48,20 @@ content is "none".
 
 ## What must be in it for this project
 
-* **The gate, and its actual last result.** `make ci` is the gate: ruff, mypy,
-  the Python suite on the host interpreter *and* on the provisioned 3.10
-  floor, the UI suite, `typecheck-ui-tests` over `ui/src` **and** `ui/tests`,
-  the production UI build, and `cargo check` + `cargo fmt --check`. Name the
-  command and the verdict you last saw. If it is red, say which leg and which
-  file — a block that claims green when it is not costs the next thread more
-  than any omission in this list.
+* **The gate, and its actual last result.** Name the repository's verification
+  gate (for example `make ci`, `pytest`, `npm test`, or `cargo test`) and the
+  verdict you last saw. If it is red, say which leg and which file — a block
+  that claims green when it is not costs the next thread more than any omission
+  in this list.
 * **Uncommitted state.** Say that the work is uncommitted, and that the
   working tree may carry *other threads'* changes. The next thread must not
   `git add -A`.
 * **Work that belongs to someone else.** If another agent was editing a file,
   say which file and that it was in flight. "Do not touch" is a finding.
-* **Isolated state.** Engine state lives under `CODIFY_HOME`; tests are
-  hermetic through `tests/hermetic.py`. Say which `CODIFY_HOME` a running
-  preview used, and which port, so the next thread does not start a second
-  engine on a port that is already taken.
+* **Isolated state.** Say which state directory (such as `CODIFY_HOME` or the
+  project's test fixture root), environment variables, or port a running
+  preview or service used, so the next thread does not collide with a process
+  that is already running.
 
 ## What must never be in it
 

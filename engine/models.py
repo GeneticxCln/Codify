@@ -1003,6 +1003,11 @@ class TurnCreate(BaseModel):
 
     @model_validator(mode="after")
     def _a_pair_or_nothing(self) -> TurnCreate:
+        # A prompt of only whitespace is not a turn: refused here, not only at the route, so a
+        # caller that builds a `TurnCreate` directly cannot hand the planner an empty request.
+        # The text itself is left as typed (leading indentation can be part of a code paste).
+        if not self.prompt.strip():
+            raise ValueError("a turn needs words: `prompt` is empty once whitespace is removed")
         provider = (self.provider or "").strip() or None
         model = (self.model or "").strip() or None
         if (provider is None) != (model is None):

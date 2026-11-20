@@ -31,10 +31,19 @@ export interface PasteSurface {
 /** Any newline, a trailing one included: that one is the Enter that runs the command. */
 const HAS_NEWLINE = /[\r\n]/;
 
+/**
+ * Strip bracketed-paste breakouts (`\x1b[200~`, `\x1b[201~`, C1 `\x9b200~`, `\x9b201~`) and raw C0/C1 control
+ * characters other than Tab/LF/CR so untrusted clipboard text cannot escape bracketed-paste mode or execute
+ * control sequences directly in the host shell.
+ */
+// eslint-disable-next-line no-control-regex -- intentionally stripping terminal escape/control sequences from pasted clipboard text
+const UNSAFE_PASTE_CONTROLS = /(?:\x1b\[20[01]~|\x9b20[01]~|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f])/g;
+
 export function pasteInto(surface: PasteSurface, text: string, exited: boolean): PasteOutcome {
   if (exited) return "exited";
   if (HAS_NEWLINE.test(text) && !surface.modes.bracketedPasteMode) return "needs-bracketed-paste";
-  surface.paste(text);
+  const safe = text.replace(UNSAFE_PASTE_CONTROLS, "");
+  surface.paste(safe);
   surface.focus();
   return "pasted";
 }

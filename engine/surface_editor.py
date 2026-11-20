@@ -22,6 +22,7 @@ from typing import Annotated, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
 
+from engine.models import scrub_surrogates
 from engine.surfaces import Op
 
 #: The most lines of one file one read may bring back, and the longest a line may be.
@@ -37,8 +38,8 @@ MAX_EDIT_COUNT = 1_000
 
 
 def _cap_str(limit: int) -> BeforeValidator:
-    """Cut a string to `limit` rather than refuse it; anything that is not a string is left for the type check to refuse."""
-    return BeforeValidator(lambda v: v[:limit] if isinstance(v, str) else v)
+    """Cut a string to `limit` and scrub lone surrogates rather than refuse it; anything that is not a string is left for the type check to refuse."""
+    return BeforeValidator(lambda v: scrub_surrogates(v)[:limit] if isinstance(v, str) else v)
 
 
 def _cap_list(limit: int) -> BeforeValidator:

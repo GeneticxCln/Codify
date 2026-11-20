@@ -6,12 +6,12 @@ goal service and nothing else), which is why it could leave `engine/executor.py`
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+import inspect
 import json
 import time
 import uuid
 from collections.abc import Callable, Iterable
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 from engine import cache_diagnostics
 from engine.conductor import CallBooks, ToolCallRequest
@@ -35,6 +35,24 @@ from engine.toolcall import ToolReply
 
 if TYPE_CHECKING:
     from engine.trace import TraceService
+
+
+class _UnsetType:
+    """Sentinel type for an omitted optional argument."""
+
+
+_UNSET = _UnsetType()
+
+
+def _accepts_kwarg(fn: Any, name: str) -> bool:
+    """Whether callable `fn` accepts keyword argument `name` (explicitly or via **kwargs)."""
+    try:
+        params = inspect.signature(fn).parameters
+    except (TypeError, ValueError):
+        return False
+    if name in params:
+        return True
+    return any(p.kind is inspect.Parameter.VAR_KEYWORD for p in params.values())
 
 
 # `FALLBACK_TRIGGER_CODES` — which failures may be retried on a fallback — is
@@ -281,27 +299,26 @@ class AgentOrchestrator:
         async def call(
             provider: BaseProvider, provider_slug: str, system: str, user: str,
             model: str, temperature: float, max_tokens: int,
-            *, thinking_effort: str | None = None,
+            *, num_ctx: int | None = None, keep_alive: str | None = None,
+            thinking_effort: str | None = None,
         ) -> str:
             books = self._accounting(goal_id, None, "laya", provider_slug, model)
             provider.usage_sink = books.sink
             try:
+                gate_extra: dict[str, Any] = {}
+                if thinking_effort:
+                    gate_extra["thinking_effort"] = thinking_effort
                 raw = await provider.complete(
                     system_prompt=system,
                     user_prompt=user,
                     model=model,
                     temperature=temperature,
                     max_tokens=max_tokens,
-                    # The gate's num_ctx and keep_alive travel through GateCall's
-                    # caller — engine/laya.py reads the laya role's own config and
-                    # adds the keywords there; this closure has no cfg in scope,
-                    # and a getattr on a name that does not exist would be a lie
-                    # mypy could not catch.
-                    num_ctx=None,
-                    keep_alive=None,
+                    num_ctx=num_ctx,
+                    keep_alive=keep_alive,
                     # The gate's typed contract; the SDK path never reaches this closure.
                     json_schema=REPLY_SCHEMAS["laya"],
-                    **({"thinking_effort": thinking_effort} if thinking_effort else {}),
+                    **gate_extra,
                 )
             finally:
                 # The provider is shared across roles and reused for a replay, so
@@ -515,7 +532,9 @@ class AgentOrchestrator:
         if isinstance(first, AgentNotConfigured):
             return AgentNotConfigured(role, first_message + note)
         if isinstance(first, AgentOutputInvalid):
-            return AgentOutputInvalid(first_message + note, role=role)
+            out = AgentOutputInvalid(first_message + note, role=role)
+            out.code = first.code
+            return out
         aggregate = ProviderError(first.code, first_message + note)
         aggregate.role = role
         return aggregate
@@ -525,6 +544,7 @@ class AgentOrchestrator:
         system: str | None = None, raw_output: bool = False,
         accept: Callable[[Any], None] | None = None,
         primary: AgentConfig | None = None,
+        json_schema: dict[str, Any] | None | _UnsetType = _UNSET,
     ) -> Any:
         """Run one sub-agent call, on its primary target or its fallback.
 
@@ -568,7 +588,23 @@ class AgentOrchestrator:
         """
         goal = self.goals.get(goal_id)
         cfg, targets = self._targets(role, primary, goal)
+        custom_system = system is not None
         system = system or cfg.system_prompt_override or DEFAULT_PROMPTS[role]
+        # Wire schema selection:
+        # - `raw_output=True`: plain prose — send no schema and disable JSON mode.
+        # - Explicit `json_schema` (including `None`): honor caller's override.
+        # - Custom `system` prompt without explicit `json_schema`: do NOT force
+        #   `REPLY_SCHEMAS[role]` (which conflicts with custom prompt contracts like
+        #   deep-review lenses expecting `{"findings": [...]}`).
+        # - Standard role call: use `REPLY_SCHEMAS.get(role)`.
+        if raw_output:
+            effective_schema: dict[str, Any] | None = None
+        elif not isinstance(json_schema, _UnsetType):
+            effective_schema = json_schema
+        elif custom_system:
+            effective_schema = None
+        else:
+            effective_schema = REPLY_SCHEMAS.get(role)
         failures: list[tuple[str, str, ProviderError | AgentOutputInvalid]] = []
 
         for label, target in targets:
@@ -602,6 +638,11 @@ class AgentOrchestrator:
             provider.usage_sink = books.sink
             on_delta, flush_deltas = self._delta_publisher(goal_id, step_id, role, target.provider, model_name)
             provider.on_delta = on_delta
+            extra_kw: dict[str, Any] = {}
+            if target.thinking_effort:
+                extra_kw["thinking_effort"] = target.thinking_effort
+            if raw_output and _accepts_kwarg(provider.complete, "json_mode"):
+                extra_kw["json_mode"] = False
             try:
                 raw = await provider.complete(
                     system_prompt=system,
@@ -613,10 +654,10 @@ class AgentOrchestrator:
                     keep_alive=target.ollama_keep_alive,
                     # The role's reply shape, where the endpoint can take one (docs/16 item 5). The parser is
                     # unchanged: a schema narrows what a model writes, it never becomes what the engine trusts.
-                    json_schema=REPLY_SCHEMAS.get(role),
+                    json_schema=effective_schema,
                     # Only when the role asked: an unset field sends no keyword, so a test double
                     # written before this setting existed still serves the old calls unchanged.
-                    **({"thinking_effort": target.thinking_effort} if target.thinking_effort else {}),
+                    **extra_kw,
                 )
             except ProviderError as exc:
                 flush_deltas()
@@ -644,6 +685,7 @@ class AgentOrchestrator:
                 continue
             finally:
                 provider.on_delta = None
+                provider.usage_sink = None
             flush_deltas(raw)
             # After the call, before the parse: a reply the engine could not use is still what
             # the model said, and a recording that dropped the malformed ones would replay a run
@@ -695,6 +737,9 @@ class AgentOrchestrator:
             )
             provider.usage_sink = repair_books.sink
             try:
+                repair_extra: dict[str, Any] = {}
+                if target.thinking_effort:
+                    repair_extra["thinking_effort"] = target.thinking_effort
                 repaired = await provider.complete(
                     system_prompt=system,
                     user_prompt=repair_prompt,
@@ -703,8 +748,8 @@ class AgentOrchestrator:
                     max_tokens=target.max_tokens,
                     num_ctx=target.ollama_num_ctx,
                     keep_alive=target.ollama_keep_alive,
-                    json_schema=REPLY_SCHEMAS.get(role),
-                    **({"thinking_effort": target.thinking_effort} if target.thinking_effort else {}),
+                    json_schema=effective_schema,
+                    **repair_extra,
                 )
             except ProviderError as exc:
                 self.goals.publish(self._event(
@@ -723,6 +768,8 @@ class AgentOrchestrator:
                 if exc.code not in FALLBACK_TRIGGER_CODES:
                     break
                 continue
+            finally:
+                provider.usage_sink = None
             self._trace_call(
                 goal_id, step_id, role, target, model_name, system, repair_prompt, repaired, repair_books,
             )

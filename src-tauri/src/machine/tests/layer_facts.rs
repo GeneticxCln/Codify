@@ -121,6 +121,57 @@ fn a_stage_is_an_empty_owner_only_directory_that_is_removed_but_never_emptied() 
     b.release();
 }
 
+#[test]
+fn probe_dir_is_exclusively_created_owner_only_and_never_uses_create_dir_all() {
+    use std::os::unix::fs::PermissionsExt;
+    let base = tempfile_dir("probe-dir-mode");
+    let first = layer::ProbeDir::create(&base).unwrap();
+    let second = layer::ProbeDir::create(&base).unwrap();
+    assert_ne!(first.dir(), second.dir());
+
+    let root_mode = std::fs::symlink_metadata(first.dir())
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(root_mode, 0o700, "probe root must be 0700");
+
+    let sub_mode = std::fs::symlink_metadata(first.dir().join("d"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(sub_mode, 0o700, "probe subdir d must be 0700");
+
+    let file_mode = std::fs::symlink_metadata(first.dir().join("d/x"))
+        .unwrap()
+        .permissions()
+        .mode()
+        & 0o777;
+    assert_eq!(file_mode, 0o600, "probe file d/x must be 0600");
+
+    let first_path = first.dir().to_path_buf();
+    let second_path = second.dir().to_path_buf();
+    first.release();
+    second.release();
+    assert!(!first_path.exists());
+    assert!(!second_path.exists());
+
+    // Source-pin: `layer.rs` code must never call `create_dir_all` on a shared base.
+    let layer_code: String = include_str!("../layer.rs")
+        .lines()
+        .map(|line| match line.find("//") {
+            Some(at) => &line[..at],
+            None => line,
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !layer_code.contains("create_dir_all"),
+        "machine/layer.rs must create probe directories exclusively with DirBuilder::mode(0o700), never create_dir_all"
+    );
+}
+
 // ── stage-leak: a stage is made only after its path has been checked ─────────────────────────────────
 
 #[test]

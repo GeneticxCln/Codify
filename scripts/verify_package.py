@@ -118,15 +118,35 @@ def sums_url(tag: str | None) -> str:
     return TAGGED_SUMS.format(tag=tag if tag.startswith("v") else f"v{tag}")
 
 
+MAX_SUMS_BYTES = 64 * 1024
+ALLOWED_SUMS_HOSTS = frozenset({
+    "github.com",
+    "objects.githubusercontent.com",
+    "release-assets.githubusercontent.com",
+    "127.0.0.1",
+    "localhost",
+})
+
+
 def fetch_sums(url: str, timeout: float = 30.0) -> str:
     """The checksums at `url`, as text, or a sentence naming what went wrong."""
+    from urllib.parse import urlparse
+
     try:
         # `https`, an address this repository's releases are at, and a tag already checked against
         # TAG — which is the whole of the reason this is safe to open from here.
         with urlopen(url, timeout=timeout) as answer:  # noqa: S310
-            body: bytes = answer.read()
+            final_url = getattr(answer, "geturl", lambda: url)() or url
+            parsed = urlparse(final_url)
+            if parsed.scheme != "https" or (parsed.hostname or "") not in ALLOWED_SUMS_HOSTS:
+                raise ValueError(f"refusing redirect to {final_url}")
+            body: bytes = answer.read(MAX_SUMS_BYTES + 1)
+            if len(body) > MAX_SUMS_BYTES:
+                raise ValueError(f"SHA256SUMS response exceeded {MAX_SUMS_BYTES} bytes")
             return body.decode("utf-8", "replace")
-    except (HTTPError, URLError, OSError) as error:
+    except (HTTPError, URLError, OSError, ValueError) as error:
+        if isinstance(error, ValueError) and str(error).startswith("could not read the checksums from"):
+            raise
         raise ValueError(f"could not read the checksums from {url} ({error})") from error
 
 

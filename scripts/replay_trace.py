@@ -38,10 +38,12 @@ from __future__ import annotations
 import argparse
 import asyncio
 import shutil
+import sqlite3
 import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from engine.db import connect, default_db_path
 from engine.executor import ExecutorService
@@ -154,20 +156,21 @@ async def replay(
     be read, and `TraceMismatch` when the run diverges partway through. The
     caller turns those into exit codes — the report itself is the product.
     """
-    goals = GoalService(conn)
-    workspaces = WorkspaceService(conn)
-    traces = TraceService(conn)
+    src_goals = GoalService(conn)
+    src_workspaces = WorkspaceService(conn)
+    src_traces = TraceService(conn)
 
-    recorded_goal = goals.get(goal_id)  # 404 if unknown
-    calls = traces.calls(goal_id)
+    recorded_goal = src_goals.get(goal_id)  # 404 if unknown
+    calls = src_traces.calls(goal_id)
     if not calls:
         raise ApiError(
             409,
             "nothing_recorded",
-            f"goal {goal_id} has no recording — arm it with PUT /goals/{id}/trace "
+            f"goal {goal_id} has no recording — arm it with PUT /goals/{goal_id}/trace "
             "before the run starts",
         )
-    recorded_ws = workspaces.get(recorded_goal.workspace_id)
+    recorded_ws = src_workspaces.get(recorded_goal.workspace_id)
+    recorded_events = src_goals.events_after(goal_id, 0)
     source = source or Path(recorded_ws.root_path)
 
     # A byte-identical copy of the tree the recording saw. Not optional: the
@@ -184,53 +187,67 @@ async def replay(
             f"the tree to replay against is not a directory: {source}",
         )
 
-    replay_ws = workspaces.create(
-        WorkspaceCreate(name=f"replay-{goal_id[:8]}", root_path=str(into.resolve()))
-    )
-    replay_goal = goals.create(
-        GoalCreate(
-            workspace_id=replay_ws.id,
-            title=recorded_goal.title,
-            description=recorded_goal.description,
-            dry_run=recorded_goal.dry_run,
-            plan_only=recorded_goal.plan_only,
-            mode=recorded_goal.mode,
-            trace=False,
-        )
-    )
-
-    provider = ReplayProvider(calls)
-    registry = AgentRegistryService(conn, _ReplayFactory(provider), Keychain())
-    for role in ROLES:
-        registry.set_config(role, AgentConfigUpdate(provider="ollama", model_name="replay"))
-
-    recorded_events = goals.events_after(goal_id, 0)
-    executor = ExecutorService(
-        goals,
-        workspaces,
-        registry,
-        SandboxService(),
-        laya=_ReplayedGate(_gate_verdict(recorded_events)),
-        tracer=None,
-    )
-
-    diverged: str | None = None
-    try:
-        await executor.run_planning(replay_goal.id)
-        recorded_plan_only = recorded_goal.plan_only
-        if not recorded_plan_only:
-            steps = goals.steps(replay_goal.id)
-            if steps:
-                goals.update_status(
-                    replay_goal.id, goals.get(replay_goal.id).version, "RUNNING"
+    # Execute the replay against an isolated scratch SQLite DB so the caller's
+    # live database (its workspaces, goals, and agent_configs) is never mutated.
+    with tempfile.TemporaryDirectory(prefix="codify-replay-db-") as scratch_db_dir:
+        replay_conn = connect(Path(scratch_db_dir) / "replay.db")
+        try:
+            goals = GoalService(replay_conn)
+            workspaces = WorkspaceService(replay_conn)
+            replay_ws = workspaces.create(
+                WorkspaceCreate(name=f"replay-{goal_id[:8]}", root_path=str(into.resolve()))
+            )
+            replay_goal = goals.create(
+                GoalCreate(
+                    workspace_id=replay_ws.id,
+                    title=recorded_goal.title,
+                    description=recorded_goal.description,
+                    dry_run=recorded_goal.dry_run,
+                    plan_only=recorded_goal.plan_only,
+                    mode=recorded_goal.mode,
+                    trace=False,
                 )
-            for step in steps:
-                await executor.run_step(replay_goal.id, step.id)
-    except TraceMismatch as exc:
-        diverged = str(exc)
+            )
 
-    replay_events = goals.events_after(replay_goal.id, 0)
-    final = goals.get(replay_goal.id)
+            provider = ReplayProvider(calls)
+            registry = AgentRegistryService(replay_conn, _ReplayFactory(provider), Keychain())
+            for role in ROLES:
+                registry.set_config(role, AgentConfigUpdate(provider="ollama", model_name="replay"))
+
+            executor = ExecutorService(
+                goals,
+                workspaces,
+                registry,
+                SandboxService(),
+                laya=_ReplayedGate(_gate_verdict(recorded_events)),
+                tracer=None,
+            )
+
+            diverged: str | None = None
+            try:
+                await executor.run_planning(replay_goal.id)
+                recorded_plan_only = recorded_goal.plan_only
+                if not recorded_plan_only:
+                    steps = goals.steps(replay_goal.id)
+                    if steps:
+                        goals.update_status(
+                            replay_goal.id, goals.get(replay_goal.id).version, "RUNNING"
+                        )
+                    for step in steps:
+                        await executor.run_step(replay_goal.id, step.id)
+                        if goals.get(replay_goal.id).status != "RUNNING":
+                            break
+                    if steps and goals.get(replay_goal.id).status == "RUNNING":
+                        goals.update_status(
+                            replay_goal.id, goals.get(replay_goal.id).version, "COMPLETED"
+                        )
+            except TraceMismatch as exc:
+                diverged = str(exc)
+
+            replay_events = goals.events_after(replay_goal.id, 0)
+            final = goals.get(replay_goal.id)
+        finally:
+            replay_conn.close()
     if diverged is None and final.status == "FAILED":
         # The usual shape of a divergence. `TraceMismatch` is a ProviderError,
         # so the orchestrator absorbs it into `agent_call_failed`, the retries
@@ -367,9 +384,17 @@ def main(argv: list[str] | None = None) -> int:
         print(f"no database at {db}", file=sys.stderr)
         return EXIT_UNUSABLE
 
-    conn = connect(db)
+    try:
+        conn = sqlite3.connect(f"file:{quote(str(db.resolve()))}?mode=ro", uri=True)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        print(f"could not open database {db}: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
     try:
         report = asyncio.run(replay(conn, args.goal, args.source, args.into))
+    except sqlite3.Error as exc:
+        print(f"could not read database {db}: {exc}", file=sys.stderr)
+        return EXIT_UNUSABLE
     except ApiError as exc:
         print(exc.message, file=sys.stderr)
         return EXIT_UNUSABLE

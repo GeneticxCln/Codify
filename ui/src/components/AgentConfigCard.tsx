@@ -97,6 +97,14 @@ interface AgentConfigCardProps {
 /** Call duration in the same vocabulary the chat's usage card uses: ms below a
  * second, then seconds. Null (a call whose duration was never recorded) reads as
  * "duration unknown" rather than a fake "0ms". */
+/** Default wire protocol for a built-in provider slug (custom slugs keep their selected protocol). */
+function defaultBuiltinProtocol(slug: string): ProviderProtocol {
+  if (slug === "ollama") return "ollama";
+  if (slug === "anthropic") return "anthropic";
+  if (slug === "google") return "google";
+  return "openai_compat";
+}
+
 function formatCallDuration(durationMs: number | null): string {
   if (durationMs == null) return "(duration unknown)";
   if (durationMs < 1000) return `${Math.round(durationMs)}ms`;
@@ -436,6 +444,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 setDraft(config);
                 lastServerJson.current = JSON.stringify(config);
               }
+              setPendingApiKey(undefined);
               setDirty(false);
               setExternallyUpdated(false);
             }}
@@ -450,7 +459,12 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         <ProviderSelect
           value={active.provider}
-          onChange={(p) => updateDraft({ provider: p })}
+          onChange={(p) =>
+            updateDraft({
+              provider: p,
+              ...(builtinProviders.includes(p) ? { protocol: defaultBuiltinProtocol(p) } : {}),
+            })
+          }
           builtins={builtinProviders}
         />
 
@@ -491,7 +505,11 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
         {needsKey && (
           <ApiKeyField
             hasExistingKey={Boolean(active.api_key_ref)}
-            onChange={(k) => setPendingApiKey(k)}
+            value={pendingApiKey ?? ""}
+            onChange={(k) => {
+              setPendingApiKey(k || undefined);
+              setDirty(true);
+            }}
           />
         )}
 
@@ -538,7 +556,7 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
                 // Ollama is the one provider that cannot fail for want of a key, so
                 // it is the useful starting point — no model is invented, the field
                 // still starts empty.
-                updateDraft({ fallback_provider: "ollama" });
+                updateDraft({ fallback_provider: "ollama", fallback_protocol: "ollama" });
                 setFallbackOpen(true);
               }
             }}
@@ -559,7 +577,14 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
               <ProviderSelect
                 value={fallbackProvider}
-                onChange={(p) => updateDraft({ fallback_provider: p })}
+                onChange={(p) =>
+                  updateDraft({
+                    fallback_provider: p,
+                    ...(builtinProviders.includes(p)
+                      ? { fallback_protocol: defaultBuiltinProtocol(p) }
+                      : {}),
+                  })
+                }
                 builtins={builtinProviders}
               />
               <ModelSelect
@@ -670,8 +695,17 @@ export const AgentConfigCard: React.FC<AgentConfigCardProps> = ({
             min={128}
             max={200000}
             step={256}
-            value={active.max_tokens}
-            onChange={(e) => updateDraft({ max_tokens: parseInt(e.target.value, 10) || 4096 })}
+            value={active.max_tokens || ""}
+            onChange={(e) => {
+              const raw = e.target.value.trim();
+              const parsed = parseInt(raw, 10);
+              updateDraft({ max_tokens: raw === "" ? 0 : Number.isFinite(parsed) ? parsed : active.max_tokens });
+            }}
+            onBlur={() => {
+              if (!active.max_tokens || active.max_tokens < 128) {
+                updateDraft({ max_tokens: 4096 });
+              }
+            }}
             className="bg-codify-bg border border-codify-border rounded-sm px-3 py-1.5 text-sm text-codify-secondary font-mono"
           />
         </div>

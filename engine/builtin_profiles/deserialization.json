@@ -40,7 +40,7 @@
         "py"
       ],
       "where": "code",
-      "pattern": "\\byaml\\.(?:load|load_all|unsafe_load|unsafe_load_all)\\s*\\((?![^)]*\\bLoader\\s*=\\s*(?:yaml\\.)?C?SafeLoader)",
+      "pattern": "\\byaml\\.(?:load|load_all|unsafe_load|unsafe_load_all)\\s*\\((?!(?:[^()\\n]|\\([^()\\n]*\\)){0,300}\\bLoader\\s*=\\s*(?:yaml\\.)?C?SafeLoader)",
       "why": "The default and full loaders can construct arbitrary objects from the document.",
       "fix": "Use `yaml.safe_load`.",
       "examples": {

@@ -33,30 +33,52 @@ use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
+/// Per-session PTY writer handle, wrapped in its own lock so a blocking write on one stalled PTY
+/// never holds the global `Terminals` or `Machines` registry mutex.
+pub(crate) type SharedWriter = Arc<Mutex<Option<Box<dyn Write + Send>>>>;
+
 /// What one open terminal holds. The three things a session needs and no two of
 /// which can substitute for each other: somewhere to write, somewhere to read
 /// from, and the child itself — kept whole rather than as a bare signaller, so
 /// close can reap it and escalate past a SIGHUP the shell chose to ignore.
 pub struct Session {
-    pub(crate) writer: Box<dyn Write + Send>,
-    pub(crate) master: Box<dyn MasterPty + Send>,
+    pub(crate) writer: SharedWriter,
+    pub(crate) master: Option<Box<dyn MasterPty + Send>>,
     pub(crate) child: Box<dyn Child + Send + Sync>,
 }
 
 impl Session {
-    /// Send bytes to the process on the PTY's slave end.
-    pub(crate) fn send(&mut self, data: &str) -> Result<(), String> {
-        self.writer
+    pub(crate) fn new(
+        writer: Box<dyn Write + Send>,
+        master: Box<dyn MasterPty + Send>,
+        child: Box<dyn Child + Send + Sync>,
+    ) -> Self {
+        Self {
+            writer: Arc::new(Mutex::new(Some(writer))),
+            master: Some(master),
+            child,
+        }
+    }
+
+    /// Send bytes to the process on the PTY's slave end using the per-session writer lock.
+    pub(crate) fn send_to(writer: &SharedWriter, data: &str) -> Result<(), String> {
+        let mut guard = writer.lock().map_err(|_| "pty writer poisoned")?;
+        let handle = guard
+            .as_mut()
+            .ok_or_else(|| "write failed: session has already exited".to_string())?;
+        handle
             .write_all(data.as_bytes())
             .map_err(|e| format!("write failed: {e}"))?;
-        self.writer
-            .flush()
-            .map_err(|e| format!("flush failed: {e}"))
+        handle.flush().map_err(|e| format!("flush failed: {e}"))
     }
 
     /// Resize the PTY, which is what makes `ls` wrap at the pane's width.
     pub(crate) fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
-        self.master
+        let master = self
+            .master
+            .as_ref()
+            .ok_or_else(|| "resize failed: session has already exited".to_string())?;
+        master
             .resize(PtySize {
                 rows,
                 cols,
@@ -64,6 +86,29 @@ impl Session {
                 pixel_height: 0,
             })
             .map_err(|e| format!("resize failed: {e}"))
+    }
+
+    /// Release the PTY descriptors and attempt a non-blocking reap of the exited child.
+    ///
+    /// Returns `true` once the child has been reaped (or cannot be waited on). Called when the
+    /// reader thread hits EOF so exited shells do not sit as zombies or hold master PTY FDs until
+    /// their tab is closed.
+    pub(crate) fn try_reap_on_exit(&mut self) -> bool {
+        self.master = None;
+        if let Ok(mut writer) = self.writer.try_lock() {
+            *writer = None;
+        }
+        matches!(self.child.try_wait(), Ok(Some(_)) | Err(_))
+    }
+}
+
+/// Poll `try_reap` briefly without holding any registry mutex across the sleep between polls.
+pub(crate) fn reap_exited_session(mut try_reap: impl FnMut() -> bool) {
+    for _ in 0..20 {
+        if try_reap() {
+            return;
+        }
+        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
@@ -105,14 +150,7 @@ pub(crate) fn spawn_pty(
         .master
         .take_writer()
         .map_err(|e| format!("no pty writer: {e}"))?;
-    Ok((
-        Session {
-            writer,
-            master: pair.master,
-            child,
-        },
-        reader,
-    ))
+    Ok((Session::new(writer, pair.master, child), reader))
 }
 
 /// The terminal backend the shell hands around.
@@ -256,48 +294,104 @@ pub(crate) struct OscNotice {
 #[derive(Default)]
 pub(crate) struct OscScan {
     pending: String,
+    /// Byte offset inside `pending` (relative to index 2 after `\x1b]`) already scanned for BEL/ST.
+    scanned: usize,
+    /// Character count of `pending[2..2 + scanned]`, so checking `OSC_PENDING_CHARS` stays O(1)
+    /// per chunk instead of recounting from index 0 on every read.
+    scanned_chars: usize,
 }
 
 impl OscScan {
     /// The notifications completed by `text`, and the tail a later read must complete.
     pub(crate) fn push(&mut self, text: &str) -> Vec<OscNotice> {
-        self.pending.push_str(text);
+        if self.pending.is_empty() {
+            let Some(first_esc) = text.as_bytes().iter().position(|&b| b == 0x1b) else {
+                return Vec::new();
+            };
+            self.pending.push_str(&text[first_esc..]);
+        } else {
+            self.pending.push_str(text);
+        }
         let mut found = Vec::new();
+        // Advance a byte cursor through `self.pending` and perform at most one
+        // bulk `drain` at the end of `push`, avoiding O(n^2) memmoves on
+        // adversarial streams of unterminated `\x1b]` introducers.
+        let mut cursor: usize = 0;
         loop {
-            let Some(start) = self.pending.find("\x1b]") else {
+            let slice = &self.pending[cursor..];
+            let Some(rel_start) = slice.find("\x1b]") else {
                 // Ordinary output, with one exception: a final ESC may be the first byte of a sequence that
                 // continues in the next read, so it is kept and the rest is not.
-                let keep = if self.pending.ends_with('\x1b') {
+                cursor = if slice.ends_with('\x1b') {
                     self.pending.len() - 1
                 } else {
                     self.pending.len()
                 };
-                self.pending.drain(..keep);
+                self.scanned = 0;
+                self.scanned_chars = 0;
                 break;
             };
-            // Drop what came before the sequence: it is output, and none of it is ours to keep.
-            self.pending.drain(..start);
-            let Some((end, terminator)) = osc_end(&self.pending[2..]) else {
-                if self.pending.chars().count() > OSC_PENDING_CHARS {
-                    // Not a notification this build can read (or not a notification at all): give up on it and
-                    // keep looking after its introducer, so its payload cannot pin memory.
-                    self.pending.drain(..2);
+            if rel_start > 0 {
+                // Drop what came before the sequence: it is output, and none of it is ours to keep.
+                cursor += rel_start;
+                self.scanned = 0;
+                self.scanned_chars = 0;
+            }
+            let unsearched = &self.pending[cursor + 2 + self.scanned..];
+            let Some((rel_end, terminator)) = osc_end(unsearched) else {
+                // In ECMA-48, a new `\x1b]` introducer cancels any unclosed earlier OSC sequence.
+                // Jumping directly to the last introducer avoids both quadratic drains on floods
+                // of unterminated `\x1b]` and swallowing a later valid notice.
+                if let Some(last_intro) = unsearched.rfind("\x1b]") {
+                    cursor += 2 + self.scanned + last_intro;
+                    self.scanned = 0;
+                    self.scanned_chars = 0;
                     continue;
+                }
+                let unsearched_chars = unsearched.chars().count();
+                if 2 + self.scanned_chars + unsearched_chars > OSC_PENDING_CHARS {
+                    // Over-long unterminated sequence with no newer `\x1b]` inside it: drop
+                    // everything except a possible trailing ESC that could start the next introducer.
+                    cursor = if unsearched.ends_with('\x1b') {
+                        self.pending.len() - 1
+                    } else {
+                        self.pending.len()
+                    };
+                    self.scanned = 0;
+                    self.scanned_chars = 0;
+                    break;
+                }
+                if unsearched.ends_with('\x1b') {
+                    // A trailing ESC could combine with `\` in the next chunk to form ST (`\x1b\`)
+                    // or with `]` to start a new OSC (`\x1b]`).
+                    let advance = unsearched.len() - 1;
+                    self.scanned_chars += unsearched_chars.saturating_sub(1);
+                    self.scanned += advance;
+                } else {
+                    self.scanned_chars += unsearched_chars;
+                    self.scanned += unsearched.len();
                 }
                 break;
             };
-            // A terminator far past the cap does not save the sequence: giving up on it and rescanning from
-            // after its introducer is what keeps a later, valid notification in the same read from being
-            // swallowed into this one's (clipped) body.
-            if self.pending[2..2 + end].chars().count() > OSC_PENDING_CHARS {
-                self.pending.drain(..2);
+            if let Some(last_intro) = unsearched[..rel_end].rfind("\x1b]") {
+                cursor += 2 + self.scanned + last_intro;
+                self.scanned = 0;
+                self.scanned_chars = 0;
                 continue;
             }
-            let payload = self.pending[2..2 + end].to_string();
-            self.pending.drain(..2 + end + terminator);
-            if let Some(notice) = osc_notice(&payload) {
-                found.push(notice);
+            let end = self.scanned + rel_end;
+            let payload_chars = self.scanned_chars + unsearched[..rel_end].chars().count();
+            if payload_chars <= OSC_PENDING_CHARS {
+                if let Some(notice) = osc_notice(&self.pending[cursor + 2..cursor + 2 + end]) {
+                    found.push(notice);
+                }
             }
+            cursor += 2 + end + terminator;
+            self.scanned = 0;
+            self.scanned_chars = 0;
+        }
+        if cursor > 0 {
+            self.pending.drain(..cursor);
         }
         found
     }
@@ -623,6 +717,7 @@ pub fn open(
         // is still draining without a deadlock or a use-after-free.
         let sink = app.clone();
         let for_thread = id.clone();
+        let sessions_for_thread = sessions.clone();
         std::thread::spawn(move || {
             use tauri::Emitter;
             // This terminal's own count, so two prints are two entries and one event delivered twice is one.
@@ -651,6 +746,15 @@ pub fn open(
                     );
                 },
             );
+            reap_exited_session(|| {
+                let Ok(mut guard) = sessions_for_thread.lock() else {
+                    return true;
+                };
+                match guard.sessions.get_mut(&for_thread) {
+                    Some(session) => session.try_reap_on_exit(),
+                    None => true,
+                }
+            });
             let _ = sink.emit("terminal-exit", TerminalExit { id: for_thread });
         });
 
@@ -664,12 +768,15 @@ pub fn open(
 /// that silently accepts typing into a closed terminal is a pane that looks
 /// alive.
 pub fn write(sessions: &Arc<Mutex<Terminals>>, id: &str, data: &str) -> Result<(), String> {
-    let mut guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
-    let session = guard
-        .sessions
-        .get_mut(id)
-        .ok_or_else(|| format!("no such terminal: {id}"))?;
-    session.send(data)
+    let writer = {
+        let guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
+        let session = guard
+            .sessions
+            .get(id)
+            .ok_or_else(|| format!("no such terminal: {id}"))?;
+        session.writer.clone()
+    };
+    Session::send_to(&writer, data)
 }
 
 /// Resize the PTY, which is what makes `ls` wrap at the pane's width.
@@ -679,10 +786,10 @@ pub fn resize(
     cols: u16,
     rows: u16,
 ) -> Result<(), String> {
-    let mut guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
+    let guard = sessions.lock().map_err(|_| "terminal state poisoned")?;
     let session = guard
         .sessions
-        .get_mut(id)
+        .get(id)
         .ok_or_else(|| format!("no such terminal: {id}"))?;
     session.resize(cols, rows)
 }
@@ -745,17 +852,17 @@ pub(crate) fn kill_and_reap(mut child: Box<dyn Child + Send + Sync>) {
 /// Close every terminal. Called when the app exits, so a quit does not leave a
 /// shell holding the workspace.
 pub fn close_all(sessions: &Arc<Mutex<Terminals>>) {
-    let children: Vec<Box<dyn Child + Send + Sync>> = if let Ok(mut guard) = sessions.lock() {
-        guard
-            .sessions
-            .drain()
-            .map(|(_, session)| session.child)
-            .collect()
+    let drained: Vec<Session> = if let Ok(mut guard) = sessions.lock() {
+        guard.sessions.drain().map(|(_, session)| session).collect()
     } else {
         return;
     };
-    for child in children {
-        kill_and_reap(child);
+    for mut session in drained {
+        session.master = None;
+        if let Ok(mut writer) = session.writer.try_lock() {
+            *writer = None;
+        }
+        kill_and_reap(session.child);
     }
 }
 
@@ -1025,11 +1132,7 @@ mod tests {
             let id = format!("term-{}", guard.seq);
             guard.sessions.insert(
                 id.clone(),
-                Session {
-                    writer: pair.master.take_writer().unwrap(),
-                    master: pair.master,
-                    child,
-                },
+                Session::new(pair.master.take_writer().unwrap(), pair.master, child),
             );
         }
         close(&sessions, "term-1").unwrap();
@@ -1074,11 +1177,7 @@ mod tests {
                 .unwrap();
             guard.sessions.insert(
                 id.clone(),
-                Session {
-                    writer: pair.master.take_writer().unwrap(),
-                    master: pair.master,
-                    child,
-                },
+                Session::new(pair.master.take_writer().unwrap(), pair.master, child),
             );
         }
         // `true` has exited on its own by now, so this close exercises the path
@@ -1443,15 +1542,136 @@ mod tests {
         }
 
         let sessions: Arc<Mutex<Terminals>> = Arc::new(Mutex::new(Terminals::default()));
-        sessions.lock().unwrap().sessions.insert(
-            "term-1".to_string(),
-            Session {
-                writer,
-                master,
-                child,
-            },
-        );
+        sessions
+            .lock()
+            .unwrap()
+            .sessions
+            .insert("term-1".to_string(), Session::new(writer, master, child));
         close(&sessions, "term-1").unwrap();
         assert_eq!(open_count(&sessions), 0);
+    }
+
+    #[test]
+    fn osc_scan_fast_path_and_incremental_offset_handle_split_st_and_long_streams() {
+        let mut scan = OscScan::default();
+        // Fast path: plain text with no ESC never allocates into `pending`.
+        assert!(scan.push("ordinary line without escapes\n").is_empty());
+        assert_eq!(scan.pending.capacity(), 0);
+
+        // Incremental scan across many chunks without rescanning from 0, ending with ST split across two chunks.
+        assert!(scan.push("prefix \x1b]777;notify;Title;").is_empty());
+        for i in 0..20 {
+            assert!(scan.push(&format!("part-{i} ")).is_empty());
+        }
+        assert!(scan.push("end\x1b").is_empty());
+        let notices = scan.push("\\trailing plain output");
+        assert_eq!(notices.len(), 1);
+        assert_eq!(notices[0].title, "Title");
+        assert!(notices[0].body.starts_with("part-0 part-1"));
+        assert!(notices[0].body.ends_with("end"));
+    }
+
+    #[test]
+    fn write_releases_global_terminals_lock_before_touching_the_pty_writer() {
+        struct SlowWriter {
+            entered: mpsc::SyncSender<()>,
+            release: Arc<Mutex<mpsc::Receiver<()>>>,
+        }
+        impl Write for SlowWriter {
+            fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+                let _ = self.entered.send(());
+                let _ = self.release.lock().unwrap().recv();
+                Ok(buf.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let (master, child) = real_pty("true", &[]);
+        let (entered_tx, entered_rx) = mpsc::sync_channel(1);
+        let (release_tx, release_rx) = mpsc::sync_channel(1);
+        let sessions: Arc<Mutex<Terminals>> = Arc::new(Mutex::new(Terminals::default()));
+        sessions.lock().unwrap().sessions.insert(
+            "term-1".to_string(),
+            Session::new(
+                Box::new(SlowWriter {
+                    entered: entered_tx,
+                    release: Arc::new(Mutex::new(release_rx)),
+                }),
+                master,
+                child,
+            ),
+        );
+
+        let sessions_for_write = sessions.clone();
+        let writer_thread =
+            std::thread::spawn(move || write(&sessions_for_write, "term-1", "hello"));
+        entered_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("writer should enter write()");
+
+        // While the write is blocked inside the writer, the global `Terminals` lock is free.
+        assert!(
+            sessions.try_lock().is_ok(),
+            "global Terminals mutex must not be held during blocking PTY write"
+        );
+        let _ = release_tx.send(());
+        writer_thread.join().unwrap().unwrap();
+        close(&sessions, "term-1").unwrap();
+    }
+
+    #[test]
+    fn reap_on_exit_reaps_the_zombie_and_drops_pty_handles_before_tab_close() {
+        use std::path::Path;
+        let (master, child) = real_pty("true", &[]);
+        let pid = child.process_id().expect("a unix child has a pid");
+        let writer = master.take_writer().unwrap();
+        let mut session = Session::new(writer, master, child);
+        reap_exited_session(|| session.try_reap_on_exit());
+        assert!(
+            session.master.is_none(),
+            "master PTY handle must be dropped on exit"
+        );
+        assert!(
+            session.writer.lock().unwrap().is_none(),
+            "writer PTY handle must be dropped on exit"
+        );
+        let proc_entry = Path::new("/proc").join(pid.to_string());
+        assert!(
+            !proc_entry.exists(),
+            "the exited process must be reaped immediately on EOF, not left as a zombie"
+        );
+    }
+
+    #[test]
+    fn osc_scan_handles_adversarial_unterminated_esc_bursts_in_linear_time() {
+        // 200 KiB of repeated unterminated `\x1b]` introducers: quadratic `drain(..2)`
+        // would perform ~100k memmoves (~10 GB copied), whereas bulk skipping finishes
+        // in a few milliseconds and still recognises a valid notice immediately after.
+        let mut scan = OscScan::default();
+        let burst = "\x1b]".repeat(100_000);
+        let started = Instant::now();
+        assert!(scan.push(&burst).is_empty());
+        assert!(
+            scan.pending.chars().count() <= OSC_PENDING_CHARS,
+            "pending buffer must stay bounded at OSC_PENDING_CHARS"
+        );
+        // Same adversarial burst followed by a valid notification with BEL in a single read.
+        let mut burst_with_notice = "\x1b]".repeat(100_000);
+        burst_with_notice.push_str("\x1b]9;survived\x07");
+        let notices = scan.push(&burst_with_notice);
+        let elapsed = started.elapsed();
+        assert_eq!(
+            notices,
+            vec![OscNotice {
+                title: String::new(),
+                body: "survived".to_string(),
+            }]
+        );
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "OscScan::push took {elapsed:?} on repeated unterminated OSC introducers"
+        );
     }
 }

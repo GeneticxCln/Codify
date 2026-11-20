@@ -340,10 +340,14 @@ def main(argv: list[str]) -> int:
     signal.signal(signal.SIGTERM, guard.on_term)
     # After the death signal is armed, before the command exists: the command is born under them.
     apply_limits(limits_from_env())
+    child_env = {
+        k: v for k, v in os.environ.items()
+        if k not in (ENV_PARENT_PID, ENV_LIMITS)
+    }
     try:
-        # No new session, no new group, no env, no cwd: the command runs exactly where
-        # and how the engine asked for it, one process deeper.
-        command = subprocess.Popen(argv)  # noqa: S603 — the guard's own child: the argv it was handed, already validated by whoever guarded it
+        # No new session, no new group, no cwd: the command runs where and how the
+        # engine asked for it, one process deeper, without the guard's private handoff vars.
+        command = subprocess.Popen(argv, env=child_env)  # noqa: S603 — the guard's own child: the argv it was handed, already validated by whoever guarded it
     except OSError as exc:
         # `shutil.which` in the engine resolved this binary, so this is ENOEXEC or a
         # missing loader rather than a typo. 127 is the shell's "cannot execute".

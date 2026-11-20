@@ -108,7 +108,7 @@
         "hh"
       ],
       "where": "strings",
-      "pattern": "\\b[fs]?scanf\\s*\\([^;]*%s",
+      "pattern": "\\b[fs]?scanf\\s*\\([^;\\n]{0,300}%s",
       "why": "A %s with no width reads as much as the input has.",
       "fix": "Give a width (`%9s`), or read a line with `fgets` and parse it.",
       "examples": {

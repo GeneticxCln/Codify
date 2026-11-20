@@ -149,9 +149,9 @@ class Rule:
     clean_examples: tuple[str, ...] = ()
 
     def to_worker(self) -> dict[str, Any]:
-        """What the worker is handed: what it needs to match, and none of the prose."""
+        """What the worker is handed: what it needs to match and rank, and none of the prose."""
         return {
-            "id": self.id, "pattern": self.pattern, "flags": self.flags,
+            "id": self.id, "severity": self.severity, "pattern": self.pattern, "flags": self.flags,
             "languages": list(self.languages), "where": self.where,
         }
 
@@ -340,12 +340,12 @@ def load_profiles(root: str | None) -> ProfileSet:
     # `profiles` for the same reason. Once the link is followed every file over there is a plain file, so the
     # per-file check below cannot see it, and a cloned repository would choose which of this machine's
     # directories is read as this workspace's rules (and whose file names the problems list would quote).
-    linked_away = (
-        root is not None
-        and directory is not None
-        and directory.is_dir()
-        and directory.resolve() != Path(root).resolve() / PROFILES_DIRNAME
-    )
+    linked_away = False
+    if root is not None and directory is not None:
+        try:
+            linked_away = directory.is_dir() and directory.resolve() != Path(root).resolve() / PROFILES_DIRNAME
+        except (OSError, RuntimeError):
+            linked_away = True
     if linked_away:
         problems.append(
             f"{PROFILES_DIRNAME}: refused, it is a link to a directory outside the workspace's own "
@@ -416,6 +416,7 @@ _PYTHON = _Lexer(
 #: Shell, Ruby, YAML and friends: `#` starts a comment only at a word boundary, so `$#` and `a#b` are not one.
 _HASH = _Lexer(re.compile(rf"(?:(?<=\s)|^)#[^\n]*|{_LINE_STRINGS}|{_LINE_SQ}", re.M), ("#",))
 _MARKUP = _Lexer(re.compile(r"<!--.*?(?:-->|\Z)", re.S), ("<!--",))
+_JINJA = _Lexer(re.compile(r"<!--.*?(?:-->|\Z)|\{#.*?(?:#\}|\Z)", re.S), ("<!--", "{#"))
 
 _LEXERS: dict[str, _Lexer] = {}
 for _ext in "c h cc cpp cxx hpp hh java go rs swift kt kts cs scala".split():
@@ -429,6 +430,8 @@ for _ext in "sh bash zsh rb pl pm r yaml yml toml mk ps1 tf".split():
     _LEXERS[_ext] = _HASH
 for _ext in "html htm xhtml xml vue svelte".split():
     _LEXERS[_ext] = _MARKUP
+for _ext in "jinja j2".split():
+    _LEXERS[_ext] = _JINJA
 
 _NOT_NEWLINE = re.compile(r"[^\n]")
 
@@ -542,8 +545,13 @@ def scan_text(text: str, ext: str, rules: Sequence[_Compiled], include_comments:
             )
         body = variants[rule.where]
         last_line = 0
+        pos = 0
+        line_num = 1
         for match in rule.rx.finditer(body):
-            line = body.count("\n", 0, match.start()) + 1
+            start = match.start()
+            line_num += body.count("\n", pos, start)
+            pos = start
+            line = line_num
             if line == last_line:
                 # Five calls on one line are one line to read, and one hit.
                 continue
@@ -552,7 +560,7 @@ def scan_text(text: str, ext: str, rules: Sequence[_Compiled], include_comments:
             if rule.kept < MAX_PER_RULE:
                 rule.kept += 1
                 # The lines the match covers (a call split over lines shows its arguments, not just its first line).
-                end = body.count("\n", 0, match.end()) + 1
+                end = line + body.count("\n", start, match.end())
                 shown = lines[line - 1:min(end, line + 2)]
                 excerpt = " ".join(part.strip() for part in shown).strip()[:EXCERPT_CHARS]
                 tally.findings.append({"rule": rule.id, "path": rel, "line": line, "text": excerpt})
@@ -629,7 +637,8 @@ def scan_tree(
                 if size > MAX_INDEX_BYTES:
                     tally.oversize += 1
                     continue
-                raw = full.read_bytes()[:MAX_SCAN_BYTES]
+                with full.open("rb") as handle:
+                    raw = handle.read(MAX_SCAN_BYTES)
             except OSError:
                 tally.unreadable += 1
                 continue
@@ -644,15 +653,22 @@ def scan_tree(
         if stopped:
             break
     order = {severity: n for n, severity in enumerate(SEVERITIES)}
-    severity_of = {str(spec["id"]): str(spec.get("severity", "info")) for spec in rules}
+    severity_of = {
+        str(spec["id"]): str(spec.get("severity") or "info")
+        for spec in rules
+    }
     tally.findings.sort(
         key=lambda f: (order.get(severity_of.get(f["rule"], "info"), 9), f["rule"], f["path"], f["line"])
     )
     shown = tally.findings[:MAX_FINDINGS]
+    counts: dict[str, int] = {}
+    for r in compiled:
+        if r.count:
+            counts[r.id] = counts.get(r.id, 0) + r.count
     return {
         "findings": shown,
         "omitted": len(tally.findings) - len(shown),
-        "counts": {r.id: r.count for r in compiled if r.count},
+        "counts": counts,
         "files_scanned": tally.files_scanned,
         "skipped": {
             "tests": tally.tests, "generated": tally.generated, "binary": tally.binary,
@@ -702,6 +718,20 @@ def list_profiles(root: str) -> str:
     return "\n".join(lines)
 
 
+def _disambiguated_rules(chosen: Sequence[Profile]) -> list[tuple[str, Rule, Profile]]:
+    """Assign each rule a unique worker key across `chosen`, qualifying only IDs that collide across profiles."""
+    id_counts: dict[str, int] = {}
+    for profile in chosen:
+        for rule in profile.rules:
+            id_counts[rule.id] = id_counts.get(rule.id, 0) + 1
+    out: list[tuple[str, Rule, Profile]] = []
+    for profile in chosen:
+        for rule in profile.rules:
+            key = f"{profile.name}:{rule.id}" if id_counts[rule.id] > 1 else rule.id
+            out.append((key, rule, profile))
+    return out
+
+
 def run_scan(
     root: str,
     *,
@@ -715,14 +745,14 @@ def run_scan(
     root = str(Path(root).resolve())
     profiles = load_profiles(root)
     chosen = _chosen(profiles, profile)
-    rules = [rule for p in chosen for rule in p.rules]
-    if not rules:
+    disambiguated = _disambiguated_rules(chosen)
+    if not disambiguated:
         raise ValueError(f"profile {_shown(profile)!r} has no usable rules" + (f" ({profiles.problems[0]})" if profiles.problems else ""))
     try:
         reply = _run_regex_worker({
             "op": "scan",
             "root": root,
-            "rules": [rule.to_worker() for rule in rules],
+            "rules": [{**rule.to_worker(), "id": key} for key, rule, _ in disambiguated],
             "glob": glob or None,
             "include_tests": include_tests,
             "include_comments": include_comments,
@@ -741,9 +771,9 @@ def run_scan(
 def format_scan(result: dict[str, Any], chosen: Sequence[Profile], profiles: ProfileSet, glob: str | None = None) -> str:
     """A scan, as the tool result the model reads: the caveat, then what was NOT seen, then what was found, within `REPORT_CHARS`."""
     by_id: dict[str, tuple[Rule, Profile]] = {}
-    for profile in chosen:
-        for candidate in profile.rules:
-            by_id.setdefault(candidate.id, (candidate, profile))
+    for key, candidate, profile in _disambiguated_rules(chosen):
+        by_id[key] = (candidate, profile)
+        by_id.setdefault(candidate.id, (candidate, profile))
     findings: list[dict[str, Any]] = result.get("findings") or []
     counts: dict[str, int] = result.get("counts") or {}
     names = ", ".join(p.name for p in chosen)

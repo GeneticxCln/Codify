@@ -36,13 +36,19 @@ export const MicButton: React.FC<MicButtonProps> = ({ disabled = false, onTransc
   const startedAt = useRef(0);
   const mounted = useRef(true);
   const live = useRef(false);
+  const onTranscriptRef = useRef(onTranscript);
+  onTranscriptRef.current = onTranscript;
+  const pendingCancel = useRef<Promise<unknown> | null>(null);
 
   useEffect(() => {
     mounted.current = true;
     return () => {
       mounted.current = false;
       // A composer that goes away mid-recording must not leave the microphone open behind it.
-      if (live.current) void cancelDictation().catch(() => {});
+      if (live.current) {
+        live.current = false;
+        void cancelDictation().catch(() => {});
+      }
     };
   }, []);
 
@@ -53,26 +59,35 @@ export const MicButton: React.FC<MicButtonProps> = ({ disabled = false, onTransc
     try {
       const { text } = await stopDictation();
       if (!mounted.current) return;
-      if (text.trim()) onTranscript(text);
+      if (text.trim()) onTranscriptRef.current(text);
       else setError("No speech was recognised.");
     } catch (err) {
       if (mounted.current) setError(readRejection(err, "Could not transcribe the dictation."));
     } finally {
       if (mounted.current) setPhase("idle");
     }
-  }, [onTranscript]);
+  }, []);
 
   const cancel = useCallback(() => {
     if (!live.current) return;
     live.current = false;
     setPhase("idle");
-    void cancelDictation().catch(() => {});
+    const req = cancelDictation()
+      .catch(() => {})
+      .finally(() => {
+        if (pendingCancel.current === req) pendingCancel.current = null;
+      });
+    pendingCancel.current = req;
   }, []);
 
   const begin = async () => {
     setError(null);
     setPhase("starting");
     try {
+      if (pendingCancel.current) {
+        await pendingCancel.current;
+        if (!mounted.current) return;
+      }
       const started = await startDictation();
       if (!mounted.current) {
         void cancelDictation().catch(() => {});
