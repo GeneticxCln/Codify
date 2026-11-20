@@ -29,7 +29,8 @@ CARGO_FLAGS = {"--", "--lib", "--bins", "--quiet"}
 MYPY_FLAGS = {"--strict", "--ignore-missing-imports"}
 # No `--`: the engine appends `-- -D warnings` to clippy, and a second `--` would override it.
 CARGO_LINT_FLAGS = {"--lib", "--bins", "--all-targets", "--quiet"}
-MAKE_TARGETS = ("lint", "typecheck")
+MAKE_TARGETS = ("lint", "typecheck", "check", "test", "test-ui", "typecheck-ui-tests")
+NODE_TEST_FLAGS = {"--test", "--experimental-strip-types"}
 # The programs `rustup` installs in `~/.cargo/bin` as proxies for a toolchain's own binaries.
 RUSTUP_TOOLS = frozenset({"cargo", "rustc", "rustup", "rustfmt", "rustdoc", "cargo-clippy", "clippy-driver"})
 # Where the jail shows the person's Go module download cache. Not at its real path: `go` treats
@@ -444,11 +445,28 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
             return
         raise CommandNotAllowed(f"{cmd} only allows -m pytest or one workspace .py script")
     if cmd in {"npm", "pnpm"}:
+        if len(rest) >= 3 and rest[0] == "--prefix" and _is_workspace_path(fs, rest[1]):
+            rest = rest[2:]
         if rest and rest[0] == "test" and len(rest) == 1:
             return
         if len(rest) == 2 and rest[0] == "run" and NPM_SCRIPT_RE.match(rest[1]):
             return
         raise CommandNotAllowed(f"{cmd} argv not allowed")
+    if cmd == "node":
+        # Only `node --test [--experimental-strip-types] [workspace_paths...]`: runs the Node test runner
+        # over workspace files (such as `ui/tests/*.test.ts`), never `-e`/`--eval`, `--import`, or an interactive REPL.
+        saw_test = False
+        for tok in rest:
+            if tok == "--test":
+                saw_test = True
+            elif tok.startswith("-"):
+                if tok not in NODE_TEST_FLAGS:
+                    raise CommandNotAllowed(f"node flag not allowed: {tok}")
+            elif not _is_workspace_path(fs, tok):
+                raise CommandNotAllowed(f"node path not allowed: {tok}")
+        if not saw_test:
+            raise CommandNotAllowed("node only runs with --test and workspace paths")
+        return
     if cmd == "cargo":
         if rest and rest[0] in {"check", "clippy"}:
             for tok in rest[1:]:
@@ -487,8 +505,9 @@ def validate_argv(argv: list[str], fs: FileSystemService, mode: str = "test") ->
     if cmd == "make":
         if len(rest) == 1 and rest[0] in MAKE_TARGETS:
             return
+        allowed_targets = ", ".join(f"`make {t}`" for t in MAKE_TARGETS)
         raise CommandNotAllowed(
-            "make only allows `make lint` or `make typecheck`, with no flags or variables"
+            f"make only allows {allowed_targets}, with no flags or variables"
         )
     if cmd == "go":
         if not rest or rest[0] not in {"test", "vet"}:

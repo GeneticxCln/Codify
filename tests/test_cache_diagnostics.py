@@ -12,7 +12,14 @@ import re
 import unittest
 
 from engine import cache_diagnostics as cd
-from engine.cache_diagnostics import CallFacts, explain, fingerprint, prompt_parts
+from engine.cache_diagnostics import (
+    CallFacts,
+    explain,
+    fingerprint,
+    message_digests,
+    prompt_parts,
+    shared_prefix_count,
+)
 
 SYSTEM = "You are the conductor. SECRET-PROMPT-TEXT-9917 " * 50
 TOOLS = ["read_file", "search_code", "write"]
@@ -80,6 +87,23 @@ class TestNoContent(unittest.TestCase):
 
     def test_a_lone_surrogate_does_not_crash_the_digest(self) -> None:
         self.assertRegex(cd.digest("bad \ud800 text"), r"^[0-9a-f]{16}$")
+
+    def test_message_digests_measure_prefix_stability_without_keeping_content(self) -> None:
+        m1 = [
+            {"role": "user", "content": "SECRET-1"},
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "SECRET-2"},
+        ]
+        m2 = [*m1, {"role": "tool", "tool_call_id": "c2", "name": "read_file", "content": "SECRET-3"}]
+        d1 = message_digests(m1)
+        d2 = message_digests(m2)
+        self.assertEqual(2, shared_prefix_count(d1, d2))
+        self.assertNotIn("SECRET", repr(d1) + repr(d2))
+        m2_mutated = [
+            m1[0],
+            {"role": "tool", "tool_call_id": "c1", "name": "read_file", "content": "[dropped]"},
+            m2[2],
+        ]
+        self.assertEqual(1, shared_prefix_count(d1, message_digests(m2_mutated)))
 
     def test_the_module_imports_no_model_clock_or_database(self) -> None:
         import inspect

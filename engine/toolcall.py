@@ -280,26 +280,126 @@ def coerce_tool_reply(
     return ToolReply(text="" if recovered else text, tool_calls=recovered)
 
 
-def _last_fenced_json(body: str) -> Any:
-    """The last fenced block in `body` that parses as an object, or None.
+_RECONSIDER_MOVES = frozenset({
+    "recon", "design", "plan", "write", "verify", "review", "summarize", "ask_user",
+})
 
-    Last rather than first: when a model writes out more than one shape, the one
-    it finished on is the move it settled on. Blocks are tried newest-first and
-    the first parse wins, so a reply with an earlier illustrative fence and a
-    later real call recovers the real call.
+
+def _call_from_dict(
+    parsed: dict[str, Any], tools: list[ToolSpec], index: int = 0
+) -> ToolCall | None:
+    """Turn one parsed dict into a `ToolCall` if it names an offered tool, else None."""
+    raw_name = parsed.get("name")
+    arguments = parsed.get("arguments")
+    if raw_name is None and isinstance(parsed.get("function"), dict):
+        raw_name = parsed["function"].get("name")
+        arguments = parsed["function"].get("arguments")
+    name = str(raw_name or "").strip()
+    spec = next((t for t in tools if t.name == name), None)
+    if not name or spec is None:
+        return None
+    raw_id = parsed.get("id")
+    call_id = str(raw_id) if raw_id else synth_call_id(f"{name}-{index}" if index else name)
+    return ToolCall(
+        id=call_id,
+        name=name,
+        arguments=coerce_arguments(spec, arguments),
+    )
+
+
+def _calls_from_parsed(parsed: Any, tools: list[ToolSpec], start_index: int = 0) -> list[ToolCall]:
+    """Recover one or more tool calls from a parsed JSON value, under the offered-tool guard.
+
+    Accepts a single call dict, a JSON array of call dicts, or `{"tool_calls": [...]}`. For an
+    array, every element must be a valid call to an offered tool so a prose JSON array that
+    happens to mention a tool name in one entry is never misread as a batch.
+    """
+    if isinstance(parsed, dict):
+        nested = parsed.get("tool_calls")
+        if isinstance(nested, list) and nested:
+            return _calls_from_parsed(nested, tools, start_index=start_index)
+        one = _call_from_dict(parsed, tools, index=start_index)
+        return [one] if one is not None else []
+    if isinstance(parsed, list) and parsed:
+        out: list[ToolCall] = []
+        for offset, item in enumerate(parsed):
+            if not isinstance(item, dict):
+                return []
+            one = _call_from_dict(item, tools, index=start_index + offset)
+            if one is None:
+                return []
+            out.append(one)
+        return out
+    return []
+
+
+def _parse_json_sequence(raw: str) -> list[Any]:
+    """Parse one JSON document or a sequence of whitespace-separated JSON objects/arrays in `raw`."""
+    text = raw.strip()
+    if not text or text[0] not in ("{", "["):
+        return []
+    try:
+        return [json.loads(text)]
+    except (ValueError, RecursionError):
+        pass
+    decoder = json.JSONDecoder()
+    pos = 0
+    items: list[Any] = []
+    n = len(text)
+    while pos < n:
+        while pos < n and text[pos].isspace():
+            pos += 1
+        if pos >= n:
+            break
+        if text[pos] not in ("{", "["):
+            return []
+        try:
+            obj, end = decoder.raw_decode(text, pos)
+        except (ValueError, RecursionError):
+            return []
+        items.append(obj)
+        pos = end
+    return items
+
+
+def _fenced_calls(body: str, tools: list[ToolSpec]) -> list[ToolCall]:
+    """Recover tool calls from fenced JSON blocks in `body`.
+
+    When a model emits multiple fenced blocks of parallel/non-stage calls (such as several
+    `read_file` or `search_code` fences), all offered calls are recovered in order. When a
+    model lays out multiple stage moves across fences as a reconsideration (`recon`, then
+    "Actually, on reflection:", then `plan`), the last fence wins so only the settled stage
+    move runs.
     """
     fence = re.compile(r"```[a-zA-Z0-9_-]*\n(.*?)```", re.DOTALL)
-    for match in reversed(list(fence.finditer(body))):
+    per_fence: list[list[ToolCall]] = []
+    call_index = 0
+    for match in fence.finditer(body):
         inner = match.group(1).strip()
-        if not inner.startswith("{"):
+        docs = _parse_json_sequence(inner)
+        if not docs:
             continue
-        try:
-            parsed = json.loads(inner)
-        except (ValueError, RecursionError):
-            continue
-        if isinstance(parsed, dict):
-            return parsed
-    return None
+        fence_calls: list[ToolCall] = []
+        valid = True
+        for doc in docs:
+            recovered = _calls_from_parsed(doc, tools, start_index=call_index + len(fence_calls))
+            if not recovered:
+                valid = False
+                break
+            fence_calls.extend(recovered)
+        if valid and fence_calls:
+            per_fence.append(fence_calls)
+            call_index += len(fence_calls)
+    if not per_fence:
+        return []
+    if len(per_fence) == 1:
+        return per_fence[0]
+    stage_fences = sum(
+        1 for group in per_fence if any(c.name in _RECONSIDER_MOVES for c in group)
+    )
+    if stage_fences > 1:
+        return per_fence[-1]
+    return [call for group in per_fence for call in group]
 
 
 def _from_content(text: str, tools: list[ToolSpec]) -> list[ToolCall]:
@@ -309,64 +409,19 @@ def _from_content(text: str, tools: list[ToolSpec]) -> list[ToolCall]:
     # Three shapes, tried in order of how unambiguous they are, and the order is
     # the point: the strict ones are tried first and a failure in either falls
     # through rather than giving up.
-    parsed: Any = None
-    if body.startswith("{"):
-        try:
-            parsed = json.loads(body)
-        except (ValueError, RecursionError):
-            # `RecursionError` is what a document nested past the interpreter's limit raises, and it is not a
-            # `ValueError`: a small model stuck repeating `[` is enough (docs/04, tests/test_deeply_nested_json.py).
-            parsed = None
-    elif body.startswith("```"):
-        # A model that writes ```json ... ``` instead of calling the tool is
-        # common enough to be worth one retry, and cheap: this path only runs
-        # when the structured one came back empty.
-        inner = body.strip("`").strip()
-        if inner.lower().startswith("json"):
-            inner = inner[4:].strip()
-        try:
-            parsed = json.loads(inner)
-        except (ValueError, RecursionError):
-            parsed = None
-    if not isinstance(parsed, dict):
-        # Prose that *contains* a fenced call, which is the third shape a model
-        # reaches for and the one a live run found: against a 7B, the conductor
-        # said "Let's proceed with the plan.", wrote `2. design - Lock the
-        # direction`, and then emitted the call inside a ```json block instead
-        # of calling anything. The reply was returned as the turn's answer with
-        # the move never made.
-        #
-        # Reached by falling through rather than by a separate branch, because
-        # the whole-body shapes fail on this too: a reply that *opens* with a
-        # fence and then continues in prose parses as neither. Requiring a shape
-        # and then giving up is how the third one went unnoticed.
-        #
-        # Searching the body is a wider net, so it is guarded exactly the way
-        # the whole-body path is: the name has to be one of the tools the model
-        # was actually offered, checked just below alongside the other shapes. A
-        # model explaining `{"name": "read_file"}` to the user is an accepted
-        # casualty of that guard rather than a risk taken with it — the
-        # alternative is a turn that narrates work with no way to notice.
-        parsed = _last_fenced_json(body)
-    if not isinstance(parsed, dict):
-        return []
-    raw_name = parsed.get("name")
-    arguments = parsed.get("arguments")
-    if raw_name is None and isinstance(parsed.get("function"), dict):
-        raw_name = parsed["function"].get("name")
-        arguments = parsed["function"].get("arguments")
-    name = str(raw_name or "").strip()
-    if not name or not any(t.name == name for t in tools):
-        return []
-    return [
-        ToolCall(
-            id=str(parsed.get("id") or synth_call_id(name)),
-            name=name,
-            arguments=coerce_arguments(
-                next((t for t in tools if t.name == name), None), arguments
-            ),
-        )
-    ]
+    if body[0] in ("{", "["):
+        docs = _parse_json_sequence(body)
+        if docs:
+            calls: list[ToolCall] = []
+            for doc in docs:
+                part = _calls_from_parsed(doc, tools, start_index=len(calls))
+                if not part:
+                    calls = []
+                    break
+                calls.extend(part)
+            if calls:
+                return calls
+    return _fenced_calls(body, tools)
 
 
 def _google_type(json_type: Any) -> str:
