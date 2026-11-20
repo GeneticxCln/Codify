@@ -1484,6 +1484,39 @@ class ConductorTools:
         state.reviewed = True
         return "The critic approved this step. Call `summarize` to record and commit it."
 
+    def _stored_step_gates(self, step_id: str) -> tuple[bool, bool]:
+        """Return `(verified, approved)` for `step_id` from the goal's stored event log.
+
+        Any write (`diff` or `fixer` stage_result) invalidates earlier verification and review.
+        Any verification (`test_result` or `verifier` stage_result) updates `verified` and
+        invalidates earlier review. A `critic` stage_result with `outcome == "approve"` sets
+        `approved` only when `verified` is already true.
+        """
+        verified = False
+        approved = False
+        for event in self.service.goals.events_after(self.goal_id, 0):
+            if event.step_id != step_id:
+                continue
+            payload = event.payload or {}
+            if event.type == "diff":
+                verified = False
+                approved = False
+            elif event.type == "test_result":
+                verified = str(payload.get("verdict") or "") in ("pass", "skip")
+                approved = False
+            elif event.type == "stage_result":
+                stage = str(payload.get("stage") or "")
+                outcome = str(payload.get("outcome") or "")
+                if stage == "fixer":
+                    verified = False
+                    approved = False
+                elif stage == "verifier":
+                    verified = outcome in ("pass", "skip")
+                    approved = False
+                elif stage == "critic":
+                    approved = verified and outcome == "approve"
+        return verified, approved
+
     async def summarize(self, args: dict[str, Any]) -> str:
         step_id = str(args.get("step_id") or "").strip()
         step = self.step_for(step_id)
@@ -1497,7 +1530,23 @@ class ConductorTools:
         state = self._state_of(step.id)
         if not state.files:
             return "That step was not written in this run, so there is nothing to record."
-        if not state.reviewed:
+        allowed, why = self.service._write_allowed(self.goal_id)
+        if not allowed:
+            return why
+        stored_verified, stored_approved = self._stored_step_gates(step.id)
+        verdict = (state.test or {}).get("verdict")
+        if (
+            state.test_failed
+            or state.test is None
+            or verdict not in ("pass", "skip")
+            or not stored_verified
+        ):
+            return (
+                "That step has not passed verification and has not been reviewed for its current files. "
+                "Call `verify` and then `review` first, and commit it only if verification passes and "
+                "the critic approved."
+            )
+        if not state.reviewed or not stored_approved:
             # Not a formality. The commit is the point of no return for a
             # step, and the review is the only thing standing between a
             # model's opinion of its own work and the user's git history.
@@ -1596,7 +1645,10 @@ class ConductorTools:
 
 
 def _excerpt(text: str, limit: int = _DIFF_EXCERPT_CHARS) -> str:
-    """The head of a diff, with a count of what was left out, so a cut is never mistaken for the whole."""
+    """Both ends of a diff, with a count of what was left out, so a cut never hides the final hunk."""
     if len(text) <= limit:
         return text
-    return f"{text[:limit]}\n…[{len(text) - limit} more characters of this diff not shown]"
+    head = (limit * 2) // 3
+    tail = limit - head
+    elided = len(text) - head - tail
+    return f"{text[:head]}\n…[{elided} more characters of this diff not shown]…\n{text[-tail:]}"
