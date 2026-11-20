@@ -218,7 +218,7 @@ export interface WeatherBackdropProps {
   active?: boolean;
 }
 
-export const WeatherBackdrop: React.FC<WeatherBackdropProps> = ({ active }) => {
+export const WeatherBackdrop: React.FC<WeatherBackdropProps> = React.memo(({ active }) => {
   const theme = useTheme();
   const atmosphere = ATMOSPHERES[theme.id];
   // Two gates, and both are needed: the table says what this theme's weather
@@ -249,6 +249,7 @@ export const WeatherBackdrop: React.FC<WeatherBackdropProps> = ({ active }) => {
           every frame, even a still one. Every effect in the table goes through
           that hook, so all ~20 get the fade without a per-painter call site. */}
       <Canvas
+        key={theme.id}
         className="absolute inset-0 h-full w-full"
         maxDimension={1024}
         active={active}
@@ -257,7 +258,7 @@ export const WeatherBackdrop: React.FC<WeatherBackdropProps> = ({ active }) => {
       {vignette && <div className="absolute inset-0" style={{ background: vignette }} />}
     </div>
   );
-};
+});
 
 /** The themes this file knows how to give weather to, for the tests. */
 export function themesWithWeather(): ReadonlyArray<string> {

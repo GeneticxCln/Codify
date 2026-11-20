@@ -1,7 +1,7 @@
 ---
 name: encode-a-lesson
 description: Turn a mistake that happened twice into a type, lint, test or structural check, prove the check fails on the old mistake, and leave a rule only when nothing can enforce it.
-moves: recon, plan, write, verify, run_command, read_file, search_code, recall
+moves: recon, plan, write, verify, run_command, read_file, search_code, git_history, recall
 ---
 
 # Encode a lesson

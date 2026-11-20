@@ -637,12 +637,18 @@ def _clean_result(payload: Any, budget: int) -> dict[str, Any]:
     text = data.get("text")
     text = strip_invisible(text) if isinstance(text, str) else ""
     truncated = bool(data.get("truncated")) or len(text) > budget
+    raw_chars = data.get("chars")
+    chars = (
+        raw_chars
+        if isinstance(raw_chars, int) and not isinstance(raw_chars, bool) and raw_chars >= len(text)
+        else len(text)
+    )
     return {
         "url": _clip(data.get("url"), 500),
         "title": _clip(data.get("title"), 200),
         "text": text[:budget],
         "truncated": truncated,
-        "chars": len(text),
+        "chars": chars,
         "links": _clean_links(data.get("links")),
         "ready_state": _clip(data.get("ready_state"), 20),
     }

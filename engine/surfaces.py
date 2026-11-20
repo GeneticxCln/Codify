@@ -34,9 +34,11 @@ import time
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Any
+from typing import Annotated, Any
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import AfterValidator, BaseModel, Field, ValidationError, field_validator
+
+from engine.models import scrub_surrogates
 
 #: How long a question waits for the window. An editor answers in milliseconds, so this is long enough for a window
 #: that is busy painting and short enough that a window which is not there costs one conductor call, not its budget.
@@ -52,6 +54,25 @@ ATTACHED_WINDOW_S = POLL_WAIT_S * 3.0
 
 #: The longest reason from the window that is passed on to the model.
 MAX_REFUSAL_CHARS = 500
+#: Bounds on the list of workspace ids reported by `POST /surfaces/window`.
+MAX_WINDOW_MACHINES = 128
+MAX_WORKSPACE_ID_CHARS = 128
+
+
+def _require_utf8(value: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("invalid UTF-8 surrogate") from None
+    return value
+
+
+def _is_utf8(value: str) -> bool:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        return False
+    return True
 
 
 class SurfaceUnavailable(RuntimeError):
@@ -70,7 +91,9 @@ class SurfaceWindow(BaseModel):
     """
 
     model_config = {"extra": "forbid"}
-    machines: list[str] = Field(default_factory=list)
+    machines: list[Annotated[str, Field(max_length=MAX_WORKSPACE_ID_CHARS), AfterValidator(_require_utf8)]] = Field(
+        default_factory=list, max_length=MAX_WINDOW_MACHINES,
+    )
 
 
 class SurfaceAnswer(BaseModel):
@@ -87,6 +110,11 @@ class SurfaceAnswer(BaseModel):
     ok: bool = True
     result: Any = None
     error: str | None = Field(None, description="the window's reason, when `ok` is false")
+
+    @field_validator("error")
+    @classmethod
+    def _scrub_error(cls, value: str | None) -> str | None:
+        return scrub_surrogates(value) if isinstance(value, str) else value
 
 
 @dataclass(frozen=True)
@@ -212,36 +240,66 @@ class SurfaceBridge:
         argv or a capability. A count is not kept because the menu only asks whether there is one.
         """
         self._machine_workspaces = {
-            workspace_id for workspace_id in machines
-            if isinstance(workspace_id, str) and workspace_id
+            workspace_id for workspace_id in machines[:MAX_WINDOW_MACHINES]
+            if isinstance(workspace_id, str)
+            and 0 < len(workspace_id) <= MAX_WORKSPACE_ID_CHARS
+            and _is_utf8(workspace_id)
         }
 
     def has_machine(self, workspace_id: str) -> bool:
         """Whether the window holds a machine open in that workspace, as of its last report."""
         return bool(workspace_id) and workspace_id in self._machine_workspaces
 
+    def release(self, request_id: str) -> bool:
+        """Return a handed-out question to the queue so another poll can pick it up."""
+        if request_id in self._handed and request_id in self._pending:
+            self._handed.discard(request_id)
+            self._wake.set()
+            return True
+        return False
+
     async def next_request(self, wait_s: float = POLL_WAIT_S) -> dict[str, Any] | None:
         """The oldest question not yet handed out, or None if none arrives in time."""
         self.note_ui()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, wait_s)
-        while True:
-            item = self._oldest()
-            if item is not None:
-                return self._hand_out(item)
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return None
-            # Cleared before the re-check, never after: a question asked between the check and the clear would set
-            # the event, the wait would eat the set, and the question would sit until the poll expired.
-            self._wake.clear()
-            item = self._oldest()
-            if item is not None:
-                return self._hand_out(item)
-            try:
-                await asyncio.wait_for(self._wake.wait(), remaining)
-            except asyncio.TimeoutError:
-                return None
+        handed_id: str | None = None
+        try:
+            while True:
+                item = self._oldest()
+                if item is not None:
+                    result = self._hand_out(item)
+                    handed_id = item.id
+                    self.note_ui()
+                    handed_id = None
+                    return result
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    self.note_ui()
+                    return None
+                # Cleared before the re-check, never after: a question asked between the check and the clear would set
+                # the event, the wait would eat the set, and the question would sit until the poll expired.
+                self._wake.clear()
+                item = self._oldest()
+                if item is not None:
+                    result = self._hand_out(item)
+                    handed_id = item.id
+                    self.note_ui()
+                    handed_id = None
+                    return result
+                step = min(remaining, POLL_WAIT_S)
+                try:
+                    await asyncio.wait_for(self._wake.wait(), step)
+                except asyncio.TimeoutError:
+                    self.note_ui()
+                    if deadline - loop.time() <= 0:
+                        return None
+        except BaseException:
+            if handed_id is not None:
+                self._handed.discard(handed_id)
+            if self._oldest() is not None:
+                self._wake.set()
+            raise
 
     def answer(self, request_id: str, ok: bool, payload: Any, error: str | None = None) -> bool:
         """Land an answer on a waiting question. False if nothing is waiting under that id.
@@ -253,6 +311,7 @@ class SurfaceBridge:
         pending = self._pending.pop(str(request_id or ""), None)
         if pending is None or pending.future.done():
             return False
+        self.note_ui()
         self._handed.discard(pending.id)
         label = f"{pending.surface} {pending.op.name}"
         if not ok:
@@ -306,5 +365,5 @@ def _refusal(error: str | None, payload: Any) -> str:
     """The window's own reason, capped, or a plain sentence when it gave none."""
     for candidate in (error, payload if isinstance(payload, str) else None):
         if isinstance(candidate, str) and candidate.strip():
-            return candidate.strip()[:MAX_REFUSAL_CHARS]
+            return str(scrub_surrogates(candidate.strip()))[:MAX_REFUSAL_CHARS]
     return "The app window could not do that and did not say why."

@@ -30,10 +30,20 @@ text as it arrives and still runs the calls.
 
 from __future__ import annotations
 
+import itertools
 import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
+
+_SYNTH_ID_COUNTER = itertools.count(1)
+
+
+def synth_call_id(hint: str | int = "") -> str:
+    """Return a globally unique synthetic tool-call id (`call_<seq>_<hint>`)."""
+    seq = next(_SYNTH_ID_COUNTER)
+    suffix = str(hint).strip()
+    return f"call_{seq}_{suffix}" if suffix else f"call_{seq}"
 
 
 @dataclass(frozen=True)
@@ -76,36 +86,32 @@ class ToolSpec:
         # what the model needs to choose an argument (the description, the enum, the
         # element type of an array); this used to send only `{"type": ...}` per
         # property, so Gemini never saw a single description.
+        #
+        # Gemini rejects `OBJECT` schemas with empty `properties: {}` (HTTP 400),
+        # so zero-parameter tools omit `parameters` altogether.
         properties = self.parameters.get("properties") or {}
-        # `required` is a statement about the schema, not about a type. It used
-        # to be computed as `type != "string"`, which inverted every tool this
-        # pipeline sends: all five declare their required parameter as a string
-        # (`path`, `query`, `task`) so they went out declaring **nothing**
-        # required, while the optional numbers (`offset`, `limit`) and the
-        # optional flag (`regex`) went out declaring themselves required. A
-        # model reading that calls `read_file` with no path and invents an
-        # `offset`. Nothing raised — Gemini accepts the document either way,
-        # which is exactly why a wrong `required` is the kind of defect only a
-        # live call ever reveals.
-        declared = self.parameters.get("required") or []
-        return {
+        google_props = {
+            key: _google_schema(spec)
+            for key, spec in properties.items()
+            if isinstance(spec, dict)
+        }
+        out: dict[str, Any] = {
             "name": self.name,
             "description": self.description,
-            "parameters": {
+        }
+        if google_props:
+            declared = self.parameters.get("required") or []
+            out["parameters"] = {
                 "type": "object",
-                "properties": {
-                    key: _google_schema(spec)
-                    for key, spec in properties.items()
-                    if isinstance(spec, dict)
-                },
+                "properties": google_props,
                 # Filtered to what is declared: Google takes `required` as a
                 # subset of `properties`, and a schema that names a property it
                 # did not declare is the same mistake in the other direction.
                 "required": [
-                    key for key in declared if isinstance(properties.get(key), dict)
+                    key for key in declared if key in google_props
                 ],
-            },
-        }
+            }
+        return out
 
 
 _JSON_TYPES = frozenset({"string", "integer", "number", "boolean", "array", "object"})
@@ -221,17 +227,19 @@ def schema_problems(spec: ToolSpec, dialect: str) -> list[str]:
         schema = shaped["input_schema"]
     else:
         shaped = spec.to_google()
-        schema = shaped["parameters"]
+        schema = shaped.get("parameters")
     problems: list[str] = []
     if not _TOOL_NAME.match(str(shaped.get("name", ""))):
         problems.append(f"name {shaped.get('name')!r} is not 1-64 of [A-Za-z0-9_-]")
     if not str(shaped.get("description", "")).strip():
         problems.append("no description")
-    if str(schema.get("type", "")).lower() != "object":
-        problems.append("parameters: the top level must be an object")
-    problems.extend(_schema_problems(schema, "parameters", dialect == "google"))
+    if schema is not None:
+        if str(schema.get("type", "")).lower() != "object":
+            problems.append("parameters: the top level must be an object")
+        problems.extend(_schema_problems(schema, "parameters", dialect == "google"))
+        if dialect == "google":
+            problems.extend(_kept(spec.parameters, schema, "parameters"))
     if dialect == "google":
-        problems.extend(_kept(spec.parameters, schema, "parameters"))
         # The Google translation repairs an array with no `items` (it defaults to STRING) and
         # filters `required` down to declared properties, so the shaped document is clean
         # where the spec is not. A spec defect hidden by the translator is still a defect:
@@ -352,7 +360,7 @@ def _from_content(text: str, tools: list[ToolSpec]) -> list[ToolCall]:
         return []
     return [
         ToolCall(
-            id=str(parsed.get("id") or f"call_{name}"),
+            id=str(parsed.get("id") or synth_call_id(name)),
             name=name,
             arguments=coerce_arguments(
                 next((t for t in tools if t.name == name), None), arguments
@@ -405,14 +413,16 @@ def _google_schema(schema: dict[str, Any]) -> dict[str, Any]:
     if json_type == "object":
         properties = schema.get("properties")
         if isinstance(properties, dict):
-            out["properties"] = {
+            google_props = {
                 key: _google_schema(spec)
                 for key, spec in properties.items()
                 if isinstance(spec, dict)
             }
-            required = schema.get("required")
-            if isinstance(required, list):
-                out["required"] = [key for key in required if key in out["properties"]]
+            if google_props:
+                out["properties"] = google_props
+                required = schema.get("required")
+                if isinstance(required, list):
+                    out["required"] = [key for key in required if key in google_props]
     return out
 
 
@@ -476,15 +486,25 @@ def coerce_arguments(
         want = str(declared.get("type", "string"))
         value = out[key]
         try:
-            if want == "integer" and isinstance(value, str) and value.strip().isdigit():
-                out[key] = int(value.strip())
+            if want == "integer":
+                if isinstance(value, str):
+                    stripped = value.strip()
+                    digits = stripped[1:] if stripped[:1] in ("+", "-") else stripped
+                    if digits.isdigit():
+                        out[key] = int(stripped)
+                elif isinstance(value, float) and value.is_integer():
+                    out[key] = int(value)
             elif want == "number" and isinstance(value, str):
                 out[key] = float(value.strip())
             elif want == "boolean" and isinstance(value, str):
                 out[key] = value.strip().lower() in ("true", "1", "yes")
             elif want == "array" and isinstance(value, str):
                 out[key] = _array_from_text(value)
-        except ValueError:
+            elif want == "object" and isinstance(value, str):
+                parsed = json.loads(value)
+                if isinstance(parsed, dict):
+                    out[key] = parsed
+        except (ValueError, RecursionError):
             pass
     return out
 
@@ -574,13 +594,20 @@ def to_ollama_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 def parse_openai_tool_calls(message: dict[str, Any]) -> list[ToolCall]:
     calls: list[ToolCall] = []
-    for index, raw in enumerate(message.get("tool_calls") or []):
-        function = raw.get("function") or {}
+    raw_calls = message.get("tool_calls")
+    if not isinstance(raw_calls, list):
+        return calls
+    for index, raw in enumerate(raw_calls):
+        if not isinstance(raw, dict):
+            continue
+        function = raw.get("function")
+        if not isinstance(function, dict):
+            continue
         name = str(function.get("name") or "")
         if not name:
             continue
         calls.append(ToolCall(
-            id=str(raw.get("id") or f"call_{index}"),
+            id=str(raw.get("id") or synth_call_id(index)),
             name=name,
             arguments=coerce_arguments(None, function.get("arguments")),
         ))
@@ -589,26 +616,32 @@ def parse_openai_tool_calls(message: dict[str, Any]) -> list[ToolCall]:
 
 def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Anthropic: no `system` role, and a tool result is a *user* turn whose
-    content is a `tool_result` block. Consecutive tool results share one turn —
-    a `tool_result` block in its own message per call is rejected."""
+    content is a `tool_result` block. Consecutive user turns (including tool
+    results, nudges after skipped empty assistant turns, and unanswered history)
+    are merged into a single `user` turn so the Messages API never rejects
+    adjacent user messages with HTTP 400."""
     out: list[dict[str, Any]] = []
-    pending: list[dict[str, Any]] = []
     for m in messages:
         role = m.get("role")
         if role == "tool":
-            block = {
+            block: dict[str, Any] = {
                 "type": "tool_result",
                 "tool_use_id": m.get("tool_call_id", ""),
                 "content": m.get("content", ""),
             }
-            # Attach to the turn we are already building, or start one.
-            if out and out[-1].get("role") == "user" and pending:
-                pending.append(block)
+            if out and out[-1].get("role") == "user":
+                prev = out[-1]["content"]
+                if isinstance(prev, list):
+                    prev.append(block)
+                else:
+                    merged_tool: list[dict[str, Any]] = []
+                    if prev:
+                        merged_tool.append({"type": "text", "text": str(prev)})
+                    merged_tool.append(block)
+                    out[-1]["content"] = merged_tool
             else:
-                pending = [block]
-                out.append({"role": "user", "content": pending})
+                out.append({"role": "user", "content": [block]})
             continue
-        pending = []
         if role == "assistant" and not m.get("tool_calls") and not m.get("content"):
             # A reply with nothing in it, kept in the history when the conductor nudges the model to act. The
             # API refuses an empty message that is not the last one, and the neighbouring user turns are merged.
@@ -623,7 +656,24 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
             )
             out.append({"role": "assistant", "content": blocks})
         else:
-            out.append({"role": role or "user", "content": m.get("content", "")})
+            effective_role = role or "user"
+            content = m.get("content", "")
+            if effective_role == "user" and out and out[-1].get("role") == "user":
+                prev = out[-1]["content"]
+                if isinstance(prev, list):
+                    merged = prev
+                else:
+                    merged = [{"type": "text", "text": str(prev)}] if prev else []
+                    out[-1]["content"] = merged
+                if isinstance(content, list):
+                    merged.extend(content)
+                elif content:
+                    merged.append({"type": "text", "text": str(content)})
+            else:
+                out.append({
+                    "role": effective_role,
+                    "content": list(content) if isinstance(content, list) else content,
+                })
     return out
 
 
@@ -633,7 +683,7 @@ def parse_anthropic_tool_calls(content: list[dict[str, Any]]) -> list[ToolCall]:
         if not isinstance(block, dict) or block.get("type") != "tool_use":
             continue
         calls.append(ToolCall(
-            id=str(block.get("id") or f"call_{len(calls)}"),
+            id=str(block.get("id") or synth_call_id(len(calls))),
             name=str(block.get("name") or ""),
             arguments=coerce_arguments(None, block.get("input")),
         ))
@@ -646,7 +696,9 @@ def to_google_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
     The results of one model turn's calls share **one** user turn, a part each and in the order the calls were
     made: Gemini answers a 400 when the number of response parts differs from the number of call parts of the turn
-    before, and the conductor appends one `tool` message per call. (The same shape `to_anthropic_messages` builds.)
+    before, and the conductor appends one `tool` message per call. Adjacent `user` turns (e.g. a budget-exhausted
+    prompt after `functionResponse`, or a nudge after a skipped empty assistant turn) are merged onto the preceding
+    `user` turn's `parts` so Gemini never sees consecutive `user` entries.
     """
     out: list[dict[str, Any]] = []
     results: list[dict[str, Any]] | None = None
@@ -679,5 +731,9 @@ def to_google_contents(messages: list[dict[str, Any]]) -> list[dict[str, Any]]:
                 # A turn with no parts is a 400; an empty reply the conductor kept in its history has nothing to say.
                 out.append({"role": "model", "parts": parts})
         else:
-            out.append({"role": "user", "parts": [{"text": m.get("content", "")}]})
+            user_part = {"text": m.get("content", "")}
+            if out and out[-1].get("role") == "user":
+                out[-1]["parts"].append(user_part)
+            else:
+                out.append({"role": "user", "parts": [user_part]})
     return out

@@ -10,6 +10,7 @@ import os
 import random
 import re
 import tempfile
+import weakref
 from abc import ABC, abstractmethod
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -30,6 +31,7 @@ from engine.toolcall import (
     coerce_tool_reply,
     parse_anthropic_tool_calls,
     parse_openai_tool_calls,
+    synth_call_id,
     to_anthropic_messages,
     to_google_contents,
     to_ollama_messages,
@@ -413,7 +415,8 @@ def normalize_usage(provider: str, data: dict[str, Any]) -> dict[str, Any] | Non
     if not isinstance(data, dict):
         return None  # type: ignore[unreachable]
     if provider == "anthropic":
-        u = data.get("usage") or {}
+        raw_u = data.get("usage")
+        u = raw_u if isinstance(raw_u, dict) else {}
         # Anthropic's `input_tokens` EXCLUDES both cache counts, so they are
         # added here; OpenAI's `prompt_tokens` already includes its cached ones.
         return _mk_usage(
@@ -422,16 +425,104 @@ def normalize_usage(provider: str, data: dict[str, Any]) -> dict[str, Any] | Non
             cache_in_input=True,
         )
     if provider == "openai_compat":
-        u = data.get("usage") or {}
+        raw_u = data.get("usage")
+        u = raw_u if isinstance(raw_u, dict) else {}
         details = u.get("prompt_tokens_details")
         cached = details.get("cached_tokens") if isinstance(details, dict) else 0
         return _mk_usage(u.get("prompt_tokens"), u.get("completion_tokens"), cached)
     if provider == "google":
-        u = data.get("usageMetadata") or {}
+        raw_u = data.get("usageMetadata")
+        u = raw_u if isinstance(raw_u, dict) else {}
         return _mk_usage(u.get("promptTokenCount"), u.get("candidatesTokenCount"))
     if provider == "ollama":
         return _mk_usage(data.get("prompt_eval_count"), data.get("eval_count"))
     return None
+
+
+def _as_str(value: Any) -> str:
+    """Coerce `value` to `str` only when it already is one, else `""`."""
+    return value if isinstance(value, str) else ""
+
+
+_REAL_ASYNC_CLIENT = httpx.AsyncClient
+
+
+class _PooledClient:
+    __slots__ = ("client", "in_use", "evicted")
+
+    def __init__(self, client: httpx.AsyncClient) -> None:
+        self.client = client
+        self.in_use = 0
+        self.evicted = False
+
+
+_CLIENT_POOL: weakref.WeakKeyDictionary[
+    asyncio.AbstractEventLoop, dict[tuple[str, float, bool], _PooledClient]
+] = weakref.WeakKeyDictionary()
+_CLIENT_POOL_MAX = 32
+
+
+@contextlib.asynccontextmanager
+async def _http_client(base_url: str, *, timeout: float) -> AsyncIterator[httpx.AsyncClient]:
+    """Yield a pooled `httpx.AsyncClient` for `(base_url, timeout)` on the current event loop.
+
+    When a test monkeypatches `httpx.AsyncClient`, fall back to a fresh context-managed
+    instance so per-test `MockTransport` patches work unchanged.
+
+    Evicted clients are only closed once their active refcount reaches zero so concurrent
+    in-flight requests are never aborted mid-stream.
+    """
+    trust_env = trusts_proxy_env(base_url)
+    if httpx.AsyncClient is not _REAL_ASYNC_CLIENT:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=trust_env) as client:
+            yield client
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        async with httpx.AsyncClient(timeout=timeout, trust_env=trust_env) as client:
+            yield client
+        return
+    per_loop = _CLIENT_POOL.get(loop)
+    if per_loop is None:
+        per_loop = {}
+        _CLIENT_POOL[loop] = per_loop
+    key = (base_url, float(timeout), trust_env)
+    entry = per_loop.get(key)
+    if entry is None or entry.client.is_closed:
+        if len(per_loop) >= _CLIENT_POOL_MAX and key not in per_loop:
+            oldest_key = next(iter(per_loop))
+            old_entry = per_loop.pop(oldest_key)
+            old_entry.evicted = True
+            if old_entry.in_use == 0 and not old_entry.client.is_closed:
+                with contextlib.suppress(Exception):
+                    await old_entry.client.aclose()
+        entry = _PooledClient(httpx.AsyncClient(timeout=timeout, trust_env=trust_env))
+        per_loop[key] = entry
+    entry.in_use += 1
+    try:
+        yield entry.client
+    finally:
+        entry.in_use -= 1
+        if entry.evicted and entry.in_use == 0 and not entry.client.is_closed:
+            with contextlib.suppress(Exception):
+                await entry.client.aclose()
+
+
+async def close_http_clients() -> None:
+    """Close all pooled HTTP clients on the current event loop (invoked on shutdown)."""
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    per_loop = _CLIENT_POOL.pop(loop, None)
+    if not per_loop:
+        return
+    for entry in list(per_loop.values()):
+        entry.evicted = True
+        if entry.in_use == 0 and not entry.client.is_closed:
+            with contextlib.suppress(Exception):
+                await entry.client.aclose()
 
 
 def _count(value: Any) -> int:
@@ -760,7 +851,7 @@ class AnthropicProvider(BaseProvider):
 
     async def _messages(self, body: dict[str, Any]) -> Any:
         """POST /v1/messages: the one way both calls reach the API, so they cannot name different versions."""
-        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
+        async with _http_client(self._base_url, timeout=120) as client:
             return await post_json(
                 client,
                 f"{self._base_url}/v1/messages",
@@ -778,6 +869,7 @@ class AnthropicProvider(BaseProvider):
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
         json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
+        json_mode: bool = True,
     ) -> str:
         # `json_schema` is accepted and not sent: this protocol has no field for a reply schema here, and an
         # adapter that refused the keyword would fail every role before its first request. The system prompt
@@ -792,9 +884,13 @@ class AnthropicProvider(BaseProvider):
         if budget is not None and budget >= 1024:
             body["thinking"] = {"type": "enabled", "budget_tokens": budget}
         data = await self._messages(body)
+        if not isinstance(data, dict):
+            data = {}
         self._report_usage("anthropic", data)
+        raw_content = data.get("content")
+        blocks = [b for b in raw_content if isinstance(b, dict)] if isinstance(raw_content, list) else []
         return "".join(
-            b.get("text", "") for b in data.get("content", []) if b.get("type") == "text"
+            _as_str(b.get("text")) for b in blocks if b.get("type") == "text"
         )
 
     @property
@@ -833,9 +929,12 @@ class AnthropicProvider(BaseProvider):
             self._prompt_cache = False
             body["system"] = system_prompt
             data = await self._messages(body)
+        if not isinstance(data, dict):
+            data = {}
         self._report_usage("anthropic", data)
-        blocks = [b for b in (data.get("content") or []) if isinstance(b, dict)]
-        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        raw_content = data.get("content")
+        blocks = [b for b in raw_content if isinstance(b, dict)] if isinstance(raw_content, list) else []
+        text = "".join(_as_str(b.get("text")) for b in blocks if b.get("type") == "text")
         by_name = {t.name: t for t in tools}
         calls = [
             ToolCall(c.id, c.name, coerce_arguments(by_name.get(c.name), c.arguments))
@@ -904,6 +1003,12 @@ def _tool_call_thinking(provider_name: str) -> dict[str, Any]:
 
 
 class OpenAICompatProvider(BaseProvider):
+    # Bounded class-level cache of discovered structured-output capabilities per base_url
+    # (`{base_url: {model: capability}}`) and per `(base_url, model)` so rebuilding
+    # provider instances per role call does not re-probe `/v1/models` or forget downgrades.
+    _JSON_CAPABILITIES_CACHE: dict[Any, Any] = {}
+    _JSON_CAPABILITIES_MAX = 128
+
     def __init__(self, api_key: str | None, base_url: str, provider_name: str | None = None):
         require_safe_key_destination(api_key, base_url)
         # The catalog slug this provider was built for, used only for the few wire fields a vendor
@@ -917,7 +1022,14 @@ class OpenAICompatProvider(BaseProvider):
         # (only json mode), or None. Probed once for the endpoint and then read per model, because the
         # advertisement is per model — asking whether *any* listed model supported it sent a field a different
         # model rejected. A refused rung is written back here, so the downgrade is remembered for that model.
-        self._json_capabilities: dict[str, str | None] | None = None
+        cached = self._JSON_CAPABILITIES_CACHE.get(self._base_url)
+        self._json_capabilities: dict[str, str | None] | None = cached if isinstance(cached, dict) else None
+
+    @classmethod
+    def _remember_capabilities(cls, base_url: str, caps: dict[str, str | None]) -> None:
+        while len(cls._JSON_CAPABILITIES_CACHE) >= cls._JSON_CAPABILITIES_MAX and base_url not in cls._JSON_CAPABILITIES_CACHE:
+            cls._JSON_CAPABILITIES_CACHE.pop(next(iter(cls._JSON_CAPABILITIES_CACHE)))
+        cls._JSON_CAPABILITIES_CACHE[base_url] = caps
 
     @property
     def supports_tools(self) -> bool:
@@ -955,7 +1067,7 @@ class OpenAICompatProvider(BaseProvider):
             "content-type": "application/json",
         }
         by_name = {t.name: t for t in tools}
-        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
+        async with _http_client(self._base_url, timeout=120) as client:
             data = await post_json(
                 client, url, label="openai_compat", headers=headers,
                 json={
@@ -971,10 +1083,18 @@ class OpenAICompatProvider(BaseProvider):
                     **_tool_call_thinking(self._provider_name),
                 },
             )
+        if not isinstance(data, dict):
+            data = {}
         self._report_usage("openai_compat", data)
-        choices = data.get("choices") or [{}]
-        message = choices[0].get("message") or {}
-        text = str(message.get("content") or "")
+        raw_choices = data.get("choices")
+        choice0 = (
+            raw_choices[0]
+            if isinstance(raw_choices, list) and raw_choices and isinstance(raw_choices[0], dict)
+            else {}
+        )
+        raw_message = choice0.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
+        text = _as_str(message.get("content"))
         calls = [
             ToolCall(c.id, c.name, coerce_arguments(by_name.get(c.name), c.arguments))
             for c in parse_openai_tool_calls(message)
@@ -992,6 +1112,7 @@ class OpenAICompatProvider(BaseProvider):
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
         json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
+        json_mode: bool = True,
     ) -> str:
         if not self._api_key:
             raise ProviderError("missing_api_key", "API key is not set")
@@ -1003,9 +1124,20 @@ class OpenAICompatProvider(BaseProvider):
         # It is opt-in per model because a strict server rejects the field outright (some vLLM versions 400 on
         # response_format) — one broken endpoint must not take every role's replies down. A refusal downgrades
         # that model one rung (schema → object → plain) and is remembered, so the rejected request is paid once.
-        if self._json_capabilities is None:
-            self._json_capabilities = await self._discover_json_capabilities()
-        capability = self._json_capabilities.get(model)
+        # Plain-prose calls (`json_mode=False`) skip discovery and send no `response_format`.
+        capability: str | None = None
+        if json_mode:
+            if self._json_capabilities is None:
+                cached = self._JSON_CAPABILITIES_CACHE.get(self._base_url)
+                if isinstance(cached, dict):
+                    self._json_capabilities = cached
+                else:
+                    self._json_capabilities = await self._discover_json_capabilities()
+                    self._remember_capabilities(self._base_url, self._json_capabilities)
+            if (self._base_url, model) in self._JSON_CAPABILITIES_CACHE:
+                capability = self._JSON_CAPABILITIES_CACHE[(self._base_url, model)]
+            else:
+                capability = self._json_capabilities.get(model)
         payload: dict[str, Any] = {
             "model": model,
             **({"temperature": temperature} if self._local else {}),
@@ -1020,9 +1152,10 @@ class OpenAICompatProvider(BaseProvider):
             # know the field refuses the request rather than silently ignoring it, which is the honest
             # outcome of asking a model for a control it does not advertise.
             payload["reasoning_effort"] = thinking_effort
-        response_format = _response_format(capability, json_schema)
-        if response_format is not None:
-            payload["response_format"] = response_format
+        if json_mode:
+            response_format = _response_format(capability, json_schema)
+            if response_format is not None:
+                payload["response_format"] = response_format
         headers = {
             "Authorization": f"Bearer {self._api_key}",
             "content-type": "application/json",
@@ -1044,11 +1177,11 @@ class OpenAICompatProvider(BaseProvider):
                     return await self.complete(
                         system_prompt, user_prompt, model, temperature, max_tokens,
                         num_ctx=num_ctx, keep_alive=keep_alive, json_schema=json_schema,
-                        thinking_effort=thinking_effort,
+                        thinking_effort=thinking_effort, json_mode=json_mode,
                     )
                 finally:
                     self.on_delta = saved
-        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
+        async with _http_client(self._base_url, timeout=120) as client:
             while True:
                 try:
                     data = await post_json(
@@ -1067,13 +1200,26 @@ class OpenAICompatProvider(BaseProvider):
                     capability = "object" if capability == "schema" else None
                     if self._json_capabilities is not None:
                         self._json_capabilities[model] = capability
+                        self._remember_capabilities(self._base_url, self._json_capabilities)
+                    if (self._base_url, model) in self._JSON_CAPABILITIES_CACHE:
+                        self._JSON_CAPABILITIES_CACHE[(self._base_url, model)] = capability
                     response_format = _response_format(capability, json_schema)
                     if response_format is None:
                         payload.pop("response_format", None)
                     else:
                         payload["response_format"] = response_format
+        if not isinstance(data, dict):
+            data = {}
         self._report_usage("openai_compat", data)
-        return (data.get("choices") or [{}])[0].get("message", {}).get("content") or ""
+        raw_choices = data.get("choices")
+        choice0 = (
+            raw_choices[0]
+            if isinstance(raw_choices, list) and raw_choices and isinstance(raw_choices[0], dict)
+            else {}
+        )
+        raw_message = choice0.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
+        return _as_str(message.get("content"))
 
     async def _discover_json_capabilities(self) -> dict[str, str | None]:
         """Ask /v1/models which structured-output rung each model advertises.
@@ -1091,14 +1237,17 @@ class OpenAICompatProvider(BaseProvider):
         models_url = f"{root}/models"
         found: dict[str, str | None] = {}
         try:
-            async with httpx.AsyncClient(timeout=10, trust_env=trusts_proxy_env(self._base_url)) as client:
+            async with _http_client(self._base_url, timeout=10) as client:
                 resp = await client.get(
                     models_url,
                     headers={"Authorization": f"Bearer {self._api_key}"},
                 )
             if resp.status_code != 200:
                 return found
-            for m in (resp.json() or {}).get("data", []):
+            body = resp.json()
+            raw_models = body.get("data") if isinstance(body, dict) else None
+            models = raw_models if isinstance(raw_models, list) else []
+            for m in models:
                 # An entry shaped differently from the rest is skipped, not fatal: the blanket `except` below
                 # would turn it into "not supported" for every model listed after it.
                 if not isinstance(m, dict) or not isinstance(m.get("id"), str):
@@ -1130,7 +1279,9 @@ class OpenAICompatProvider(BaseProvider):
         url = f"{self._base_url}/chat/completions"
         text = ""
         data: dict[str, Any] = {}
-        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
+        usage_payload: dict[str, Any] | None = None
+        saw_finish_reason = False
+        async with _http_client(self._base_url, timeout=120) as client:
             # Opening the stream is retried like any call; reading it is not (see `open_stream`).
             async with open_stream(
                 client, url, label="openai_compat", headers=headers, json=streaming_body(payload, self._base_url)
@@ -1141,30 +1292,40 @@ class OpenAICompatProvider(BaseProvider):
                             obj = json.loads(chunk)
                         except (ValueError, RecursionError):
                             continue
-                        choices = obj.get("choices") or [{}]
-                        text += choices[0].get("delta", {}).get("content") or ""
+                        if not isinstance(obj, dict):
+                            continue
+                        raw_choices = obj.get("choices")
+                        choice0 = (
+                            raw_choices[0]
+                            if isinstance(raw_choices, list) and raw_choices and isinstance(raw_choices[0], dict)
+                            else {}
+                        )
+                        raw_delta = choice0.get("delta")
+                        delta = raw_delta if isinstance(raw_delta, dict) else {}
+                        text += _as_str(delta.get("content"))
                         if self.on_delta is not None:
                             try:
                                 self.on_delta(text)
                             except Exception:
                                 pass
-                        # Usage arrives in whichever chunk carries it, the
-                        # finish chunk in another. Overwriting `data` wholesale
-                        # loses one when the two don't coincide — merge so the
-                        # usage report sees both.
-                        if obj.get("usage"):
-                            data = {**data, "usage": obj["usage"]}
-                        if choices[0].get("finish_reason"):
-                            # obj wins per-key: the finish chunk's usage (the
-                            # complete one) overrides an earlier partial.
-                            data = {**data, **obj} if data else obj
+                        # Usage arrives in whichever chunk carries it, the finish chunk in another.
+                        # Track usage and finish_reason independently so `"usage": null` on a finish
+                        # chunk never clobbers an earlier usage dict, and an early usage chunk before
+                        # an unexpected EOF never masks a missing finish_reason.
+                        if isinstance(obj.get("usage"), dict) and obj.get("usage"):
+                            usage_payload = obj["usage"]
+                        if choice0.get("finish_reason"):
+                            saw_finish_reason = True
+                            data = {**data, **obj} if data else dict(obj)
                 except httpx.HTTPError as exc:
                     raise _interrupted("openai_compat", text, exc) from exc
-        if not data:
+        if not saw_finish_reason:
             raise ProviderError(
                 "provider_bad_response",
                 "openai_compat stream ended without a finish_reason chunk",
             )
+        if usage_payload is not None:
+            data["usage"] = usage_payload
         self._report_usage("openai_compat", data)
         return text
 
@@ -1204,7 +1365,7 @@ class OllamaProvider(BaseProvider):
         options: dict[str, Any] = {"temperature": temperature, "num_predict": max_tokens}
         if num_ctx is not None:
             options["num_ctx"] = num_ctx
-        async with httpx.AsyncClient(timeout=180, trust_env=trusts_proxy_env(self._base_url)) as client:
+        async with _http_client(self._base_url, timeout=180) as client:
             data = await post_json(
                 client,
                 f"{self._base_url}/api/chat",
@@ -1225,8 +1386,11 @@ class OllamaProvider(BaseProvider):
                     **({"keep_alive": keep_alive} if keep_alive is not None else {}),
                 },
             )
-        message = data.get("message") or {}
-        text = str(message.get("content") or "")
+        if not isinstance(data, dict):
+            data = {}
+        raw_message = data.get("message")
+        message = raw_message if isinstance(raw_message, dict) else {}
+        text = _as_str(message.get("content"))
         calls = [
             ToolCall(c.id, c.name, coerce_arguments(by_name.get(c.name), c.arguments))
             for c in parse_openai_tool_calls(message)
@@ -1249,9 +1413,10 @@ class OllamaProvider(BaseProvider):
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
         json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
+        json_mode: bool = True,
     ) -> str:
-        # `json_schema` is accepted and not sent: this call already sends `format: "json"`, which is Ollama's
-        # object-mode rung, and its schema form is not part of the protocol this engine targets.
+        # `json_schema` is accepted and not sent: when `json_mode` is True this call sends `format: "json"`,
+        # which is Ollama's object-mode rung; plain-prose calls (`json_mode=False`) omit `format` altogether.
         stream = self.on_delta is not None
         # `num_ctx` is the one option here that changes *what the model can
         # see*. Without it Ollama sizes the window from its own default (4096)
@@ -1273,7 +1438,8 @@ class OllamaProvider(BaseProvider):
         # names directly on a model that supports levels. None sends nothing and leaves the model's own
         # default alone.
         think_field = {"think": thinking_effort} if thinking_effort is not None else {}
-        async with httpx.AsyncClient(timeout=180, trust_env=trusts_proxy_env(self._base_url)) as client:
+        format_field = {"format": "json"} if json_mode else {}
+        async with _http_client(self._base_url, timeout=180) as client:
             if not stream:
                 data = await post_json(
                     client,
@@ -1285,8 +1451,8 @@ class OllamaProvider(BaseProvider):
                         "options": options,
                         **keep_alive_field,
                         **think_field,
+                        **format_field,
                         "stream": False,
-                        "format": "json",
                     },
                 )
             else:
@@ -1306,8 +1472,8 @@ class OllamaProvider(BaseProvider):
                         "options": options,
                         **keep_alive_field,
                         **think_field,
+                        **format_field,
                         "stream": True,
-                        "format": "json",
                     },
                 ) as response:
                     try:
@@ -1316,7 +1482,9 @@ class OllamaProvider(BaseProvider):
                             if not line:
                                 continue
                             piece = json.loads(line)
-                            text += piece.get("response", "")
+                            if not isinstance(piece, dict):
+                                continue
+                            text += _as_str(piece.get("response"))
                             try:
                                 self.on_delta(text)  # type: ignore[misc]
                             except Exception:
@@ -1335,12 +1503,14 @@ class OllamaProvider(BaseProvider):
                     raise ProviderError(
                         "provider_bad_response", "ollama stream ended without a done=true chunk"
                     )
+        if not isinstance(data, dict):
+            raise ProviderError("provider_http", "ollama missing response")
         if "response" not in data and not stream:
             raise ProviderError("provider_http", "ollama missing response")
         self._report_usage("ollama", data)
         # In streaming mode the reply is the accumulated text — the done
         # chunk's own "response" field is just the last piece, not the whole.
-        return text if stream else data["response"]
+        return text if stream else _as_str(data.get("response"))
 
 
 class GoogleProvider(BaseProvider):
@@ -1372,7 +1542,7 @@ class GoogleProvider(BaseProvider):
         # wrong is a 400 from someone else's API, not an error in our code.
         url = f"{self._base_url}/models/{model}:generateContent"
         by_name = {t.name: t for t in tools}
-        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
+        async with _http_client(self._base_url, timeout=120) as client:
             data = await post_json(
                 client, url, label="google",
                 json={
@@ -1386,15 +1556,20 @@ class GoogleProvider(BaseProvider):
                 },
                 headers={"x-goog-api-key": self._api_key},
             )
-        candidates = data.get("candidates") or []
+        if not isinstance(data, dict):
+            return ToolReply()
+        self._report_usage("google", data)
+        raw_candidates = data.get("candidates")
+        candidates = [c for c in raw_candidates if isinstance(c, dict)] if isinstance(raw_candidates, list) else []
         if not candidates:
             return ToolReply()
-        parts = candidates[0].get("content", {}).get("parts", [])
-        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+        raw_content = candidates[0].get("content")
+        content = raw_content if isinstance(raw_content, dict) else {}
+        raw_parts = content.get("parts")
+        parts = [p for p in raw_parts if isinstance(p, dict)] if isinstance(raw_parts, list) else []
+        text = "".join(_as_str(p.get("text")) for p in parts if p.get("thought") is not True)
         calls: list[ToolCall] = []
         for index, part in enumerate(parts):
-            if not isinstance(part, dict):
-                continue
             call = part.get("functionCall")
             if not isinstance(call, dict):
                 continue
@@ -1403,12 +1578,11 @@ class GoogleProvider(BaseProvider):
                 continue
             signature = part.get("thoughtSignature")
             calls.append(ToolCall(
-                id=f"call_{index}",
+                id=synth_call_id(index),
                 name=name,
                 arguments=coerce_arguments(by_name.get(name), call.get("args")),
                 signature=signature if isinstance(signature, str) and signature else None,
             ))
-        self._report_usage("google", data)
         reply = coerce_tool_reply(text, calls, tools)
         if reply.text and self.on_delta is not None:
             try:
@@ -1422,15 +1596,18 @@ class GoogleProvider(BaseProvider):
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None,
         json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
+        json_mode: bool = True,
     ) -> str:
         # `json_schema` is accepted and not sent: this protocol's schema field is a separate generation config
         # this adapter does not build, and a reply schema is prompt material here.
         url = f"{self._base_url}/models/{model}:generateContent"
         generation_config: dict[str, Any] = {"maxOutputTokens": max_tokens}
-        if thinking_effort is not None:
-            generation_config["thinkingConfig"] = {
-                "thinkingBudget": _THINKING_BUDGETS[thinking_effort],
-            }
+        if thinking_effort is not None and thinking_effort in _THINKING_BUDGETS and max_tokens >= 1024:
+            budget = min(_THINKING_BUDGETS[thinking_effort], max_tokens // 2)
+            if budget > 0:
+                generation_config["thinkingConfig"] = {
+                    "thinkingBudget": budget,
+                }
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
@@ -1438,17 +1615,23 @@ class GoogleProvider(BaseProvider):
         }
         # The key travels in a header, not the URL: a query-string credential
         # lands in proxy/server access logs, and Google accepts the header form.
-        async with httpx.AsyncClient(timeout=120, trust_env=trusts_proxy_env(self._base_url)) as client:
+        async with _http_client(self._base_url, timeout=120) as client:
             data = await post_json(
                 client, url, label="google", json=payload,
                 headers={"x-goog-api-key": self._api_key},
             )
-            candidates = data.get("candidates") or []
+            if not isinstance(data, dict):
+                return ""
+            self._report_usage("google", data)
+            raw_candidates = data.get("candidates")
+            candidates = [c for c in raw_candidates if isinstance(c, dict)] if isinstance(raw_candidates, list) else []
             if not candidates:
                 return ""
-            parts = candidates[0].get("content", {}).get("parts", [])
-            self._report_usage("google", data)
-            return "".join(p.get("text", "") for p in parts)
+            raw_content = candidates[0].get("content")
+            content = raw_content if isinstance(raw_content, dict) else {}
+            raw_parts = content.get("parts")
+            parts = [p for p in raw_parts if isinstance(p, dict)] if isinstance(raw_parts, list) else []
+            return "".join(_as_str(p.get("text")) for p in parts if p.get("thought") is not True)
 
 
 ENV_KEY_MAP: dict[str, list[str]] = {
@@ -1654,12 +1837,25 @@ class Keychain:
         self._store(ref, api_key)
         return ref
 
+    def _remove_from_file(self, ref: str) -> None:
+        if not self._secrets_path.exists():
+            return
+        with contextlib.suppress(Exception):
+            with self._locked():
+                data = self._read_file(strict=True)
+                if ref in data:
+                    del data[ref]
+                    self._write_file(data)
+
     def _store(self, ref: str, api_key: str) -> None:
         keyring_mod = self._keyring_module()
         if keyring_mod:
             try:
                 keyring_mod.set_password("codify", ref, api_key)
                 self._last_write_backend = "keyring"
+                # Clear any stale copy in secrets.json so a future fallback read
+                # never surfaces an older rotated credential.
+                self._remove_from_file(ref)
                 return
             except Exception:
                 # Keyring present but unusable at write time (locked, no session
@@ -1675,6 +1871,11 @@ class Keychain:
                 self._write_file(data)
         except OSError as exc:
             raise ProviderError("secrets_unwritable", str(exc)) from exc
+        if keyring_mod:
+            # Best-effort remove any stale entry from keyring so it cannot shadow
+            # the newly rotated credential stored in secrets.json.
+            with contextlib.suppress(Exception):
+                keyring_mod.delete_password("codify", ref)
         self._last_write_backend = "file"
 
     def last_write_backend(self) -> str:
@@ -1774,6 +1975,22 @@ class Keychain:
         if provider == "ollama":
             return True
         return bool(self.get_provider_key(provider))
+
+    async def get_async(self, ref: str | None) -> str:
+        """Non-blocking wrapper around `get()` for async callers."""
+        return await asyncio.to_thread(self.get, ref)
+
+    async def get_provider_key_async(self, provider: str) -> str:
+        """Non-blocking wrapper around `get_provider_key()` for async callers."""
+        return await asyncio.to_thread(self.get_provider_key, provider)
+
+    async def set_provider_key_async(self, provider: str, api_key: str) -> None:
+        """Non-blocking wrapper around `set_provider_key()` for async callers."""
+        await asyncio.to_thread(self.set_provider_key, provider, api_key)
+
+    async def delete_provider_key_async(self, provider: str) -> bool:
+        """Non-blocking wrapper around `delete_provider_key()` for async callers."""
+        return await asyncio.to_thread(self.delete_provider_key, provider)
 
 
 class ProviderFactory:

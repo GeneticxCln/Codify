@@ -10,9 +10,9 @@ import { readRejection } from "../rejection.ts";
  */
 export type AgentConfigStore = ReturnType<typeof useAgentConfigs>;
 
-export function useAgentConfigs() {
+export function useAgentConfigs(enabled = true) {
   const [configs, setConfigs] = useState<AgentConfig[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(async () => {
@@ -29,8 +29,9 @@ export function useAgentConfigs() {
   }, []);
 
   useEffect(() => {
+    if (!enabled) return;
     refresh();
-  }, [refresh]);
+  }, [enabled, refresh]);
 
   const update = async (role: AgentRole, patch: AgentConfigPatch): Promise<AgentConfig> => {
     const updated = await tauriInvoke<AgentConfig>("codify_update_agent_config", {

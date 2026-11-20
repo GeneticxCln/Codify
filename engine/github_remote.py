@@ -69,7 +69,11 @@ def parse_remote(url: str) -> GithubRemote | None:
     if text.startswith("git@github.com:"):
         path = text[len("git@github.com:"):]
     else:
-        parsed = urlsplit(text)
+        try:
+            parsed = urlsplit(text)
+            _ = parsed.port
+        except ValueError:
+            return None
         if parsed.scheme not in ("https", "http", "ssh"):
             return None
         if parsed.hostname != "github.com":

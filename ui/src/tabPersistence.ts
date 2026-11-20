@@ -392,7 +392,16 @@ export function layoutFrom(state: TabState): PersistedLayout {
     // The tab that was showing is not coming back. Land on the nearest
     // remembered tab to its left, or the first one if there was none.
     const vanished = state.tabs.findIndex((tab) => tab.id === state.activeId);
-    activeIndex = vanished > 0 ? Math.min(vanished - 1, tabs.length - 1) : 0;
+    if (vanished > 0) {
+      let leftIndex = -1;
+      for (let i = 0; i < kept.length; i++) {
+        if (state.tabs.indexOf(kept[i].tab) < vanished) leftIndex = i;
+        else break;
+      }
+      activeIndex = leftIndex >= 0 ? leftIndex : 0;
+    } else {
+      activeIndex = 0;
+    }
   }
   return { tabs, activeIndex: tabs.length === 0 ? -1 : activeIndex };
 }

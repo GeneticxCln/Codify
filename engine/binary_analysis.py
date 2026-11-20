@@ -287,8 +287,12 @@ def sweep_stale_runs(base: Path | None = None) -> int:
     return removed
 
 
+def _native_cache_tag() -> str:
+    return f"native-i{binary_inspect.INSPECTOR_VERSION}"
+
+
 def _cache_path(sha: str, tag: str) -> Path:
-    safe = re.sub(r"[^0-9A-Za-z.]", "_", tag)
+    safe = re.sub(r"[^0-9A-Za-z.-]", "_", tag)
     return state_dir() / "cache" / f"{sha}-v{EXPORT_VERSION}-{safe}.json"
 
 
@@ -331,14 +335,18 @@ def _read_source(source: Path) -> tuple[str, bytes]:
     return digest.hexdigest(), bytes(body)
 
 
-def _cache_get(path: Path) -> dict[str, Any] | None:
+def _cache_get(path: Path, *, expected_version: int | None = None) -> dict[str, Any] | None:
     try:
         if path.stat().st_size > EXPORT_MAX_BYTES:
             return None
         loaded = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return loaded if isinstance(loaded, dict) else None
+    if not isinstance(loaded, dict):
+        return None
+    if expected_version is not None and loaded.get("version") != expected_version:
+        return None
+    return loaded
 
 
 def _cache_put(path: Path, doc: dict[str, Any]) -> None:
@@ -563,32 +571,42 @@ def analyse(
     except (PathEscapeError, GitMetadataError):
         raise BinaryAnalysisError("bad_input", "That path is not inside this workspace.") from None
     # The cache is keyed by the bytes and by the reader that produced them, so a native answer and a Ghidra answer
-    # for the same file can never be mistaken for one another.
-    sha = _hash_file(source)
-    if native and sha:
-        cached = _cache_get(_cache_path(sha, "native"))
+    # for the same file can never be mistaken for one another. Read once on the native path so a cache miss does not
+    # stream and hash up to 64 MiB from disk a second time.
+    data: bytes | None = None
+    native_tag = _native_cache_tag()
+    if native:
+        sha, data = _read_source(source)
+        cached = _cache_get(_cache_path(sha, native_tag), expected_version=binary_inspect.INSPECTOR_VERSION)
         if cached is not None:
             return {"doc": cached, "sha256": sha, "ghidra": "", "backend": "native", "cached": True}
+    else:
+        sha = _hash_file(source)
     _acquire_run_lock(cancel)
     try:
         if native and sha:
-            cached = _cache_get(_cache_path(sha, "native"))
+            cached = _cache_get(_cache_path(sha, native_tag), expected_version=binary_inspect.INSPECTOR_VERSION)
             if cached is not None:
                 return {"doc": cached, "sha256": sha, "ghidra": "", "backend": "native", "cached": True}
         doc: dict[str, Any] | None = None
         ran_sha = sha
         tag = version = backend = ""
-        if native:
-            ran_sha, data = _read_source(source)
+        if native and data is not None:
             try:
                 doc = binary_inspect.inspect(data, EXPORT_CAPS)
             except binary_inspect.UnsupportedFormat:
                 doc = None
             else:
-                tag, version, backend = "native", "", "native"
+                tag, version, backend = native_tag, "", "native"
+            finally:
+                data = None
         if doc is None:
             install = locate_ghidra(env)
-            cached = _cache_get(_cache_path(ran_sha, install.version)) if ran_sha else None
+            cached = (
+                _cache_get(_cache_path(ran_sha, install.version), expected_version=EXPORT_VERSION)
+                if ran_sha
+                else None
+            )
             if cached is not None:
                 return {
                     "doc": cached, "sha256": ran_sha, "ghidra": install.version,

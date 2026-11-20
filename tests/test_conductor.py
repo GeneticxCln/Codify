@@ -1174,10 +1174,10 @@ class TestToolDialects(unittest.TestCase):
             {"role": "user", "content": "you described it; call the tool"},
         ]
         anthropic = to_anthropic_messages(history)
-        self.assertEqual([m["role"] for m in anthropic], ["user", "user"])
+        self.assertEqual([m["role"] for m in anthropic], ["user"])
         self.assertTrue(all(m["content"] for m in anthropic))
         google = to_google_contents(history)
-        self.assertEqual([turn["role"] for turn in google], ["user", "user"])
+        self.assertEqual([turn["role"] for turn in google], ["user"])
         self.assertTrue(all(turn["parts"] for turn in google))
         self.assertEqual([m["role"] for m in to_openai_messages(history)], ["user", "assistant", "user"])
 

@@ -129,6 +129,7 @@ import threading
 import time
 from pathlib import Path
 from types import FrameType
+from typing import Any
 from urllib.parse import unquote
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
@@ -908,11 +909,14 @@ def run_smoke(
         stream = child.stderr
         if stream is None:  # pragma: no cover — PIPE above guarantees a pipe
             return
-        for raw in stream:
-            sys.stderr.write(raw)
-            sys.stderr.flush()
-            if is_webkit_complaint(raw):
-                webkit_complaints.append(raw.rstrip("\n"))
+        try:
+            for raw in stream:
+                sys.stderr.write(raw)
+                sys.stderr.flush()
+                if is_webkit_complaint(raw):
+                    webkit_complaints.append(raw.rstrip("\n"))
+        except (ValueError, OSError):
+            return
 
     stderr_thread = threading.Thread(target=relay_stderr, daemon=True)
     stderr_thread.start()
@@ -959,25 +963,31 @@ def run_smoke(
         if child.poll() is None:
             child.terminate()
 
-    timer = threading.Timer(timeout_s, deadline)
-    timer.daemon = True
-    timer.start()
-    engage_timer = threading.Timer(ENGAGE_TIMEOUT_S, engagement_deadline)
-    engage_timer.daemon = True
-    engage_timer.start()
-    for name in ("SIGINT", "SIGTERM"):
-        number = getattr(signal, name, None)
-        if number is not None:
-            signal.signal(number, stop)
-    atexit.register(terminate_if_running)
+    timer: threading.Timer | None = None
+    engage_timer: threading.Timer | None = None
+    previous_handlers: dict[int, Any] = {}
+    atexit_registered = False
 
-    # stdout=PIPE above guarantees a pipe, but the type is Optional and an
-    # assert here would need an S101 exemption in pyproject.toml; an
-    # explicit check keeps the lint table smaller for the same guarantee.
-    pipe = child.stdout
-    if pipe is None:
-        raise RuntimeError("the smoke child was launched without a stdout pipe")
     try:
+        timer = threading.Timer(timeout_s, deadline)
+        timer.daemon = True
+        timer.start()
+        engage_timer = threading.Timer(ENGAGE_TIMEOUT_S, engagement_deadline)
+        engage_timer.daemon = True
+        engage_timer.start()
+        for name in ("SIGINT", "SIGTERM"):
+            number = getattr(signal, name, None)
+            if number is not None:
+                previous_handlers[number] = signal.signal(number, stop)
+        atexit.register(terminate_if_running)
+        atexit_registered = True
+
+        # stdout=PIPE above guarantees a pipe, but the type is Optional and an
+        # assert here would need an S101 exemption in pyproject.toml; an
+        # explicit check keeps the lint table smaller for the same guarantee.
+        pipe = child.stdout
+        if pipe is None:
+            raise RuntimeError("the smoke child was launched without a stdout pipe")
         for line in pipe:
             sys.stdout.write(line)
             sys.stdout.flush()
@@ -1008,8 +1018,10 @@ def run_smoke(
     except KeyboardInterrupt:
         pass
     finally:
-        timer.cancel()
-        engage_timer.cancel()
+        if timer is not None:
+            timer.cancel()
+        if engage_timer is not None:
+            engage_timer.cancel()
         if child.poll() is None:
             child.terminate()
             try:
@@ -1019,6 +1031,15 @@ def run_smoke(
                 child.wait()
         else:
             child.wait()
+        stderr_thread.join(timeout=2)
+        for stream in (child.stdout, child.stderr, child.stdin):
+            if stream is not None:
+                stream.close()
+        if atexit_registered:
+            atexit.unregister(terminate_if_running)
+        for number, handler in previous_handlers.items():
+            if handler is not None:
+                signal.signal(number, handler)
 
     painted = state["painted"] is True
     engaged = state["engaged"] is True

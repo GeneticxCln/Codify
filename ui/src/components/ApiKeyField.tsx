@@ -3,18 +3,21 @@ import { Key, Eye, EyeOff } from "lucide-react";
 
 interface ApiKeyFieldProps {
   hasExistingKey?: boolean;
+  value?: string;
   onChange: (val: string) => void;
 }
 
 export const ApiKeyField: React.FC<ApiKeyFieldProps> = ({
   hasExistingKey,
+  value,
   onChange,
 }) => {
   const [show, setShow] = useState(false);
-  const [val, setVal] = useState("");
+  const [localVal, setLocalVal] = useState("");
+  const val = value !== undefined ? value : localVal;
 
   const handleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    setVal(e.target.value);
+    if (value === undefined) setLocalVal(e.target.value);
     onChange(e.target.value);
   };
 

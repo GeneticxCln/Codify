@@ -256,68 +256,147 @@ pub(crate) fn probe(base: &Path, unshare: &Path, path_var: &str) -> Result<(), S
     answer
 }
 
+fn random_u64() -> u64 {
+    let mut bytes = [0u8; 8];
+    // SAFETY: `bytes` is a valid writable 8-byte buffer.
+    let got = unsafe { libc::getrandom(bytes.as_mut_ptr().cast(), bytes.len(), 0) };
+    if got == bytes.len() as isize {
+        return u64::from_ne_bytes(bytes);
+    }
+    use std::collections::hash_map::RandomState;
+    use std::hash::{BuildHasher, Hasher};
+    let mut hasher = RandomState::new().build_hasher();
+    hasher.write_u64(STAGE_SEQ.fetch_add(1, Ordering::SeqCst));
+    hasher.finish()
+}
+
+/// An exclusively created, owner-only throwaway project (`0o700`) used by [`probe_uncached`].
+///
+/// Created with an unpredictable random suffix and `DirBuilder::mode(0o700).create` (never
+/// `create_dir_all`), so a local user on a shared `/tmp` cannot pre-create a symlink at a
+/// predictable path to redirect the probe's write or cleanup.
+pub(crate) struct ProbeDir {
+    dir: PathBuf,
+}
+
+impl ProbeDir {
+    pub(crate) fn create(base: &Path) -> Result<ProbeDir, String> {
+        use std::io::Write;
+        use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
+
+        let mut dir = None;
+        for _ in 0..16 {
+            let candidate = base.join(format!(
+                "codify-machine-probe-{}-{}",
+                std::process::id(),
+                random_u64()
+            ));
+            overlay_safe(&candidate)?;
+            match std::fs::DirBuilder::new().mode(0o700).create(&candidate) {
+                Ok(()) => {
+                    dir = Some(candidate);
+                    break;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+                Err(e) => {
+                    return Err(format!("could not make a throwaway project to try on: {e}"));
+                }
+            }
+        }
+        let Some(dir) = dir else {
+            return Err("could not make a throwaway project to try on: name collision".to_string());
+        };
+        let sub = dir.join("d");
+        let file_path = sub.join("x");
+        let setup = std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&sub)
+            .and_then(|()| {
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(&file_path)
+            })
+            .and_then(|mut f| f.write_all(b"x"));
+        if let Err(e) = setup {
+            let _ = std::fs::remove_file(&file_path);
+            let _ = std::fs::remove_dir(&sub);
+            let _ = std::fs::remove_dir(&dir);
+            return Err(format!("could not make a throwaway project to try on: {e}"));
+        }
+        Ok(ProbeDir { dir })
+    }
+
+    pub(crate) fn dir(&self) -> &Path {
+        &self.dir
+    }
+
+    /// Remove only the named entries this `ProbeDir` created, never recursively.
+    pub(crate) fn release(self) {
+        let _ = std::fs::remove_file(self.dir.join("d/x"));
+        let _ = std::fs::remove_dir(self.dir.join("d"));
+        let _ = std::fs::remove_dir(&self.dir);
+    }
+}
+
 pub(crate) fn probe_uncached(base: &Path, unshare: &Path, path_var: &str) -> Result<(), String> {
     use std::process::{Command, Stdio};
     let stage = Stage::create(base)?;
-    let lower = base.join(format!(
-        "codify-machine-probe-{}-{}",
-        std::process::id(),
-        STAGE_SEQ.fetch_add(1, Ordering::SeqCst)
-    ));
-    let made = std::fs::create_dir_all(lower.join("d"))
-        .and_then(|()| std::fs::write(lower.join("d/x"), b"x"));
-    let outcome = made
-        .map_err(|e| format!("could not make a throwaway project to try on: {e}"))
-        .and_then(|()| {
-            overlay_safe(&lower)?;
-            if lower.to_string_lossy().contains('\'') || stage.dir().to_string_lossy().contains('\'') {
-                return Err("its path contains a quote".to_string());
+    let probe_dir = match ProbeDir::create(base) {
+        Ok(p) => p,
+        Err(why) => {
+            stage.release();
+            return Err(why);
+        }
+    };
+    let lower = probe_dir.dir();
+    let outcome = (|| -> Result<(), String> {
+        overlay_safe(lower)?;
+        if lower.to_string_lossy().contains('\'') || stage.dir().to_string_lossy().contains('\'') {
+            return Err("its path contains a quote".to_string());
+        }
+        let merged = stage.merged();
+        let check = format!(
+            "rm -r '{m}/d' && mkdir '{m}/d' && test -z \"$(ls -A '{m}/d')\" && test -f '{l}/d/x'",
+            m = merged.display(),
+            l = lower.display()
+        );
+        let mut args: Vec<String> = UNSHARE_FLAGS.iter().map(|s| s.to_string()).collect();
+        args.extend(
+            ["/bin/sh", "-c", MOUNT_SCRIPT, "sh"]
+                .iter()
+                .map(|s| s.to_string()),
+        );
+        args.push(stage.dir().to_string_lossy().into_owned());
+        args.push((8u64 * 1024 * 1024).to_string());
+        args.push(lower.to_string_lossy().into_owned());
+        args.extend(["/bin/sh".into(), "-c".into(), check]);
+        let out = Command::new(unshare)
+            .args(&args)
+            .env_clear()
+            .env("PATH", path_var)
+            .stdin(Stdio::null())
+            .output()
+            .map_err(|e| format!("could not run unshare: {e}"))?;
+        if out.status.success() {
+            return Ok(());
+        }
+        let said = String::from_utf8_lossy(&out.stderr);
+        let first = said.lines().next().unwrap_or("").trim();
+        Err(match out.status.code() {
+            Some(MOUNT_FAILED) => {
+                format!("this system will not mount an overlay without privilege ({first})")
             }
-            let merged = stage.merged();
-            let check = format!(
-                "rm -r '{m}/d' && mkdir '{m}/d' && test -z \"$(ls -A '{m}/d')\" && test -f '{l}/d/x'",
-                m = merged.display(),
-                l = lower.display()
-            );
-            let mut args: Vec<String> = UNSHARE_FLAGS.iter().map(|s| s.to_string()).collect();
-            args.extend(
-                ["/bin/sh", "-c", MOUNT_SCRIPT, "sh"]
-                    .iter()
-                    .map(|s| s.to_string()),
-            );
-            args.push(stage.dir().to_string_lossy().into_owned());
-            args.push((8u64 * 1024 * 1024).to_string());
-            args.push(lower.to_string_lossy().into_owned());
-            args.extend(["/bin/sh".into(), "-c".into(), check]);
-            let out = Command::new(unshare)
-                .args(&args)
-                .env_clear()
-                .env("PATH", path_var)
-                .stdin(Stdio::null())
-                .output()
-                .map_err(|e| format!("could not run unshare: {e}"))?;
-            if out.status.success() {
-                return Ok(());
-            }
-            let said = String::from_utf8_lossy(&out.stderr);
-            let first = said.lines().next().unwrap_or("").trim();
-            Err(match out.status.code() {
-                Some(MOUNT_FAILED) => format!(
-                    "this system will not mount an overlay without privilege ({first})"
-                ),
-                Some(96) => format!("this system will not mount a tmpfs without privilege ({first})"),
-                Some(_) => format!(
-                    "an overlay mounted here but cannot replace a directory, which is what \
-                     deleting and recreating one needs ({first})"
-                ),
-                None => "the probe was stopped by a signal".to_string(),
-            })
-        });
-    // The probe's own leftovers, removed one named path at a time and never recursively: the two files and
-    // directories it made, then the empty stage.
-    let _ = std::fs::remove_file(lower.join("d/x"));
-    let _ = std::fs::remove_dir(lower.join("d"));
-    let _ = std::fs::remove_dir(&lower);
+            Some(96) => format!("this system will not mount a tmpfs without privilege ({first})"),
+            Some(_) => format!(
+                "an overlay mounted here but cannot replace a directory, which is what \
+                 deleting and recreating one needs ({first})"
+            ),
+            None => "the probe was stopped by a signal".to_string(),
+        })
+    })();
+    probe_dir.release();
     stage.release();
     outcome
 }

@@ -451,7 +451,7 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
             _stop_goal(app, goal_id)
         pending = [t for gid in driven for t in _GOAL_TASKS.get(gid, ()) if not t.done()]
         if pending:
-            await asyncio.wait(pending, timeout=5)
+            await asyncio.wait(pending, timeout=4)
         # Only the goals this process actually drove. A second engine sharing the state directory is still
         # serving its own goals, and this shutdown is not evidence that they ended.
         # The owner of the state directory may repair every goal still claiming to run — it is the only
@@ -835,7 +835,7 @@ async def runtime_capabilities() -> dict[str, Any]:
     No request state: the answer is a property of the process, so it is the same
     every call and worth having even when the gate is healthy.
     """
-    return capabilities.capability_report()
+    return await asyncio.to_thread(capabilities.capability_report)
 
 
 def _bridge(request: Request) -> WebviewBridge:
@@ -1937,8 +1937,17 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
         else:
             raise ApiError(400, "unknown_setting", f"unknown engine setting: {key}")
     out: dict[str, Any] = {}
-    for key in body:
-        out[key] = settings.set_int(key, int_values[key]) if key in int_values else settings.set_str(key, string_values[key])
+    try:
+        for key in body:
+            out[key] = (
+                settings.set_int(key, int_values[key], commit=False)
+                if key in int_values
+                else settings.set_str(key, string_values[key], commit=False)
+            )
+        settings._db.commit()
+    except BaseException:
+        settings._db.rollback()
+        raise
     if "laya_checkpoint" in body:
         # Read when the SDK next loads. Reload now so the save takes effect without a restart; the
         # thread may download a checkpoint, so the route must not await it. Never raises.
@@ -2674,8 +2683,8 @@ async def get_goal_usage(goal_id: str, request: Request) -> dict[str, Any]:
     An in-flight goal reports its totals up to *now* — the snapshot grows as
     the run spends, matching how the audit endpoint snapshots a live run.
     """
-    request.app.state.goals.get(goal_id)  # 404 if unknown
-    events = request.app.state.goals.events_after(goal_id, 0)
+    await asyncio.to_thread(request.app.state.goals.get, goal_id)  # 404 if unknown
+    events = await asyncio.to_thread(request.app.state.goals.events_after, goal_id, 0)
     usage = _usage_from_events(events)
     parallel = _parallel_peak_from_events(events)
     return {
@@ -2764,9 +2773,9 @@ async def get_goal_audit(goal_id: str, request: Request) -> dict[str, Any]:
     transcript renders; this is the machine-readable form of the same story.
     """
     goals = request.app.state.goals
-    goal = goals.get(goal_id)  # 404 if unknown
-    events = goals.events_after(goal_id, 0)
-    steps = {s.id: s for s in goals.steps(goal_id)}
+    goal = await asyncio.to_thread(goals.get, goal_id)  # 404 if unknown
+    events = await asyncio.to_thread(goals.events_after, goal_id, 0)
+    steps = {s.id: s for s in await asyncio.to_thread(goals.steps, goal_id)}
 
     def step_label(step_id: str | None) -> str | None:
         if not step_id or step_id not in steps:
@@ -3300,9 +3309,9 @@ async def get_goal_trace(goal_id: str, request: Request) -> dict[str, Any]:
     output about the user's code, and the route that returns it all should not
     be the one a panel opens on load.
     """
-    request.app.state.goals.get(goal_id)  # 404 if unknown
+    await asyncio.to_thread(request.app.state.goals.get, goal_id)  # 404 if unknown
     traces: TraceService = request.app.state.traces
-    return traces.summary(goal_id)
+    return await asyncio.to_thread(traces.summary, goal_id)
 
 
 @app.delete("/goals/{goal_id}/trace")
@@ -3393,8 +3402,8 @@ async def goal_events(
     goal_id: str, request: Request, after: int = Query(0, ge=SQLITE_INT_MIN, le=SQLITE_INT_MAX),
 ) -> list[Event]:
     goals: GoalService = request.app.state.goals
-    goals.get(goal_id)
-    return goals.events_after(goal_id, after)
+    await asyncio.to_thread(goals.get, goal_id)
+    return await asyncio.to_thread(goals.events_after, goal_id, after)
 
 
 @app.post("/goals/{goal_id}/start")
@@ -3826,19 +3835,20 @@ async def ws_engine(websocket: WebSocket) -> None:
             # out of the gather rather than being collected as a result.
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)
+            # Inspect `receiver` first so when both tasks complete in the same
+            # tick, any disconnect exception on `receiver` is always retrieved
+            # and we exit before writing to a closed socket.
+            if receiver in done:
+                if receiver.cancelled() or receiver.exception() is not None:
+                    if getter in done and not getter.cancelled():
+                        _ = getter.exception()
+                    break
+                _ = receiver.result()
             if getter in done:
+                if getter.cancelled() or getter.exception() is not None:
+                    break
                 await websocket.send_text(getter.result())
                 continue
-            # The receive side finished first. That is either a client frame this
-            # channel has no use for, or the peer going away — and the two must
-            # not be confused: calling `receive` again on a socket that has already
-            # delivered its disconnect raises, so a loop that treated both as
-            # "ignore it and carry on" would spin on the exception forever instead
-            # of noticing the client left.
-            if receiver.cancelled() or receiver.exception() is not None:
-                break
-            # A client frame. Ignored — the channel is one-directional — and the
-            # loop continues, because a client that can send one can still receive.
             continue
     except WebSocketDisconnect:
         pass
@@ -3883,7 +3893,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str, after: int = 0) -> None:
     # an unauthenticated peer can't probe goal ids by watching which close code
     # comes back (4401 before auth, 4404 after).
     try:
-        websocket.app.state.goals.get(goal_id)
+        await asyncio.to_thread(websocket.app.state.goals.get, goal_id)
     except ApiError:
         await _close_quietly(websocket, 4404)
         return
@@ -3901,7 +3911,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str, after: int = 0) -> None:
     try:
         while True:
             try:
-                websocket.app.state.goals.get(goal_id)
+                await asyncio.to_thread(websocket.app.state.goals.get, goal_id)
             except ApiError:
                 await _close_quietly(websocket, 4404)
                 return
@@ -3911,10 +3921,13 @@ async def ws_goal(websocket: WebSocket, goal_id: str, after: int = 0) -> None:
             # the next tick, which is 250 ms away — the counter that used to
             # stand here counted misses and then reset itself without ever
             # changing what the loop did.
-            batch = websocket.app.state.goals.events_after(goal_id, after, limit=500)
+            batch = await asyncio.to_thread(
+                websocket.app.state.goals.events_after, goal_id, after, limit=500,
+            )
             for event in batch:
                 await websocket.send_text(event.model_dump_json())
                 after = event.sequence
+            after = max(after, getattr(batch, "last_sequence", after))
             # The wait for the next tick is a wait on the receiver, so a peer leaving ends the loop
             # at once instead of at the next failed send.
             done, _ = await asyncio.wait({receiver}, timeout=0.25)

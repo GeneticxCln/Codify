@@ -107,10 +107,24 @@ export const SplitPanes: React.FC<SplitPanesProps> = ({
   const dragging = useRef(false);
   const lastRatio = useRef(ratio);
   const [engaged, setEngaged] = useState(false);
+  const [rowWidth, setRowWidth] = useState(0);
   const scale = useUiScale();
   const rootPx = (16 * scale) / 100;
-  const rowPx = (): number => rowRef.current?.getBoundingClientRect().width ?? 0;
-  const clamp = (r: number): number => clampRatio(r, rowPx(), rootPx);
+  React.useEffect(() => {
+    const el = rowRef.current;
+    if (!el) return;
+    const sync = (): void => {
+      const next = el.getBoundingClientRect().width;
+      setRowWidth((prev) => (prev === next ? prev : next));
+    };
+    sync();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(sync);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
+  const rowPx = (): number => rowRef.current?.getBoundingClientRect().width ?? rowWidth;
+  const clamp = (r: number, width = rowPx()): number => clampRatio(r, width, rootPx);
 
   const move = (r: number, commit: boolean): void => {
     lastRatio.current = r;
@@ -157,8 +171,8 @@ export const SplitPanes: React.FC<SplitPanesProps> = ({
         aria-orientation="vertical"
         aria-label="Resize panes"
         aria-valuenow={Math.round(ratio * 100)}
-        aria-valuemin={Math.round(clamp(0) * 100)}
-        aria-valuemax={Math.round(clamp(1) * 100)}
+        aria-valuemin={Math.round(clamp(0, rowWidth) * 100)}
+        aria-valuemax={Math.round(clamp(1, rowWidth) * 100)}
         tabIndex={0}
         title="Drag to resize; double-click to even out"
         onPointerDown={(event) => {
@@ -174,7 +188,7 @@ export const SplitPanes: React.FC<SplitPanesProps> = ({
           if (!dragging.current) return;
           const box = rowRef.current?.getBoundingClientRect();
           if (!box || !(box.width > 0)) return;
-          move(clamp((event.clientX - box.left) / box.width), false);
+          move(clamp((event.clientX - box.left) / box.width, box.width), false);
         }}
         onPointerUp={end}
         onPointerCancel={end}

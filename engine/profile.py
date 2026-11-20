@@ -210,10 +210,13 @@ class ProfileTools:
     def _known_secrets(self) -> tuple[str, ...]:
         """Every credential this machine holds, by value, so an echo of one in a prompt or a lesson is found."""
         slugs = set(BUILTIN_PROVIDERS)
+        role_refs: set[str] = set()
         for cfg in self.registry.list_configs():
             slugs.add(cfg.provider)
             if cfg.fallback_provider:
                 slugs.add(cfg.fallback_provider)
+            if cfg.api_key_ref:
+                role_refs.add(cfg.api_key_ref)
         found: list[str] = []
         for slug in sorted(slugs):
             value = ""
@@ -223,16 +226,15 @@ class ProfileTools:
                 value = ""
             if value:
                 found.append(value)
-        # An MCP server's credential is the other secret the engine holds (docs/00 §6.10). It lives in the same store
-        # under `mcp/<id>`, and a prompt, lesson or note that quoted it was exported verbatim unless it happened to be
-        # spelled `Bearer ...`.
+        # Per-role API key overrides and MCP server credentials live in the same keychain store by ref
+        # (docs/00 §6.10), so gather both and scrub any literal echo from prompts, skills, memory, or notes.
         try:
-            refs = [str(r["api_key_ref"]) for r in self._db.execute(
+            mcp_refs = [str(r["api_key_ref"]) for r in self._db.execute(
                 "SELECT api_key_ref FROM mcp_servers WHERE api_key_ref != ''"
             ).fetchall()]
         except sqlite3.Error:
-            refs = []
-        for ref in refs:
+            mcp_refs = []
+        for ref in sorted(role_refs | set(mcp_refs)):
             try:
                 secret = self.keychain.get(ref)
             except Exception:  # noqa: BLE001 — a keychain that cannot answer has nothing to scrub with

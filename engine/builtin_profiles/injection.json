@@ -67,7 +67,7 @@
         "py"
       ],
       "where": "code",
-      "pattern": "\\bsubprocess\\.(?:run|call|check_call|check_output|Popen)\\s*\\([^)]*\\bshell\\s*=\\s*True",
+      "pattern": "\\bsubprocess\\.(?:run|call|check_call|check_output|Popen)\\s*\\((?:[^()\\n]|\\([^()\\n]*\\)){0,300}\\bshell\\s*=\\s*True",
       "why": "A string run with shell=True is parsed by a shell, so interpolated input can add commands.",
       "fix": "Pass the arguments as a list and drop shell=True.",
       "examples": {
@@ -90,7 +90,7 @@
         "py"
       ],
       "where": "strings",
-      "pattern": "\\.execute(?:many)?\\s*\\(\\s*(?:f[\\\"']|[\\\"'][^\\\"']*[\\\"']\\s*(?:%|\\+|\\.format\\())",
+      "pattern": "\\.execute(?:many)?\\s*\\(\\s*(?:f[\\\"']|(?:\\\"[^\\\"\\n]*\\\"|'[^'\\n]*')\\s*(?:%|\\+|\\.format\\())",
       "why": "Values spliced into the text of a statement are parsed as SQL, which is how injection works.",
       "fix": "Pass values as parameters: `cur.execute(\"... WHERE id = %s\", (value,))`.",
       "examples": {
@@ -258,7 +258,7 @@
         "cjs"
       ],
       "where": "strings",
-      "pattern": "\\.(?:query|execute|raw)\\s*\\(\\s*(?:`[^`]*\\$\\{|[\\\"'][^\\\"']*[\\\"']\\s*\\+)",
+      "pattern": "\\.(?:query|execute|raw)\\s*\\(\\s*(?:`[^`]{0,500}\\$\\{|(?:\\\"[^\\\"\\n]*\\\"|'[^'\\n]*')\\s*\\+)",
       "why": "Values spliced into the text of a statement are parsed as SQL.",
       "fix": "Use placeholders and pass the values separately.",
       "examples": {
@@ -304,7 +304,7 @@
         "go"
       ],
       "where": "strings",
-      "pattern": "\\.(?:Query|QueryRow|Exec)(?:Context)?\\s*\\([^)]*\\bfmt\\.Sprintf\\s*\\(",
+      "pattern": "\\.(?:Query|QueryRow|Exec)(?:Context)?\\s*\\((?:[^()\\n]|\\([^()\\n]*\\)){0,300}\\bfmt\\.Sprintf\\s*\\(",
       "why": "Values formatted into the statement are parsed as SQL.",
       "fix": "Use placeholders and pass the values as arguments.",
       "examples": {

@@ -12,8 +12,12 @@
 set -eu
 
 here=$(dirname -- "$(readlink -f -- "$0")")
-root=${CODIFY_ROOT:-$(dirname -- "$here")}
+here_root=$(dirname -- "$here")
+root=${CODIFY_ROOT:-$here_root}
 app="$root/src-tauri/target/release/codify-desktop"
+if [ ! -x "$app" ] && [ -x "$here_root/src-tauri/target/release/codify-desktop" ]; then
+  app="$here_root/src-tauri/target/release/codify-desktop"
+fi
 
 if [ ! -x "$app" ]; then
   echo "codify: no release build at $app" >&2

@@ -204,6 +204,7 @@ async fn stop_engine(shared: &SharedEngineState) -> EngineStop {
     if !engine.signal(libc::SIGTERM) {
         // No such process: it exited between the id being read and the signal being
         // sent, which is the ordinary state of an engine that has already crashed.
+        let _ = engine_reported_gone(shared);
         return EngineStop::Graceful;
     }
     println!(
@@ -211,7 +212,7 @@ async fn stop_engine(shared: &SharedEngineState) -> EngineStop {
         grace.as_secs_f64()
     );
     let state = shared.clone();
-    await_exit(
+    let outcome = await_exit(
         grace,
         || !engine_has_gone(engine.alive(), engine_reported_gone(&state)),
         |nap| Box::pin(tokio::time::sleep(nap)),
@@ -219,7 +220,16 @@ async fn stop_engine(shared: &SharedEngineState) -> EngineStop {
             let _ = engine.signal(libc::SIGKILL);
         },
     )
-    .await
+    .await;
+    if outcome == EngineStop::Killed {
+        for _ in 0..10 {
+            if engine_reported_gone(shared) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    }
+    outcome
 }
 
 /// Whether the engine is gone, by either of the two things that know.
@@ -260,14 +270,13 @@ async fn bounded_lock(
 
 /// How long to let the engine take, from what it announced on the handshake.
 ///
-/// `announced` is already filtered by the parser (finite, positive), which is what
-/// makes `from_secs_f64` safe here: it panics on a negative or non-finite value, and
-/// the one place that could feed it garbage is the one place that cannot.
+/// Uses `Duration::try_from_secs_f64` and `saturating_add` so even an
+/// out-of-range or non-finite value can never panic here.
 fn stop_grace(announced: Option<f64>) -> std::time::Duration {
-    match announced {
-        Some(seconds) => std::time::Duration::from_secs_f64(seconds) + STOP_GRACE_SLACK,
-        None => DEFAULT_STOP_GRACE,
-    }
+    announced
+        .and_then(|seconds| std::time::Duration::try_from_secs_f64(seconds).ok())
+        .map(|d| d.saturating_add(STOP_GRACE_SLACK))
+        .unwrap_or(DEFAULT_STOP_GRACE)
 }
 
 /// Wait out the grace, escalating only if the engine is still there at the end.
@@ -302,18 +311,31 @@ async fn await_exit(
     }
 }
 
-/// Whether the stdout reader has already seen the engine's pipe close.
+/// Whether the engine child process has exited (either already cleared on stdout EOF or
+/// reaped directly via `child.try_wait()`).
 ///
-/// The reader watches stdout for the life of the process and clears the connection
-/// info at EOF, so "no token, no port" means the process is gone — the second of
-/// the two answers [`engine_has_gone`] combines. It is a `try_lock` because this is
-/// called from the wait loop: it must never be the thing that makes the wait slow,
-/// and a lock it cannot take is a signal it does not have rather than one to wait
-/// for.
+/// Checking `state.token.is_none() && state.port.is_none()` alone was wrong before the boot
+/// handshake completed: a still-booting engine has `token == None` and `port == None` while
+/// its `child` is alive, so `stop_engine` treated it as already gone on poll 0 and skipped
+/// waiting or escalating to `SIGKILL`. Calling `child.try_wait()` also reaps the child as
+/// soon as it exits so it never remains a `<defunct>` zombie answering `kill(pid, 0)`.
 fn engine_reported_gone(shared: &SharedEngineState) -> bool {
-    shared
-        .try_lock()
-        .is_ok_and(|state| state.token.is_none() && state.port.is_none())
+    let Ok(mut state) = shared.try_lock() else {
+        return false;
+    };
+    let Some(child) = state.child.as_mut() else {
+        return true;
+    };
+    match child.try_wait() {
+        Ok(Some(_)) | Err(_) => {
+            state.child = None;
+            state.token = None;
+            state.port = None;
+            state.hard_exit_s = None;
+            true
+        }
+        Ok(None) => false,
+    }
 }
 
 /// The engine process, held by something that stays true after the pid is reused.
@@ -525,7 +547,11 @@ fn watch_render_starvation(app: tauri::AppHandle) {
         let started = std::time::Instant::now();
         for _ in 0..WINDOW_SAMPLES {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-            let Some(ticks) = render_cpu_ticks() else {
+            let Some(ticks) = tauri::async_runtime::spawn_blocking(render_cpu_ticks)
+                .await
+                .ok()
+                .flatten()
+            else {
                 continue;
             };
             let Some(prev) = previous.replace(ticks) else {
@@ -536,10 +562,10 @@ fn watch_render_starvation(app: tauri::AppHandle) {
             }
             // A window nobody can see is not starving anybody: a minimised or
             // fully-occluded window still repaints, but there is no user under
-            // the burn. `unwrap_or(true)`: if the answer cannot be had, count
-            // the sample — a false positive needs the user to see it anyway.
+            // the burn. `get_window`, not `get_webview_window`: the latter returns
+            // `None` whenever a browser child webview is seated in the main window.
             let visible = app
-                .get_webview_window("main")
+                .get_window("main")
                 .and_then(|w| w.is_visible().ok())
                 .unwrap_or(true);
             let read = render_watchdog::sample(prev, ticks);
@@ -633,6 +659,45 @@ fn oldest_web_process(children: &[(u32, u64)]) -> Option<u32> {
         .map(|(pid, _)| *pid)
 }
 
+/// Find all `WebKitWebProcess` descendants of `root` in a snapshot of `(pid, ppid, comm, started)`.
+///
+/// Walks the full descendant tree (breadth-first, cycle-safe) rather than only direct children
+/// (`ppid == root`), because WebKitGTK's bubblewrap sandbox spawns intermediate `bwrap` helper
+/// processes between the shell and `WebKitWebProcess`.
+fn web_process_descendants(root: u32, procs: &[(u32, u32, String, u64)]) -> Vec<(u32, u64)> {
+    use std::collections::{HashMap, HashSet};
+    let mut children_by_ppid: HashMap<u32, Vec<usize>> = HashMap::new();
+    for (idx, &(_, ppid, _, _)) in procs.iter().enumerate() {
+        children_by_ppid.entry(ppid).or_default().push(idx);
+    }
+    let mut queue = vec![root];
+    let mut seen: HashSet<u32> = HashSet::from([root]);
+    let mut at = 0;
+    let mut web_procs = Vec::new();
+    while at < queue.len() {
+        let current = queue[at];
+        at += 1;
+        if let Some(indices) = children_by_ppid.get(&current) {
+            for &idx in indices {
+                let (pid, _, ref comm, started) = procs[idx];
+                if seen.insert(pid) {
+                    queue.push(pid);
+                    // `comm` is capped at 15 bytes, so "WebKitWebProcess" arrives as
+                    // "WebKitWebProces". Match the prefix rather than the full name.
+                    if comm.starts_with("WebKitWebProces") {
+                        web_procs.push((pid, started));
+                    }
+                }
+            }
+        }
+    }
+    web_procs
+}
+
+/// Cached PID of the main window's `WebKitWebProcess`, avoiding repeated full `/proc` scans
+/// on every probe sample once the main web process has started.
+static MAIN_WEB_PROCESS_PID: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 /// The CPU ticks of the main window's WebKit web process.
 ///
 /// The shell's own main thread is not the only party that pays for a
@@ -641,17 +706,29 @@ fn oldest_web_process(children: &[(u32, u64)]) -> Option<u32> {
 /// choose itself — the **web process** is the one that burns a core painting a
 /// backdrop, while the shell sits at a few percent. A render measurement that
 /// watched only the shell called that window affordable and let the animation
-/// run. Reading the web process's threads costs one `/proc` scan and catches the
-/// path the user is actually on.
+/// run.
 ///
-/// Only the earliest-started WebKit child is counted. Browser tabs each get their
+/// Only the earliest-started WebKit descendant is counted. Browser tabs each get their
 /// own web process, created when the tab is opened; summing every child made a
 /// busy tab — or a restored terminal — a verdict about the main window's theme.
 fn web_process_cpu_ticks(parent: u32) -> u64 {
+    let is_self = parent == std::process::id();
+    if is_self {
+        let cached = MAIN_WEB_PROCESS_PID.load(Ordering::Relaxed);
+        if cached != 0 {
+            if let Ok(stat) = std::fs::read_to_string(format!("/proc/{cached}/stat")) {
+                if stat_identity(&stat).is_some_and(|(comm, _)| comm.starts_with("WebKitWebProces"))
+                {
+                    return process_cpu_ticks(cached);
+                }
+            }
+            MAIN_WEB_PROCESS_PID.store(0, Ordering::Relaxed);
+        }
+    }
     let Ok(entries) = std::fs::read_dir("/proc") else {
         return 0;
     };
-    let mut children: Vec<(u32, u64)> = Vec::new();
+    let mut procs: Vec<(u32, u32, String, u64)> = Vec::new();
     for entry in entries.flatten() {
         let Some(pid) = entry
             .file_name()
@@ -666,15 +743,17 @@ fn web_process_cpu_ticks(parent: u32) -> u64 {
         let Some((comm, ppid)) = stat_identity(&stat) else {
             continue;
         };
-        // `comm` is capped at 15 bytes, so "WebKitWebProcess" arrives as
-        // "WebKitWebProces". Match the prefix rather than the full name.
-        if ppid == parent && comm.starts_with("WebKitWebProces") {
-            if let Some(started) = stat_start_time(&stat) {
-                children.push((pid, started));
-            }
-        }
+        let started = stat_start_time(&stat).unwrap_or(u64::MAX);
+        procs.push((pid, ppid, comm.to_string(), started));
     }
-    oldest_web_process(&children).map_or(0, process_cpu_ticks)
+    let children = web_process_descendants(parent, &procs);
+    let Some(oldest) = oldest_web_process(&children) else {
+        return 0;
+    };
+    if is_self {
+        MAIN_WEB_PROCESS_PID.store(oldest, Ordering::Relaxed);
+    }
+    process_cpu_ticks(oldest)
 }
 
 /// What this window's rendering costs, in CPU ticks: the shell's main thread
@@ -700,8 +779,22 @@ fn render_cpu_ticks() -> Option<u64> {
 /// for. `None` when `/proc` cannot be read, and the page then starts the loop as
 /// it always did rather than guessing.
 #[tauri::command]
-fn codify_render_cpu_ms() -> Option<u64> {
-    render_cpu_ticks().map(render_watchdog::cpu_millis)
+async fn codify_render_cpu_ms() -> Option<u64> {
+    tauri::async_runtime::spawn_blocking(render_cpu_ticks)
+        .await
+        .ok()
+        .flatten()
+        .map(render_watchdog::cpu_millis)
+}
+
+/// Pure helper for [`dmabuf_renderer_disabled`]: checks both `WEBKIT_DISABLE_DMABUF_RENDERER`
+/// and `WEBKIT_DISABLE_COMPOSITING_MODE` for `"1"` or `"true"`.
+fn dmabuf_renderer_disabled_from(
+    dmabuf: Option<&std::ffi::OsStr>,
+    compositing: Option<&std::ffi::OsStr>,
+) -> bool {
+    let is_disabled = |v: &std::ffi::OsStr| v == "1" || v == "true";
+    dmabuf.is_some_and(is_disabled) || compositing.is_some_and(is_disabled)
 }
 
 /// Whether this shell was launched on WebKit's software rasteriser.
@@ -718,15 +811,18 @@ fn codify_render_cpu_ms() -> Option<u64> {
 /// launch, not a fact about a page. `target_os = "linux"` because the setting
 /// this mirrors is only applied there; on another platform the variable is not
 /// the shell's signal and the answer is false.
-/// Whether WebKit was launched with its dma-buf renderer disabled.
+/// Whether WebKit was launched with its dma-buf renderer or compositing mode disabled.
 ///
-/// WebKit reads the variable as `1`; `0` means "leave it on", not "the variable is
+/// WebKit reads the variable as `1` (or `true`); `0` means "leave it on", not "the variable is
 /// present". This used to be tested for presence here while the browser diagnostic
 /// accepted only `1`, so `=0` was both disabled and enabled depending on who asked.
 /// One function, so the three answers cannot drift apart again.
 fn dmabuf_renderer_disabled() -> bool {
     cfg!(target_os = "linux")
-        && std::env::var("WEBKIT_DISABLE_DMABUF_RENDERER").is_ok_and(|value| value == "1")
+        && dmabuf_renderer_disabled_from(
+            std::env::var_os("WEBKIT_DISABLE_DMABUF_RENDERER").as_deref(),
+            std::env::var_os("WEBKIT_DISABLE_COMPOSITING_MODE").as_deref(),
+        )
 }
 
 #[tauri::command]
@@ -860,6 +956,10 @@ pub struct AgentConfig {
     // serde drops it from every config the settings screen reads back.
     #[serde(default)]
     pub thinking_effort: Option<String>,
+    #[serde(default)]
+    pub num_ctx: Option<u32>,
+    #[serde(default)]
+    pub keep_alive: Option<String>,
     // The role's second target. These have to be here, not just in the engine's
     // schema: this struct is what deserializes the frontend's patch, so a field
     // missing from it is dropped silently — the card would say "Saved" about a
@@ -912,6 +1012,10 @@ pub struct AgentConfigPatch {
         deserialize_with = "deserialize_clearable"
     )]
     pub thinking_effort: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub num_ctx: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub keep_alive: Option<String>,
     // Removing a fallback sends an empty provider rather than null: through this
     // struct a `null` and an absent field are the same thing, and "no fallback"
     // must be distinguishable from "leave it alone". The engine reads an empty
@@ -982,6 +1086,25 @@ async fn check_engine(resp: reqwest::Response) -> Result<reqwest::Response, Stri
     Err(format!("engine returned {status}: {body}"))
 }
 
+/// Validate `workspace_id` before interpolating it into a URL path segment.
+///
+/// Rejects empty strings, overly long IDs, path traversal (`..`, `/`, `\`), query/fragment/percent
+/// metacharacters (`?`, `#`, `%`), whitespace, and non-ASCII or control characters so a malformed ID
+/// can never escape `/workspaces/{workspace_id}` into another authenticated engine route.
+fn valid_workspace_id(workspace_id: &str) -> Result<&str, String> {
+    if workspace_id.is_empty() || workspace_id.len() > 64 {
+        return Err(format!("invalid workspace id: {workspace_id:?}"));
+    }
+    if workspace_id.contains("..")
+        || !workspace_id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
+    {
+        return Err(format!("invalid workspace id: {workspace_id:?}"));
+    }
+    Ok(workspace_id)
+}
+
 /// A registered workspace's root directory, asked for rather than supplied.
 ///
 /// This is the whole security shape of the terminal. The client names a
@@ -993,10 +1116,12 @@ async fn check_engine(resp: reqwest::Response) -> Result<reqwest::Response, Stri
 /// the app's own launch directory.
 async fn workspace_root_for(
     engine: &SharedEngineState,
+    http: &reqwest::Client,
     workspace_id: &str,
 ) -> Result<String, String> {
+    let workspace_id = valid_workspace_id(workspace_id)?;
     let (base, token) = engine_url(engine).await?;
-    let resp = engine_http_client()
+    let resp = http
         .get(format!("{base}/workspaces/{workspace_id}"))
         .header("Authorization", format!("Bearer {token}"))
         .send()
@@ -1028,8 +1153,14 @@ async fn codify_terminal_open(
     cols: u16,
     rows: u16,
 ) -> Result<String, String> {
-    let root = workspace_root_for(&engine, &workspace_id).await?;
-    terminal::open(app, &terminals, Some(&root), cols, rows)
+    let http = app.state::<reqwest::Client>();
+    let root = workspace_root_for(&engine, &http, &workspace_id).await?;
+    let terminals = terminals.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        terminal::open(app, &terminals, Some(&root), cols, rows)
+    })
+    .await
+    .map_err(|e| format!("terminal open task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1038,7 +1169,10 @@ async fn codify_terminal_write(
     terminal_id: String,
     data: String,
 ) -> Result<(), String> {
-    terminal::write(&terminals, &terminal_id, &data)
+    let terminals = terminals.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || terminal::write(&terminals, &terminal_id, &data))
+        .await
+        .map_err(|e| format!("terminal write task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1056,7 +1190,10 @@ async fn codify_terminal_close(
     terminals: State<'_, SharedTerminals>,
     terminal_id: String,
 ) -> Result<(), String> {
-    terminal::close(&terminals, &terminal_id)
+    let terminals = terminals.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || terminal::close(&terminals, &terminal_id))
+        .await
+        .map_err(|e| format!("terminal close task failed: {e}"))?
 }
 
 /// Open a machine on a registered workspace: a jailed shell the assistant may also type into.
@@ -1075,8 +1212,14 @@ async fn codify_machine_open(
     rows: u16,
     network: bool,
 ) -> Result<machine::OpenedMachine, String> {
-    let root = workspace_root_for(&engine, &workspace_id).await?;
-    machine::open(app, &machines, Some(&root), cols, rows, network)
+    let http = app.state::<reqwest::Client>();
+    let root = workspace_root_for(&engine, &http, &workspace_id).await?;
+    let machines = machines.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        machine::open(app, &machines, Some(&root), cols, rows, network)
+    })
+    .await
+    .map_err(|e| format!("machine open task failed: {e}"))?
 }
 
 /// Throw away what a machine has done and start it again from a clean project: the same project, the same
@@ -1091,7 +1234,12 @@ async fn codify_machine_reset(
     cols: u16,
     rows: u16,
 ) -> Result<machine::OpenedMachine, String> {
-    machine::reset(app, &machines, &machine_id, cols, rows)
+    let machines = machines.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        machine::reset(app, &machines, &machine_id, cols, rows)
+    })
+    .await
+    .map_err(|e| format!("machine reset task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1100,7 +1248,10 @@ async fn codify_machine_write(
     machine_id: String,
     data: String,
 ) -> Result<(), String> {
-    machine::write(&machines, &machine_id, &data)
+    let machines = machines.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || machine::write(&machines, &machine_id, &data))
+        .await
+        .map_err(|e| format!("machine write task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -1118,7 +1269,10 @@ async fn codify_machine_close(
     machines: State<'_, SharedMachines>,
     machine_id: String,
 ) -> Result<(), String> {
-    machine::close(&machines, &machine_id)
+    let machines = machines.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || machine::close(&machines, &machine_id))
+        .await
+        .map_err(|e| format!("machine close task failed: {e}"))?
 }
 
 /// Open (embed) a browser page for a tab, or navigate the one that exists.
@@ -1313,6 +1467,9 @@ async fn codify_engine_restart(state: State<'_, SharedEngineState>) -> Result<()
     if supervised {
         let stopped = stop_engine(&shared).await;
         println!("[Codify] Restart asked for: {stopped:?}");
+        if !shared.lock().await.supervised && !SHUTDOWN_CLAIMED.load(Ordering::SeqCst) {
+            tauri::async_runtime::spawn(launch_engine(shared));
+        }
     } else {
         tauri::async_runtime::spawn(launch_engine(shared));
     }
@@ -1567,33 +1724,53 @@ async fn launch_engine(shared: SharedEngineState) {
     }
     let mut budget = engine_protocol::RestartBudget::new(ENGINE_RESTARTS, ENGINE_RESTART_WINDOW);
     let mut keep_log = false;
-    while launch_with_retries(&shared, keep_log).await {
-        // The engine had started, and has exited.
-        let requested = std::mem::take(&mut shared.lock().await.restart_requested);
-        let shutting_down = SHUTDOWN_CLAIMED.load(Ordering::SeqCst);
-        match budget.after_exit(shutting_down, requested, std::time::Instant::now()) {
-            engine_protocol::AfterExit::Restart { counted } => {
-                eprintln!(
-                    "[Codify] Engine exited — starting it again in {ENGINE_RESTART_DELAY_MS}ms ({})",
-                    if counted { "it was not asked to stop" } else { "a restart was asked for" }
-                );
-                // A crash's last words are the diagnosis, so they stay in the tail the window reads; a restart a
-                // person asked for starts the tail afresh, as a first launch does.
-                keep_log = counted;
-                tokio::time::sleep(std::time::Duration::from_millis(ENGINE_RESTART_DELAY_MS)).await;
-                if SHUTDOWN_CLAIMED.load(Ordering::SeqCst) {
+    loop {
+        while launch_with_retries(&shared, keep_log).await {
+            // The engine had started, and has exited.
+            let requested = std::mem::take(&mut shared.lock().await.restart_requested);
+            let shutting_down = SHUTDOWN_CLAIMED.load(Ordering::SeqCst);
+            match budget.after_exit(shutting_down, requested, std::time::Instant::now()) {
+                engine_protocol::AfterExit::Restart { counted } => {
+                    eprintln!(
+                        "[Codify] Engine exited — starting it again in {ENGINE_RESTART_DELAY_MS}ms ({})",
+                        if counted { "it was not asked to stop" } else { "a restart was asked for" }
+                    );
+                    // A crash's last words are the diagnosis, so they stay in the tail the window reads; a restart a
+                    // person asked for starts the tail afresh, as a first launch does.
+                    keep_log = counted;
+                    tokio::time::sleep(std::time::Duration::from_millis(ENGINE_RESTART_DELAY_MS))
+                        .await;
+                    if SHUTDOWN_CLAIMED.load(Ordering::SeqCst) {
+                        break;
+                    }
+                    // A user restart requested during the backoff delay resets the log retention to a fresh boot.
+                    if std::mem::take(&mut shared.lock().await.restart_requested) {
+                        keep_log = false;
+                    }
+                }
+                engine_protocol::AfterExit::ShuttingDown => break,
+                engine_protocol::AfterExit::GaveUp(why) => {
+                    eprintln!("[Codify] {why}");
+                    shared.lock().await.problem = Some(why);
                     break;
                 }
             }
-            engine_protocol::AfterExit::ShuttingDown => break,
-            engine_protocol::AfterExit::GaveUp(why) => {
-                eprintln!("[Codify] {why}");
-                shared.lock().await.problem = Some(why);
-                break;
-            }
         }
+        // Check atomically under the state lock whether a restart was requested while the supervisor
+        // was exiting or exhausting boot retries; only release `supervised = false` when no restart
+        // is pending.
+        let mut s = shared.lock().await;
+        if s.restart_requested && !SHUTDOWN_CLAIMED.load(Ordering::SeqCst) {
+            s.restart_requested = false;
+            s.problem = None;
+            drop(s);
+            budget = engine_protocol::RestartBudget::new(ENGINE_RESTARTS, ENGINE_RESTART_WINDOW);
+            keep_log = false;
+            continue;
+        }
+        s.supervised = false;
+        break;
     }
-    shared.lock().await.supervised = false;
 }
 
 /// Keep trying until the engine is up, or the attempts run out. True when an engine started (and has since exited).
@@ -1607,12 +1784,23 @@ async fn launch_engine(shared: SharedEngineState) {
 ///
 /// An engine that ran and then exited is not retried *here*: that is a crash, and
 /// [`launch_engine`] decides whether to start another.
-async fn launch_with_retries(shared: &SharedEngineState, keep_log: bool) -> bool {
-    for attempt in 1..=ENGINE_LAUNCH_ATTEMPTS {
+async fn launch_with_retries(shared: &SharedEngineState, mut keep_log: bool) -> bool {
+    let mut attempt = 1;
+    while attempt <= ENGINE_LAUNCH_ATTEMPTS {
+        if SHUTDOWN_CLAIMED.load(Ordering::SeqCst) {
+            return false;
+        }
         match launch_engine_once(shared.clone(), keep_log && attempt == 1).await {
             LaunchOutcome::Started => return true,
             LaunchOutcome::Unlaunchable => return false,
             LaunchOutcome::NoHandshake => {
+                // Consume any user restart requested during a pre-handshake attempt so it starts
+                // a fresh retry cycle immediately and never lingers into a future crash verdict.
+                if std::mem::take(&mut shared.lock().await.restart_requested) {
+                    attempt = 1;
+                    keep_log = false;
+                    continue;
+                }
                 if attempt < ENGINE_LAUNCH_ATTEMPTS {
                     eprintln!(
                         "[Codify] Engine launch attempt {attempt}/{} never completed its \
@@ -1621,7 +1809,13 @@ async fn launch_with_retries(shared: &SharedEngineState, keep_log: bool) -> bool
                     );
                     tokio::time::sleep(std::time::Duration::from_millis(ENGINE_LAUNCH_RETRY_MS))
                         .await;
+                    if std::mem::take(&mut shared.lock().await.restart_requested) {
+                        attempt = 1;
+                        keep_log = false;
+                        continue;
+                    }
                 }
+                attempt += 1;
             }
         }
     }
@@ -1813,10 +2007,14 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
                     }
                 }
             }
+            if let Some(line) = stderr_log.flush() {
+                eprintln!("{line}");
+            }
         });
     } else {
         eprintln!("[Codify] engine exposed no stderr — its last words will not reach the app");
     }
+    let child_id = child.id();
     {
         let mut s = shared.lock().await;
         // A handle still parked here belongs to an engine this launch is replacing. Dropping a tokio `Child`
@@ -1825,6 +2023,9 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
         // exited the signal is a no-op.
         if let Some(mut previous) = s.child.take() {
             let _ = previous.start_kill();
+            tauri::async_runtime::spawn(async move {
+                let _ = previous.wait().await;
+            });
         }
         s.child = Some(child);
     }
@@ -1864,9 +2065,9 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
     // exited. The connection info it handed out is now a lie, so clear it:
     // without this, the UI keeps a stale port/token and reports confusing
     // connection errors instead of a clean "engine is down".
-    {
+    let exited_child = {
         let mut s = shared.lock().await;
-        if s.token.is_some() || s.port.is_some() {
+        if handshake_done {
             println!("[Codify] Engine process exited — clearing connection info");
         } else {
             // Ended its life without ever handing over a port. This is the failure
@@ -1880,11 +2081,20 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
         s.token = None;
         s.port = None;
         s.hard_exit_s = None;
+        if s.child.as_ref().and_then(|c| c.id()) == child_id {
+            s.child.take()
+        } else {
+            None
+        }
+    };
+    if let Some(mut exited) = exited_child {
+        if matches!(exited.try_wait(), Ok(None)) {
+            tauri::async_runtime::spawn(async move {
+                let _ = exited.wait().await;
+            });
+        }
     }
 
-    // No `child.wait()` here: the handle lives in shared state and tokio's
-    // reaper collects the process in the background. Waiting on a child we no
-    // longer own would just pin this task forever.
     if handshake_done {
         LaunchOutcome::Started
     } else {
@@ -1910,10 +2120,14 @@ async fn launch_engine_once(shared: SharedEngineState, keep_log: bool) -> Launch
 /// going to draw. Naming the backend removes the coin flip; the session being
 /// Wayland is the only condition, so an X11 session is left exactly as it was.
 fn display_backend(wayland_display: Option<&str>, requested: Option<&str>) -> Option<&'static str> {
-    if requested.is_some() {
+    if requested.map(str::trim).filter(|s| !s.is_empty()).is_some() {
         return None;
     }
-    if wayland_display.is_some() {
+    if wayland_display
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .is_some()
+    {
         return Some("wayland");
     }
     None
@@ -1927,8 +2141,12 @@ fn display_backend(wayland_display: Option<&str>, requested: Option<&str>) -> Op
 /// window is created here, and a child (the engine, a terminal) inherits the
 /// variable and is welcome to ignore it.
 fn apply_display_backend() {
-    let requested = std::env::var("GDK_BACKEND").ok();
-    let wayland = std::env::var("WAYLAND_DISPLAY").ok();
+    let requested = std::env::var("GDK_BACKEND")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    let wayland = std::env::var("WAYLAND_DISPLAY")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
     match display_backend(wayland.as_deref(), requested.as_deref()) {
         Some(backend) => {
             std::env::set_var("GDK_BACKEND", backend);
@@ -1965,6 +2183,13 @@ fn apply_display_backend() {
 /// is no child to reap and no lease to break, and the harness that drives
 /// this terminates the child on every path out anyway. Both streams are
 /// flushed first, because the verdict is the last thing said.
+/// Initial deliverable flags for `CODEIFY_EMBED_SMOKE`: `[painted, reported, bridge_done]`.
+/// When `bridge_leg` is disabled (`--no-bridge`), the third flag starts `true` so the run
+/// exits 0 as soon as both paint and report arrive instead of timing out at 20s.
+fn smoke_initial_flags(bridge_leg: bool) -> [bool; 3] {
+    [false, false, !bridge_leg]
+}
+
 fn smoke_exit(code: i32) -> ! {
     use std::io::Write;
     let _ = std::io::stdout().flush();
@@ -2505,7 +2730,8 @@ pub fn run() {
                 // is the escape hatch, and it is a harness flag so the reason
                 // is on the command line that produced the run.
                 let bridge_leg = webview_bridge::smoke_bridge_enabled();
-                let flags = std::sync::Arc::new(std::sync::Mutex::new([false; 3]));
+                let flags =
+                    std::sync::Arc::new(std::sync::Mutex::new(smoke_initial_flags(bridge_leg)));
                 let paint_flags = flags.clone();
                 let report_flags = flags.clone();
                 let bridge_flags = flags.clone();
@@ -2541,6 +2767,9 @@ pub fn run() {
                     // AI can reach it.
                     webview_bridge::smoke_probe(app.handle().clone(), webview_bridge::SMOKE_TAB);
                 } else {
+                    if let Ok(mut seen) = bridge_flags.lock() {
+                        seen[2] = true;
+                    }
                     println!(
                         "embed-smoke: bridge leg skipped ({})",
                         webview_bridge::SMOKE_BRIDGE_SKIP_ENV
@@ -3264,6 +3493,13 @@ mod tests {
             stop_grace(None),
             "an engine that announced nothing gets the engine's own default, plus slack"
         );
+        for bad in [1e20, f64::INFINITY, f64::NAN, -1.0] {
+            assert_eq!(
+                DEFAULT_STOP_GRACE,
+                stop_grace(Some(bad)),
+                "out-of-range or non-finite {bad:?} falls back to DEFAULT_STOP_GRACE without panicking"
+            );
+        }
     }
 
     #[test]
@@ -3338,5 +3574,196 @@ mod tests {
             proxy.accept().is_err(),
             "the engine's client sent the request — and the boot token with it — to the proxy"
         );
+    }
+
+    #[test]
+    fn agent_config_and_patch_round_trip_num_ctx_and_keep_alive() {
+        use super::AgentConfig;
+        let raw = serde_json::json!({
+            "role": "conductor",
+            "display_name": "Conductor",
+            "provider": "ollama",
+            "protocol": "ollama",
+            "model_name": "qwen2.5-coder:7b",
+            "api_key_ref": null,
+            "base_url": "http://127.0.0.1:11434",
+            "system_prompt_override": null,
+            "temperature": 0.2,
+            "max_tokens": 4096,
+            "thinking_effort": "medium",
+            "num_ctx": 32768,
+            "keep_alive": "15m",
+            "fallback_provider": null,
+            "fallback_model_name": "",
+            "fallback_protocol": null,
+            "fallback_base_url": null,
+            "updated_at": 1.0
+        });
+        let cfg: AgentConfig = serde_json::from_value(raw).expect("AgentConfig deserialises");
+        assert_eq!(cfg.num_ctx, Some(32768));
+        assert_eq!(cfg.keep_alive.as_deref(), Some("15m"));
+        let back = serde_json::to_value(&cfg).expect("AgentConfig serialises");
+        assert_eq!(back["num_ctx"], serde_json::json!(32768));
+        assert_eq!(back["keep_alive"], serde_json::json!("15m"));
+
+        let patch: AgentConfigPatch =
+            serde_json::from_str(r#"{"num_ctx":65536,"keep_alive":"30m"}"#)
+                .expect("AgentConfigPatch deserialises");
+        assert_eq!(patch.num_ctx, Some(65536));
+        assert_eq!(patch.keep_alive.as_deref(), Some("30m"));
+        let patch_wire = serde_json::to_value(&patch).expect("AgentConfigPatch serialises");
+        assert_eq!(patch_wire["num_ctx"], serde_json::json!(65536));
+        assert_eq!(patch_wire["keep_alive"], serde_json::json!("30m"));
+
+        let empty_patch: AgentConfigPatch =
+            serde_json::from_str("{}").expect("empty AgentConfigPatch");
+        let empty_wire = serde_json::to_value(&empty_patch).expect("empty patch serialises");
+        assert!(empty_wire.get("num_ctx").is_none());
+        assert!(empty_wire.get("keep_alive").is_none());
+    }
+
+    #[test]
+    fn workspace_id_validation_rejects_traversal_and_url_metacharacters() {
+        use super::valid_workspace_id;
+        assert_eq!(
+            valid_workspace_id("550e8400-e29b-41d4-a716-446655440000"),
+            Ok("550e8400-e29b-41d4-a716-446655440000")
+        );
+        assert_eq!(valid_workspace_id("ws_1-test"), Ok("ws_1-test"));
+        for bad in [
+            "",
+            "..",
+            "../settings/agents",
+            "a/b",
+            "a\\b",
+            "ws?admin=1",
+            "ws#frag",
+            "ws%2f..",
+            "ws with space",
+            "ws\nnewline",
+            &"a".repeat(65),
+        ] {
+            assert!(
+                valid_workspace_id(bad).is_err(),
+                "workspace_id {bad:?} must be rejected"
+            );
+        }
+    }
+
+    #[test]
+    fn empty_wayland_display_or_gdk_backend_is_treated_as_unset() {
+        assert_eq!(
+            display_backend(Some(""), None),
+            None,
+            "an empty WAYLAND_DISPLAY must not force the wayland backend on X11"
+        );
+        assert_eq!(
+            display_backend(Some("   "), None),
+            None,
+            "a whitespace-only WAYLAND_DISPLAY must be treated as unset"
+        );
+        assert_eq!(
+            display_backend(Some("wayland-0"), Some("")),
+            Some("wayland"),
+            "an empty GDK_BACKEND must not suppress Wayland detection"
+        );
+    }
+
+    #[test]
+    fn smoke_initial_flags_marks_bridge_leg_done_when_skipped() {
+        use super::smoke_initial_flags;
+        let with_bridge = smoke_initial_flags(true);
+        assert_eq!(with_bridge, [false, false, false]);
+
+        let mut without_bridge = smoke_initial_flags(false);
+        assert_eq!(without_bridge, [false, false, true]);
+        without_bridge[0] = true;
+        assert!(!without_bridge.iter().all(|leg| *leg));
+        without_bridge[1] = true;
+        assert!(
+            without_bridge.iter().all(|leg| *leg),
+            "--no-bridge must finish as soon as paint and report complete"
+        );
+    }
+
+    #[test]
+    fn dmabuf_renderer_disabled_checks_both_dmabuf_and_compositing_mode_vars() {
+        use super::dmabuf_renderer_disabled_from;
+        use std::ffi::OsStr;
+        assert!(!dmabuf_renderer_disabled_from(None, None));
+        assert!(!dmabuf_renderer_disabled_from(
+            Some(OsStr::new("0")),
+            Some(OsStr::new("0"))
+        ));
+        assert!(dmabuf_renderer_disabled_from(Some(OsStr::new("1")), None));
+        assert!(dmabuf_renderer_disabled_from(
+            Some(OsStr::new("true")),
+            None
+        ));
+        assert!(dmabuf_renderer_disabled_from(None, Some(OsStr::new("1"))));
+        assert!(dmabuf_renderer_disabled_from(
+            None,
+            Some(OsStr::new("true"))
+        ));
+    }
+
+    #[test]
+    fn web_process_descendants_finds_bwrap_reparented_webkit_processes() {
+        use super::{oldest_web_process, web_process_descendants};
+        let procs = vec![
+            (100, 1, "codify-desktop".to_string(), 10),
+            (101, 100, "bwrap".to_string(), 12),
+            (102, 101, "bwrap".to_string(), 13),
+            (103, 102, "WebKitWebProces".to_string(), 15),
+            (104, 100, "bwrap".to_string(), 50),
+            (105, 104, "WebKitWebProces".to_string(), 55),
+            (200, 1, "WebKitWebProces".to_string(), 5),
+        ];
+        let mut found = web_process_descendants(100, &procs);
+        assert_eq!(oldest_web_process(&found), Some(103));
+        found.sort_unstable();
+        assert_eq!(found, vec![(103, 15), (105, 55)]);
+    }
+
+    #[test]
+    fn stop_engine_waits_for_and_kills_a_pre_handshake_engine_and_reaps_it() {
+        // Before the boot handshake completes, `token` and `port` are both `None`.
+        // `stop_engine` must not mistake that for "already gone": a process ignoring SIGTERM
+        // must still be waited on for the grace period, escalated to SIGKILL, and reaped.
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("current-thread runtime");
+        runtime.block_on(async {
+            let child = tokio::process::Command::new("python3")
+                .args([
+                    "-c",
+                    "import signal, time; signal.signal(signal.SIGTERM, signal.SIG_IGN); time.sleep(60)",
+                ])
+                .spawn()
+                .expect("python3 child must start");
+            let pid = child.id().expect("spawned child has pid");
+            // Give python3 a moment to install SIG_IGN.
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            let state = EngineState {
+                token: None,
+                port: None,
+                child: Some(child),
+                // Short grace so the escalation to SIGKILL is fast in tests.
+                hard_exit_s: Some(0.05),
+                ..EngineState::default()
+            };
+            let shared: SharedEngineState = Arc::new(Mutex::new(state));
+            let outcome = stop_engine(&shared).await;
+            assert_eq!(outcome, EngineStop::Killed);
+            assert!(
+                shared.lock().await.child.is_none(),
+                "stop_engine must reap and clear s.child"
+            );
+            assert!(
+                !std::path::Path::new(&format!("/proc/{pid}")).exists(),
+                "the stopped engine must be reaped, not left as a zombie"
+            );
+        });
     }
 }

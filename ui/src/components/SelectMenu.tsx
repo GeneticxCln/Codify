@@ -295,8 +295,14 @@ export const SelectMenu: React.FC<SelectMenuProps> = ({
     }
     if (event.key === "Escape") {
       event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation?.();
       event.preventDefault();
       close(true);
+      return;
+    }
+    if (event.key === "Tab") {
+      // Tab leaves the search box; the list must not stay open behind the new focus.
+      close(false);
     }
   };
 

@@ -246,6 +246,44 @@ def sweep_recordings() -> int:
     return removed
 
 
+class _StderrDrain:
+    """Drain a long-lived child's stderr pipe on a daemon thread so verbose PipeWire warnings cannot deadlock it."""
+
+    _MAX_BYTES = 16_384
+
+    def __init__(self, pipe: Any) -> None:
+        self._pipe = pipe
+        self._lock = threading.Lock()
+        self._buf = bytearray()
+        self._thread = threading.Thread(target=self._run, name="speech-stderr-drain", daemon=True)
+        self._thread.start()
+
+    def _run(self) -> None:
+        if self._pipe is None:
+            return
+        try:
+            while True:
+                chunk = self._pipe.read(4096)
+                if not chunk:
+                    break
+                with self._lock:
+                    self._buf.extend(chunk)
+                    if len(self._buf) > self._MAX_BYTES:
+                        del self._buf[:-self._MAX_BYTES]
+        except (OSError, ValueError):
+            pass
+        finally:
+            try:
+                self._pipe.close()
+            except OSError:
+                pass
+
+    def text(self, timeout: float = 2.0) -> str:
+        self._thread.join(timeout)
+        with self._lock:
+            return bytes(self._buf).decode("utf-8", "replace")
+
+
 def _spawn(argv: list[str], *, stdout: int) -> subprocess.Popen[bytes]:
     """Start one PipeWire tool under the guard, in a session of its own, like the folder picker."""
     return subprocess.Popen(  # noqa: S603 — argv is a fixed PipeWire tool resolved by shutil.which, wrapped by guarded_argv right here; no shell
@@ -287,7 +325,10 @@ def inputs() -> dict[str, Any]:
         out, err = proc.communicate(timeout=INPUTS_TIMEOUT_S)
     except subprocess.TimeoutExpired:
         _kill_group(proc.pid, signal.SIGKILL)
-        proc.communicate()
+        try:
+            proc.communicate(timeout=5)
+        except (subprocess.TimeoutExpired, OSError):
+            pass
         return {"available": False, "reason": f"pw-dump did not answer within {INPUTS_TIMEOUT_S:g} s", "inputs": []}
     if proc.returncode != 0:
         reason = " ".join(err.decode("utf-8", "replace").split())[-300:] or f"pw-dump exited {proc.returncode}"
@@ -334,6 +375,7 @@ class Recorder:
         self.max_seconds = max_seconds
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[bytes] | None = None
+        self._stderr: _StderrDrain | None = None
         self._path: Path | None = None
         self._started_at = 0.0
         self._timer: threading.Timer | None = None
@@ -349,11 +391,17 @@ class Recorder:
 
     def recording(self) -> bool:
         with self._lock:
-            return self._proc is not None and not self._ended_by_us
+            if self._proc is None or self._ended_by_us:
+                return False
+            if self._proc.poll() is not None:
+                # Recorder exited unexpectedly after startup: clean up stale handle & partial file.
+                self._discard_locked()
+                return False
+            return True
 
     def start(self, target: str = "") -> dict[str, Any]:
         with self._lock:
-            if self._proc is not None and not self._ended_by_us:
+            if self._proc is not None and not self._ended_by_us and self._proc.poll() is None:
                 raise ApiError(409, "already_recording", "a dictation is already being recorded")
             self._discard_locked()
             exe = shutil.which("pw-record")
@@ -370,16 +418,17 @@ class Recorder:
                 proc = _spawn(argv, stdout=subprocess.DEVNULL)
             except OSError as exc:
                 raise ApiError(503, "recorder_failed", f"pw-record could not start: {exc.strerror or exc}") from exc
+            stderr_drain = _StderrDrain(proc.stderr)
             try:
                 proc.wait(timeout=START_CHECK_S)
             except subprocess.TimeoutExpired:
                 pass
             else:
-                err = proc.communicate()[1].decode("utf-8", "replace")
+                err = stderr_drain.text()
                 path.unlink(missing_ok=True)
                 reason = " ".join(err.split())[-300:] or f"pw-record exited {proc.returncode}"
                 raise ApiError(503, "recorder_failed", f"the microphone could not be opened: {reason}")
-            self._proc, self._path, self._ended_by_us = proc, path, False
+            self._proc, self._stderr, self._path, self._ended_by_us = proc, stderr_drain, path, False
             self._started_at = time.monotonic()
             self._timer = threading.Timer(self.max_seconds, self._end_by_cap, args=(proc,))
             self._timer.daemon = True
@@ -389,15 +438,15 @@ class Recorder:
     def stop(self) -> tuple[bytes, float]:
         """The recorded WAV and how many seconds it ran; the file is gone when this returns."""
         with self._lock:
-            proc, path = self._proc, self._path
+            proc, stderr_drain, path = self._proc, self._stderr, self._path
             if proc is None or path is None:
                 raise ApiError(409, "not_recording", "there is no dictation to stop")
-            ended_by_us = self._ended_by_us
             self._end_locked(proc)
+            ended_by_us = self._ended_by_us
             seconds = min(time.monotonic() - self._started_at, float(self.max_seconds))
-            self._proc, self._path = None, None
+            self._proc, self._stderr, self._path = None, None, None
         try:
-            stderr = proc.communicate()[1].decode("utf-8", "replace")
+            stderr = stderr_drain.text() if stderr_drain is not None else ""
             if not ended_by_us and proc.returncode not in (0, -signal.SIGTERM, -signal.SIGKILL):
                 reason = " ".join(stderr.split())[-300:] or f"pw-record exited {proc.returncode}"
                 raise ApiError(503, "recorder_failed", f"the recording stopped on its own: {reason}")
@@ -423,7 +472,10 @@ class Recorder:
     def _end_by_cap(self, proc: subprocess.Popen[bytes]) -> None:
         with self._lock:
             if self._proc is proc and not self._ended_by_us:
-                self._end_locked(proc)
+                if proc.poll() is not None:
+                    self._discard_locked()
+                else:
+                    self._end_locked(proc)
 
     def _end_locked(self, proc: subprocess.Popen[bytes]) -> None:
         if self._timer is not None:
@@ -438,13 +490,23 @@ class Recorder:
                 proc.wait(timeout=STOP_GRACE_S)
             except subprocess.TimeoutExpired:
                 _kill_group(proc.pid, signal.SIGKILL)
-                proc.wait()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+        else:
+            # Process already exited; reap/collect exit status cleanly without masking an unexpected exit.
+            try:
+                proc.wait(timeout=0)
+            except subprocess.TimeoutExpired:
+                pass
 
     def _discard_locked(self) -> None:
-        proc, path = self._proc, self._path
+        proc, stderr_drain, path = self._proc, self._stderr, self._path
         if proc is not None:
             self._end_locked(proc)
-            proc.communicate()
+        if stderr_drain is not None:
+            stderr_drain.text()
         if path is not None:
             path.unlink(missing_ok=True)
-        self._proc, self._path, self._ended_by_us = None, None, False
+        self._proc, self._stderr, self._path, self._ended_by_us = None, None, None, False

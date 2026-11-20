@@ -48,11 +48,20 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
   const hostRef = useRef<HTMLDivElement>(null);
   const editorRef = useRef<MountedEditor | null>(null);
   const [confirmingRevert, setConfirmingRevert] = useState(false);
+  const [mountError, setMountError] = useState<string | null>(null);
 
   const ready = buffer?.status === "ready";
   const epoch = buffer?.epoch ?? 0;
   const revealToken = buffer?.revealToken ?? 0;
   const aiRanges = buffer?.aiRanges;
+  const dirty = buffer?.dirty ?? false;
+  const revealTokenRef = useRef(revealToken);
+  revealTokenRef.current = revealToken;
+
+  // A revert that is no longer needed (Ctrl+S saved the text) must not stay on screen.
+  useEffect(() => {
+    if (!dirty) setConfirmingRevert(false);
+  }, [dirty]);
 
   // The view: made when the buffer is ready, and again when the store replaces its text (a reload), and gone with the pane.
   useEffect(() => {
@@ -60,16 +69,24 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
     if (!ready || !host) return;
     let cancelled = false;
     let mounted: MountedEditor | null = null;
+    setMountError(null);
     void (async () => {
-      const { mountEditor } = await import("../editorMount");
-      if (cancelled) return;
-      mounted = await mountEditor({ parent: host, buffers, tabId, autoFocus });
-      if (cancelled) {
-        mounted?.destroy();
-        mounted = null;
-        return;
+      try {
+        const { mountEditor } = await import("../editorMount");
+        if (cancelled) return;
+        mounted = await mountEditor({ parent: host, buffers, tabId, autoFocus });
+        if (cancelled) {
+          mounted?.destroy();
+          mounted = null;
+          return;
+        }
+        editorRef.current = mounted;
+        // A jump-to-line requested before the view existed is honoured now.
+        if (revealTokenRef.current > 0) mounted?.reveal();
+      } catch (err) {
+        if (cancelled) return;
+        setMountError(err instanceof Error ? err.message : String(err));
       }
-      editorRef.current = mounted;
     })();
     return () => {
       cancelled = true;
@@ -185,6 +202,14 @@ export const EditorPane: React.FC<EditorPaneProps> = ({ tabId, buffers, autoFocu
           className="shrink-0 border-b border-codify-danger/30 bg-codify-danger/10 px-3 py-2 text-xs text-codify-danger-ink"
         >
           Could not save: {buffer.saveError}
+        </div>
+      )}
+      {mountError && (
+        <div
+          role="alert"
+          className="shrink-0 border-b border-codify-danger/30 bg-codify-danger/10 px-3 py-2 text-xs text-codify-danger-ink"
+        >
+          The editor could not load: {mountError}
         </div>
       )}
 

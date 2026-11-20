@@ -233,7 +233,7 @@ function Blocks({ blocks, onOpenLink }: { blocks: readonly Block[] } & LinkProps
   );
 }
 
-export const Markdown: React.FC<MarkdownProps> = ({ text, onOpenLink, inline = false, className = "" }) => {
+export const Markdown: React.FC<MarkdownProps> = React.memo(({ text, onOpenLink, inline = false, className = "" }) => {
   // The engine's payloads are loosely typed (`payload.design_md` is `any`, a plan step can arrive
   // without a description), and drawing nothing is what `{undefined}` always did. A component that
   // throws on a missing field would take the whole transcript down with it.
@@ -252,4 +252,4 @@ export const Markdown: React.FC<MarkdownProps> = ({ text, onOpenLink, inline = f
       <Blocks blocks={tree ?? []} onOpenLink={onOpenLink} />
     </div>
   );
-};
+});

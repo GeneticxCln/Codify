@@ -280,10 +280,17 @@ export function createMachineSurface(
     const refusal = writable(m);
     if (refusal) return refuse(refusal);
 
-    const snap = await screens.read(m.id, 0);
-    const bytes = bytesForKey(name, snap?.applicationCursorKeys ?? false);
-    if (bytes === null) return refuse(`${JSON.stringify(name)} is not a key that can be pressed here.`);
-    await screens.flushed(m.id);
+    const plainBytes = bytesForKey(name, false);
+    const appBytes = bytesForKey(name, true);
+    if (plainBytes === null && appBytes === null) {
+      return refuse(`${JSON.stringify(name)} is not a key that can be pressed here.`);
+    }
+    // Only read the screen before typing when the key encoding depends on application cursor keys
+    // (e.g., Arrow keys); interrupt keys like Ctrl-C are sent immediately without waiting behind streaming output.
+    const bytes =
+      plainBytes === appBytes
+        ? plainBytes!
+        : bytesForKey(name, (await screens.read(m.id, 0))?.applicationCursorKeys ?? false)!;
     const before = screens.version(m.id);
     const failed = await type(m.id, bytes);
     if (failed) return refuse(`The shell refused the key: ${failed}`);

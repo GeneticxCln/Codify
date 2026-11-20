@@ -81,7 +81,11 @@ function surface(b: Band, y: number, x: number, t: number, w: number, chaos: num
  * `active`: it changes at runtime, and a dependency would restart the
  * effect. Here it is simply the one value the body used to close over.
  */
-export function createNanofluidPainter(read: (name: string) => string, active: boolean): AtmospherePainter {
+export function createNanofluidPainter(
+  read: (name: string) => string,
+  active: boolean | (() => boolean),
+): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let bands: Band[] = [];
   // Eased rather than switched: a jump from calm to turbulent on the first
@@ -104,10 +108,11 @@ export function createNanofluidPainter(read: (name: string) => string, active: b
 
   return {
     step(dt) {
-      const target = active ? 1 : 0;
+      const busy = isActive();
+      const target = busy ? 1 : 0;
       chaos += (target - chaos) * Math.min(1, dt * 1.6);
       for (const b of bands) {
-        b.at += b.rise * dt * (active ? 1.8 : 1);
+        b.at += b.rise * dt * (busy ? 1.8 : 1);
         // A band that leaves the window comes back at the other end rather
         // than being removed, so the gutter never has a visible seam in it.
         if (b.at > 1.2) b.at = -0.2;
@@ -164,13 +169,21 @@ export const Nanofluid: React.FC<NanofluidProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--fluid-crest": "#e2e8f0",
     "--fluid-trough": "#334155",
   };
 
-
-  const canvasRef = useAtmosphereCanvas({ maxDimension, fps, animated, active, vars, create: (read) => createNanofluidPainter(read, active) });
+  const canvasRef = useAtmosphereCanvas({
+    maxDimension,
+    fps,
+    animated,
+    active,
+    vars,
+    create: (read) => createNanofluidPainter(read, () => activeRef.current === true),
+  });
 
   return (
     <canvas

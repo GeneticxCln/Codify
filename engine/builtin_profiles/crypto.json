@@ -281,7 +281,7 @@
         "py"
       ],
       "where": "strings",
-      "pattern": "algorithms\\s*=\\s*\\[[^\\]]*[\\\"']none[\\\"']|[\\\"']verify_signature[\\\"']\\s*:\\s*False",
+      "pattern": "algorithms\\s*=\\s*\\[[^\\]\\n]{0,300}[\\\"']none[\\\"']|[\\\"']verify_signature[\\\"']\\s*:\\s*False",
       "why": "A token that is not verified can be written by anyone.",
       "fix": "Pin the expected algorithm and always verify.",
       "examples": {

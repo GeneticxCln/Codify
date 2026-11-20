@@ -206,10 +206,16 @@ fn the_shell_starts_behind_every_limit_the_kernel_can_enforce() {
     let argv = jail_argv(&limited, &layout());
     let wrapper = argv.last().expect("the jail ends in the shell's wrapper");
     for expected in [
-        "ulimit -c 0".to_string(),
-        format!("ulimit -u {NPROC}"),
-        "ulimit -t 90".to_string(),
-        "ulimit -f 8192".to_string(),
+        "ulimit -Sc 0".to_string(),
+        "ulimit -Hc 0".to_string(),
+        format!("ulimit -Su {NPROC}"),
+        format!("ulimit -Sp {NPROC}"),
+        format!("ulimit -Hu {NPROC}"),
+        format!("ulimit -Hp {NPROC}"),
+        "ulimit -St 90".to_string(),
+        "ulimit -Ht 90".to_string(),
+        "ulimit -Sf 8192".to_string(),
+        "ulimit -Hf 8192".to_string(),
         "export PS1".to_string(),
     ] {
         assert!(
@@ -217,8 +223,18 @@ fn the_shell_starts_behind_every_limit_the_kernel_can_enforce() {
             "the wrapper lacks `{expected}`: {wrapper}"
         );
     }
+    // Never wrap `ulimit` in a subshell `(ulimit ...)`, which would drop the limit before `exec`.
+    assert!(
+        !wrapper.contains("(ulimit"),
+        "ulimit must run in the current shell, never a subshell: {wrapper}"
+    );
+    // Soft limits must be set before hard limits so lowering from `unlimited` never hits EINVAL.
+    assert!(wrapper.find("ulimit -Sc").unwrap() < wrapper.find("ulimit -Hc").unwrap());
+    assert!(wrapper.find("ulimit -Su").unwrap() < wrapper.find("ulimit -Hu").unwrap());
+    assert!(wrapper.find("ulimit -St").unwrap() < wrapper.find("ulimit -Ht").unwrap());
+    assert!(wrapper.find("ulimit -Sf").unwrap() < wrapper.find("ulimit -Hf").unwrap());
     // The limits are set before the shell starts, and the shell is the last thing the wrapper does.
-    assert!(wrapper.find("ulimit -t").unwrap() < wrapper.find("exec").unwrap());
+    assert!(wrapper.find("ulimit -Hf").unwrap() < wrapper.find("exec").unwrap());
 }
 
 // ── ps1: each shell gets a prompt it can expand ───────────────────────────────────────────────────
@@ -1177,4 +1193,79 @@ fn a_reader_whose_machine_was_closed_delivers_its_last_output_and_reports_the_ex
     let (delivered, exited) = run_lines(5, 1, |_| None);
     assert_eq!(delivered, 5, "a closed machine's output was dropped");
     assert!(exited, "a closed machine was not reported as ended");
+}
+
+#[test]
+fn a_failed_reset_reports_exit_exactly_once_and_ignores_the_old_reader() {
+    use std::sync::atomic::AtomicUsize;
+    let ws = tempfile_dir("failed-reset");
+    let jail = Jail::read_only(&ws);
+    let exits = Arc::new(AtomicUsize::new(0));
+    let exits_sink = exits.clone();
+    let on_exit: ExitSink = Arc::new(move |_| {
+        exits_sink.fetch_add(1, Ordering::SeqCst);
+    });
+
+    // Sabotage the stored recipe's PATH so `reset_with_sink` kills the old machine, advances the epoch,
+    // and then fails `prepare` when looking for `bwrap`.
+    {
+        let mut guard = jail.machines.lock().unwrap();
+        guard.entries.get_mut(&jail.id).unwrap().recipe.path_var = String::new();
+    }
+
+    let res = reset_with_sink(
+        &jail.machines,
+        &jail.id,
+        80,
+        24,
+        jail.on_text.clone(),
+        on_exit,
+    );
+    assert!(res.is_err(), "reset with empty PATH must fail");
+    // Give the old reader thread time to observe EOF after its child was killed.
+    std::thread::sleep(Duration::from_millis(150));
+    assert_eq!(
+        exits.load(Ordering::SeqCst),
+        1,
+        "failed reset must emit machine-exit once, and the old reader must not emit a second exit"
+    );
+    assert!(
+        !jail.exited.load(Ordering::SeqCst),
+        "the old reader thread must see the bumped epoch in `epochs` and not call its exit sink"
+    );
+    assert!(guard::page_size_bytes() >= 4096);
+}
+
+#[test]
+fn hard_resource_limits_are_enforced_inside_the_jail_and_cannot_be_raised() {
+    let ws = tempfile_dir("hard-ulimits");
+    let mut r = recipe(&ws, false, None);
+    r.limits.cpu_secs = 90;
+    r.limits.file_bytes = 8 * 1024 * 1024;
+    let jail = Jail::start(r);
+
+    let said = jail.run(&format!(
+        "echo HC=$(ulimit -Hc) HT=$(ulimit -Ht) HF=$(ulimit -Hf) HU=$(ulimit -Hu); \
+         (ulimit -Ht unlimited 2>/dev/null && echo RAISED-$((1+0)) || echo BLOCKED-$((1+0))); \
+         (ulimit -Hf unlimited 2>/dev/null && echo RAISED-$((1+1)) || echo BLOCKED-$((1+1))); \
+         (ulimit -Hc unlimited 2>/dev/null && echo RAISED-$((1+2)) || echo BLOCKED-$((1+2))); {DONE}"
+    ));
+    // `/bin/sh` runs `ulimit -f 8192` in POSIX 512-byte blocks (4096 KiB) on dash and bash-as-sh,
+    // or 1024-byte blocks (8192 KiB) in non-POSIX bash; either way it is strictly bounded and hard.
+    assert!(
+        said.contains("HC=0")
+            && said.contains("HT=90")
+            && (said.contains("HF=4096") || said.contains("HF=8192"))
+            && said.contains(&format!("HU={NPROC}")),
+        "hard resource limits were not enforced in the jail: {said}"
+    );
+    assert!(
+        said.contains("BLOCKED-1")
+            && said.contains("BLOCKED-2")
+            && said.contains("BLOCKED-3")
+            && !said.contains("RAISED-1")
+            && !said.contains("RAISED-2")
+            && !said.contains("RAISED-3"),
+        "jailed process was able to raise a hard ulimit: {said}"
+    );
 }

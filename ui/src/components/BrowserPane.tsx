@@ -108,9 +108,11 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
   useEffect(() => {
     onBoundsRef.current = onBounds;
   }, [onBounds]);
+  // Re-run when a reporter appears (or goes): one attached after mount must still get an observer.
+  const hasOnBounds = Boolean(onBounds);
   useEffect(() => {
     const el = viewportRef.current;
-    if (!el || !onBoundsRef.current) return;
+    if (!el || !hasOnBounds) return;
     const report = (): void => {
       const rect = el.getBoundingClientRect();
       onBoundsRef.current?.({
@@ -125,7 +127,7 @@ export const BrowserPane: React.FC<BrowserPaneProps> = ({
     const observer = new ResizeObserver(report);
     observer.observe(el);
     return () => observer.disconnect();
-  }, []);
+  }, [hasOnBounds]);
 
   const commit = (raw: string): void => {
     // Blank is the normal state of a half-cleared address bar, not a request to

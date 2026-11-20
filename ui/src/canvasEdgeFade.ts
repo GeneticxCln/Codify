@@ -28,6 +28,14 @@
  * canvas: both render loops call it after their painter's own `draw`, and the
  * tests can drive it with a recording context.
  */
+interface CachedFade {
+  width: number;
+  height: number;
+  gradient: CanvasGradient;
+}
+
+const fadeCache = new WeakMap<CanvasRenderingContext2D, CachedFade>();
+
 export function applyEdgeFade(
   ctx: CanvasRenderingContext2D,
   width: number,
@@ -41,16 +49,22 @@ export function applyEdgeFade(
   const sy = height / width;
   const half = width / 2;
 
+  let cached = fadeCache.get(ctx);
+  if (!cached || cached.width !== width || cached.height !== height) {
+    const gradient = ctx.createRadialGradient(0, 0, inner, 0, 0, radius);
+    // Transparent in the middle, opaque at the farthest corner: alpha is what
+    // `destination-out` reads, so this is the fade curve.
+    gradient.addColorStop(0, "rgba(0, 0, 0, 0)");
+    gradient.addColorStop(1, "rgba(0, 0, 0, 1)");
+    cached = { width, height, gradient };
+    fadeCache.set(ctx, cached);
+  }
+
   ctx.save();
   ctx.globalCompositeOperation = "destination-out";
   ctx.translate(width / 2, height / 2);
   ctx.scale(1, sy);
-  const gradient = ctx.createRadialGradient(0, 0, inner, 0, 0, radius);
-  // Transparent in the middle, opaque at the farthest corner: alpha is what
-  // `destination-out` reads, so this is the fade curve.
-  gradient.addColorStop(0, "rgba(0, 0, 0, 0)");
-  gradient.addColorStop(1, "rgba(0, 0, 0, 1)");
-  ctx.fillStyle = gradient;
+  ctx.fillStyle = cached.gradient;
   // In the scaled space the canvas is a square of side `width`; beyond the
   // gradient's end the last stop is opaque, so the corners are erased whole.
   // A path + `fill` rather than `fillRect`: the loops' own frame counter in

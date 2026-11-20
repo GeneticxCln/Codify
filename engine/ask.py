@@ -59,7 +59,9 @@ def parse_question(args: dict[str, Any]) -> Question:
     text = ""
     if isinstance(raw, str):
         # Paragraphs are kept (a question can have a sentence of context before it); runs of blank lines are not.
-        text = _BLANK_LINES.sub("\n\n", _CONTROL.sub("", raw).replace("\r\n", "\n").replace("\r", "\n")).strip()
+        # Line endings are normalised *before* control characters are dropped: `\r` is in `_CONTROL`, so
+        # stripping first turned a lone-CR line break ("A\rB") into "AB".
+        text = _BLANK_LINES.sub("\n\n", _CONTROL.sub("", raw.replace("\r\n", "\n").replace("\r", "\n"))).strip()
     if not text:
         raise AskRefused("`ask_user` needs `question`: one clear question for the person.")
     if len(text) > MAX_QUESTION_CHARS:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import os
 import re
 import shutil
@@ -19,7 +20,7 @@ from typing import IO, Any
 
 PYTEST_FLAGS = {"-q", "-v", "--tb=short", "--no-header"}
 MAXFAIL_RE = re.compile(r"^--maxfail=\d+$")
-NPM_SCRIPT_RE = re.compile(r"^[A-Za-z0-9_:-]+$")
+NPM_SCRIPT_RE = re.compile(r"^[A-Za-z0-9_:][A-Za-z0-9_:-]*$")
 CARGO_FLAGS = {"--", "--lib", "--bins", "--quiet"}
 # Linters and type-checkers (docs/04 section 5). `test` mode only, so they inherit the same approval
 # gate as `pytest`: mypy plugins, `build.rs`, a `go vet` cgo build and `make` run the repository's own
@@ -285,6 +286,7 @@ class _Drain:
     def __init__(self, pipe: IO[bytes] | None) -> None:
         self.kept = bytearray()
         self.truncated = False
+        self._lock = threading.Lock()
         self._pipe = pipe
         self.thread = threading.Thread(target=self._run, name="sandbox-drain", daemon=True)
         self.thread.start()
@@ -295,15 +297,19 @@ class _Drain:
         try:
             fd = self._pipe.fileno()
             while chunk := os.read(fd, _READ_CHUNK):
-                room = MAX_KEPT_BYTES - len(self.kept)
-                if room > 0:
-                    self.kept += chunk[:room]
-                if len(chunk) > room:
-                    self.truncated = True
+                with self._lock:
+                    room = MAX_KEPT_BYTES - len(self.kept)
+                    if room > 0:
+                        self.kept += chunk[:room]
+                    if len(chunk) > room:
+                        self.truncated = True
         except (OSError, ValueError):
             pass  # the pipe went away under us: what was read is what there is
         finally:
-            self._pipe.close()
+            try:
+                self._pipe.close()
+            except OSError:
+                pass
 
     def text(self) -> str:
         """What a model reads: never an exception for a byte that is not UTF-8.
@@ -312,8 +318,11 @@ class _Drain:
         `UnicodeDecodeError` out of `run_command`, past every caller. Line endings are translated the way the text
         mode this replaced translated them, so what a command printed reads as it always did.
         """
-        decoded = bytes(self.kept).decode("utf-8", errors="replace")
-        return _cap_output(decoded.replace("\r\n", "\n").replace("\r", "\n"), self.truncated)
+        with self._lock:
+            raw = bytes(self.kept)
+            truncated = self.truncated
+        decoded = raw.decode("utf-8", errors="replace")
+        return _cap_output(decoded.replace("\r\n", "\n").replace("\r", "\n"), truncated)
 
 
 def _settle(proc: subprocess.Popen[bytes], drains: tuple[_Drain, _Drain], deadline: float) -> bool:
@@ -613,16 +622,18 @@ class SandboxService:
                 "sandbox isolation is auto, but bubblewrap (bwrap) is installed and cannot build a jail — "
                 "this command ran unjailed"
             )
+        real_home = Path.home().resolve()
+        jail_home = str(real_home)
         args = _jail_base(bwrap, network)
         args += [
             "--size", str(JAIL_HOME_TMPFS_BYTES),
-            "--tmpfs", JAIL_HOME, "--setenv", "HOME", JAIL_HOME,
+            "--tmpfs", jail_home, "--setenv", "HOME", jail_home,
         ]
         state = home.codify_home().resolve()
-        real_home = Path.home().resolve()
-        # `~/.codify` is already covered by the home tmpfs; a redirected CODIFY_HOME elsewhere is not.
-        if state != real_home and state != real_home / home.DEFAULT_DIR and state.exists():
-            args += ["--tmpfs", str(state)]
+        # `~/.codify` (and anything else under `$HOME`) is already covered by the home tmpfs;
+        # a redirected CODIFY_HOME elsewhere gets its own bounded tmpfs mask.
+        if not state.is_relative_to(real_home) and state.exists():
+            args += ["--size", str(JAIL_RUN_TMPFS_BYTES), "--tmpfs", str(state)]
         root_text = str(root)
         if root.is_relative_to(real_home):
             # The home tmpfs is empty, so the workspace's own directory has to exist before it can be bound.
@@ -633,18 +644,85 @@ class SandboxService:
         # visible, and none of these are writable.
         args += self._tool_binds(Path(argv[0]), real_home)
         args += ["--bind", root_text, root_text]
-        # The workspace is writable; its git metadata is not. A test that can write
+        # The workspace is writable; its git metadata (top-level `.git`, any in-workspace
+        # gitfile target, and nested submodule `.git` entries) is not. A test that can write
         # `.git/config` can name a `core.fsmonitor` or install a post-commit hook, and
         # the engine's own commit — which runs outside this jail — would execute it
         # with the person's real HOME. Bind the metadata back read-only after the
         # writable workspace, so the workspace itself stays a normal working tree.
-        git_meta = root / ".git"
-        if git_meta.exists():
-            args += ["--ro-bind", str(git_meta), str(git_meta)]
+        args += self._git_ro_binds(root)
         args += ["--chdir", root_text]
         if not network:
             args += ["--unshare-net"]
         return [*args, "--", *argv], None
+
+    @staticmethod
+    def _git_ro_binds(root: Path) -> list[str]:
+        """Read-only bwrap binds for top-level `.git`, in-workspace gitfile targets, and nested submodule `.git`."""
+        git_meta = root / ".git"
+        if git_meta.is_symlink():
+            raise CommandNotAllowed("workspace .git must not be a symbolic link")
+        bound: list[Path] = []
+        out: list[str] = []
+
+        def _covered(path: Path) -> bool:
+            return any(path == b or b in path.parents for b in bound)
+
+        def _bind_ro(path: Path) -> None:
+            if not _covered(path):
+                bound.append(path)
+                out.extend(["--ro-bind", str(path), str(path)])
+
+        def _bind_gitfile_target(gitfile: Path) -> None:
+            try:
+                first = gitfile.read_text(encoding="utf-8", errors="replace").splitlines()[0]
+            except (OSError, IndexError):
+                return
+            if not first.startswith("gitdir:"):
+                return
+            raw_target = first[len("gitdir:"):].strip()
+            if not raw_target:
+                return
+            candidate = Path(raw_target)
+            if not candidate.is_absolute():
+                candidate = gitfile.parent / candidate
+            try:
+                resolved = candidate.resolve()
+            except OSError:
+                return
+            if resolved != root and root in resolved.parents and resolved.exists():
+                _bind_ro(resolved)
+
+        if git_meta.exists():
+            _bind_ro(git_meta)
+            if git_meta.is_file():
+                _bind_gitfile_target(git_meta)
+
+        skip = frozenset({
+            ".git", "node_modules", ".venv", "venv", "target", "__pycache__",
+            ".mypy_cache", ".ruff_cache", ".pytest_cache", "dist", "build",
+        })
+        base_depth = len(root.parts)
+        visited_dirs = 0
+        nested_binds = 0
+        for dirpath, dirnames, filenames in os.walk(root, followlinks=False):
+            visited_dirs += 1
+            if visited_dirs > 2000 or nested_binds >= 64:
+                break
+            here = Path(dirpath)
+            depth = len(here.parts) - base_depth
+            if depth >= 1 and (".git" in dirnames or ".git" in filenames):
+                entry = here / ".git"
+                if not entry.is_symlink() and entry.exists():
+                    _bind_ro(entry)
+                    nested_binds += 1
+                    if entry.is_file():
+                        _bind_gitfile_target(entry)
+            if depth >= 6:
+                dirnames[:] = []
+                continue
+            dirnames[:] = [d for d in dirnames if d.casefold() not in skip]
+        return out
 
     def _refuse_unjailed(self, why: str, runs_project_code: bool) -> None:
         """Raise unless an `auto` command may run without a jail (see `_jail_argv`)."""
@@ -666,7 +744,7 @@ class SandboxService:
                 resolved = path.resolve()
             except OSError:
                 return
-            if resolved != real_home and resolved.is_relative_to(real_home) and resolved.exists():
+            if resolved != real_home and resolved.is_relative_to(real_home) and resolved.is_dir():
                 candidates.add(resolved)
 
         add(executable.parent)
@@ -708,11 +786,16 @@ class SandboxService:
             for part in ("index", "cache"):
                 add(cargo_home / "registry" / part)
         for entry in os.environ.get("PATH", "").split(os.pathsep):
-            if entry:
-                add(Path(entry))
+            if not entry:
+                continue
+            path_entry = Path(entry)
+            if not path_entry.is_absolute():
+                continue
+            add(path_entry)
         for name in ("VIRTUAL_ENV", "PYTHONHOME"):
-            if os.environ.get(name):
-                add(Path(os.environ[name]))
+            val = os.environ.get(name)
+            if val and Path(val).is_absolute():
+                add(Path(val))
 
         # Keep only the outermost candidates: a bind at `.venv` already carries `.venv/bin`.
         roots: list[Path] = []
@@ -753,7 +836,13 @@ class SandboxService:
         set the group is stopped exactly as a timeout stops it, and the result says it was cancelled (exit
         `CANCELLED_EXIT_CODE`).
         """
-        if not isinstance(timeout_s, (int, float)) or timeout_s <= 0 or timeout_s > 600:
+        if (
+            isinstance(timeout_s, bool)
+            or not isinstance(timeout_s, (int, float))
+            or not math.isfinite(timeout_s)
+            or timeout_s <= 0
+            or timeout_s > 600
+        ):
             raise CommandNotAllowed(f"invalid timeout: {timeout_s!r}")
         fs = FileSystemService(root_path)
         validate_argv(argv, fs, mode=mode)
@@ -771,7 +860,9 @@ class SandboxService:
             # Every git the sandbox starts, in either mode, is the hardened one: no pager,
             # no configured diff driver, no user config, no credentials in its environment,
             # and repository discovery that stops at the workspace.
-            child_argv = [resolved, *git_readonly.runner_args(argv[1:])]
+            resolved_root = Path(root_path).resolve()
+            work_tree = str(resolved_root) if git_readonly._git_dir(resolved_root) is not None else None
+            child_argv = [resolved, *git_readonly.runner_args(argv[1:], work_tree=work_tree)]
             env = guarded_env(git_readonly.runner_env(os.environ, root_path), COMMAND_LIMITS)
         else:
             child_argv = [resolved, *hardened_args(argv)]
@@ -831,7 +922,10 @@ class SandboxService:
             self._kill_group(proc.pid)
             if not _settle(proc, drains, time.monotonic() + 5):
                 self._kill_group(proc.pid, sig=signal.SIGKILL)
-                proc.wait()
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
                 # Bounded, unlike the `communicate()` this replaced: a process that escaped the group and still
                 # holds a pipe would have kept the engine here for as long as it lived.
                 _settle(proc, drains, time.monotonic() + 5)

@@ -73,10 +73,24 @@ have_version() {
 # directory carrying neither — a backup that merely ends in -$version, say — is
 # refused rather than deleted: a gate that guesses wrong here does not get a
 # second guess.
+canonical_path() {
+  if command -v realpath >/dev/null 2>&1; then
+    realpath -m -- "$1" 2>/dev/null && return 0
+  fi
+  if command -v python3 >/dev/null 2>&1; then
+    python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$1"
+    return $?
+  fi
+  return 1
+}
+
 owned_by_this_script() {
-  [ -f "$stamp_file" ] && return 0
-  case "${venv%/}" in
-    "$cache_root"/*) return 0 ;;
+  [ -f "$stamp_file" ] && [ ! -L "$venv" ] && return 0
+  local canon_venv canon_cache
+  canon_venv="$(canonical_path "${venv%/}")" || return 1
+  canon_cache="$(canonical_path "${cache_root%/}")" || return 1
+  case "$canon_venv" in
+    "$canon_cache"/*) return 0 ;;
   esac
   return 1
 }
@@ -108,17 +122,16 @@ if command -v "python$version" >/dev/null 2>&1; then
 fi
 
 if [ -z "$uv_bin" ] && [ -z "$base" ]; then
-  cat >&2 <<EOF
-ci-python-floor: no python$version on PATH and no uv to fetch one.
+  printf >&2 'ci-python-floor: no python%s on PATH and no uv to fetch one.
 
-`make ci` does not drop this leg. Python $version is the declared minimum and the only
+`make ci` does not drop this leg. Python %s is the declared minimum and the only
 leg that rejects syntax the newer interpreters accept. Install either:
 
-  * python$version — e.g. \`apt install python$version\`, or \`pyenv install $version\`, or
+  * python%s — e.g. `apt install python%s`, or `pyenv install %s`, or
   * uv — https://docs.astral.sh/uv/, which downloads the interpreter on demand.
 
 Set CI_CACHE to put the venv somewhere other than the default cache directory.
-EOF
+' "$version" "$version" "$version" "$version" "$version"
   exit 1
 fi
 

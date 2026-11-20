@@ -802,8 +802,10 @@ class Conductor:
         # The exact call, again, with no tool in between: nothing it could be asking about has changed.
         # Running it again would repeat a move (a second `write` for one step), and telling the model to try
         # again is how a loop becomes a budget. The result is the tool message above; this says so.
+        # Pollable read-only status tools (`read_machine`, `read_ci`, `read_page`) observe external state
+        # that changes between identical calls, so they are exempt from the duplicate guard.
         signature = (call.name, json.dumps(call.arguments, sort_keys=True, default=str))
-        if self._last_call == signature:
+        if call.name not in _POLLABLE_READ_TOOLS and self._last_call == signature:
             return (
                 f"`{call.name}` was not run again: it is the same call, with the same arguments, as the one "
                 "immediately before it. Its result is the tool message above; use that, or change the call."
@@ -840,6 +842,9 @@ class Conductor:
             # to keep asking, so the refusal says it is final.
             return f"Refused, and retrying will not help: {exc}"
         except Exception as exc:  # noqa: BLE001 — a model's bad call is not our bug
+            # Transient failure: clear `_last_call` so retrying the same call is not blocked.
+            if self._last_call == signature:
+                self._last_call = None
             return f"That call failed: {type(exc).__name__}: {exc}"
 
 
@@ -1751,6 +1756,8 @@ EDITOR_TOOLS = frozenset({"read_editor", "open_in_editor", "edit_editor"})
 MACHINE_TOOLS = frozenset({"read_machine", "run_in_machine", "key_in_machine", "reset_machine"})
 #: The browser tab's verbs. `fetch_page` is not one: it is an HTTP request the engine makes and needs no window.
 PAGE_TOOLS = frozenset({"read_page"}) | BROWSER_ACTION_TOOLS
+#: Read-only tools whose observed external state changes over time, so consecutive identical calls are valid polling.
+_POLLABLE_READ_TOOLS = frozenset({"read_machine", "read_ci", "read_page"})
 
 
 def without_browser_actions(tools: list[ToolSpec]) -> list[ToolSpec]:

@@ -58,6 +58,7 @@ import ipaddress
 import re
 import socket
 import ssl
+import zlib
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from ssl import SSLContext
@@ -458,7 +459,11 @@ def _extract(markup: str, url: str, selector: str | None, budget: int) -> Fetche
             href = anchor.attrs.get("href", "").strip()
             if not href or href.startswith("#") or len(href) > MAX_LINK_URL_CHARS:
                 continue
-            absolute = strip_invisible(urljoin(url, href)).split("#", 1)[0]
+            try:
+                joined = urljoin(url, href)
+            except ValueError:
+                continue
+            absolute = strip_invisible(joined).split("#", 1)[0]
             if not absolute.startswith(("http://", "https://")) or absolute in seen or len(absolute) > MAX_LINK_URL_CHARS:
                 continue
             seen.add(absolute)
@@ -540,6 +545,7 @@ async def _once(
         "Host": _host_header(target),
         "User-Agent": _user_agent(),
         "Accept": "text/html,application/xhtml+xml,text/plain;q=0.8,*/*;q=0.1",
+        "Accept-Encoding": "identity",
     }
     extensions: dict[str, object] = {} if _ip(target.host) is not None else {"sni_hostname": target.host}
     pinned = f"{target.scheme}://{_netloc(address, target.port)}{target.path}"
@@ -560,15 +566,70 @@ async def _once(
                     f"{_shown(target.host)} sent {_type_name(content_type)}, which is not text. "
                     "Only web pages and plain text are read."
                 )
+            content_encoding = response.headers.get("content-encoding", "").strip().lower()
+            if content_encoding not in ("", "identity", "gzip", "x-gzip", "deflate"):
+                raise FetchRefused(
+                    f"{_shown(target.host)} sent a compressed reply that was not asked for."
+                )
             body = bytearray()
             capped = False
-            async for chunk in response.aiter_bytes():
-                room = MAX_BODY_BYTES - len(body)
-                if len(chunk) > room:
-                    body.extend(chunk[:room])
-                    capped = True
-                    break
-                body.extend(chunk)
+            if content_encoding in ("", "identity") or hasattr(response, "_content"):
+                async for chunk in response.aiter_bytes():
+                    room = MAX_BODY_BYTES - len(body)
+                    if len(chunk) > room:
+                        body.extend(chunk[:room])
+                        capped = True
+                        break
+                    body.extend(chunk)
+            else:
+                decomp = zlib.decompressobj(
+                    16 + zlib.MAX_WBITS if "gzip" in content_encoding else zlib.MAX_WBITS
+                )
+                raw_read = 0
+                raw_deflate_retried = False
+                try:
+                    async for raw_chunk in response.aiter_raw():
+                        raw_read += len(raw_chunk)
+                        if raw_read > MAX_BODY_BYTES * 2:
+                            capped = True
+                            break
+                        room = MAX_BODY_BYTES - len(body)
+                        try:
+                            piece = decomp.decompress(raw_chunk, room + 1)
+                        except zlib.error:
+                            if content_encoding == "deflate" and not raw_deflate_retried and not body:
+                                raw_deflate_retried = True
+                                decomp = zlib.decompressobj(-zlib.MAX_WBITS)
+                                piece = decomp.decompress(raw_chunk, room + 1)
+                            else:
+                                raise
+                        if len(piece) > room:
+                            body.extend(piece[:room])
+                            capped = True
+                            break
+                        body.extend(piece)
+                        if decomp.unconsumed_tail:
+                            capped = True
+                            break
+                    if not capped:
+                        room = MAX_BODY_BYTES - len(body)
+                        tail = decomp.decompress(b"", room + 1)
+                        if len(tail) > room or decomp.unconsumed_tail:
+                            body.extend(tail[:room])
+                            capped = True
+                        else:
+                            body.extend(tail)
+                            room = MAX_BODY_BYTES - len(body)
+                            flushed = decomp.flush()
+                            if len(flushed) > room:
+                                body.extend(flushed[:room])
+                                capped = True
+                            else:
+                                body.extend(flushed)
+                except zlib.error as exc:
+                    raise FetchRefused(
+                        f"{_shown(target.host)} sent a damaged compressed reply."
+                    ) from exc
             return _Reply(status, None, content_type, response.charset_encoding, bytes(body), capped)
         finally:
             await response.aclose()
@@ -649,7 +710,13 @@ async def _fetch(
         reply = await _first_reply(target, addresses, transport, verify)
         if reply.location is not None:
             hops.append(target.url)
-            target = check_url(urljoin(target.url, reply.location), policy)
+            try:
+                next_url = urljoin(target.url, reply.location)
+            except ValueError as exc:
+                raise FetchRefused(
+                    f"{_shown(target.host)} redirected to a URL that could not be parsed."
+                ) from exc
+            target = check_url(next_url, policy)
             continue
         text = _decode(reply.body, reply.charset)
         if not text.strip():

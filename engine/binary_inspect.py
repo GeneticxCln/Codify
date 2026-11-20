@@ -32,6 +32,7 @@ is still `EXPORT_CAPS`.
 from __future__ import annotations
 
 import bisect
+import re
 import struct
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -163,6 +164,48 @@ def _perms(read: bool, write: bool, execute: bool) -> str:
 # ── calling relationships ───────────────────────────────────────────────────────────────────
 
 
+_PRINTABLE_RUN = re.compile(rb"[\x20-\x7e]{4,}")
+_ARM64_BL_TOP = re.compile(rb"[\x94-\x97]")
+_MAX_FAT_DEPTH = 4
+MAX_SECTIONS = 1024
+MAX_SCAN_BYTES = 64 * 1024 * 1024
+MAX_STRINGS_COUNT = 50_000
+
+
+def _uncovered_ranges(covered: list[tuple[int, int]], start: int, end: int) -> list[tuple[int, int]]:
+    """Return sub-intervals of `[start, end)` not yet in `covered`, and merge `[start, end)` into `covered`."""
+    if start >= end:
+        return []
+    uncovered: list[tuple[int, int]] = []
+    cur = start
+    merged: list[tuple[int, int]] = []
+    inserted = False
+    new_lo, new_hi = start, end
+    for lo, hi in covered:
+        if hi < start:
+            merged.append((lo, hi))
+            continue
+        if lo > end:
+            if not inserted:
+                if cur < end:
+                    uncovered.append((cur, end))
+                merged.append((new_lo, new_hi))
+                inserted = True
+            merged.append((lo, hi))
+            continue
+        if lo > cur:
+            uncovered.append((cur, lo))
+        cur = max(cur, hi)
+        new_lo = min(new_lo, lo)
+        new_hi = max(new_hi, hi)
+    if not inserted:
+        if cur < end:
+            uncovered.append((cur, end))
+        merged.append((new_lo, new_hi))
+    covered[:] = merged
+    return uncovered
+
+
 def _scan_calls(image: _Image, data: bytes, addrs: list[int], sizes: dict[int, int],
                 limits: Mapping[str, int]) -> tuple[dict[int, set[int]], dict[int, set[int]]]:
     """Direct call edges, by scanning executable sections. Indirect calls are not guessed at."""
@@ -170,29 +213,45 @@ def _scan_calls(image: _Image, data: bytes, addrs: list[int], sizes: dict[int, i
     incoming: dict[int, set[int]] = {addr: set() for addr in addrs}
     if image.arch not in ("x86", "arm64"):
         return out, incoming
+    covered: list[tuple[int, int]] = []
+    scanned_bytes = 0
     for section in image.sections:
         if not section.executable or section.file_size <= 0:
             continue
-        body = _bytes_at(data, section.file_offset, section.file_size)
-        if len(body) < 5:
+        if section.file_offset < 0 or section.file_offset >= len(data):
             continue
-        if image.arch == "x86":
-            for index in range(0, len(body) - 4):
-                if body[index] != 0xE8:
-                    continue
-                target = section.start + index + 5 + struct.unpack_from(image.endian + "i", body, index + 1)[0]
-                _edge(out, incoming, addrs, sizes, section.start + index, target, limits["edges"])
-        else:
-            step = 4
-            for index in range(0, len(body) - 3, step):
-                word = struct.unpack_from(image.endian + "I", body, index)[0]
-                if (word & 0xFC000000) != 0x94000000:  # BL
-                    continue
-                immediate = word & 0x03FFFFFF
-                if immediate & 0x02000000:
-                    immediate -= 0x04000000
-                target = section.start + index + (immediate << 2)
-                _edge(out, incoming, addrs, sizes, section.start + index, target, limits["edges"])
+        sec_end = min(len(data), section.file_offset + section.file_size)
+        for sub_start, sub_end in _uncovered_ranges(covered, section.file_offset, sec_end):
+            remaining = MAX_SCAN_BYTES - scanned_bytes
+            if remaining <= 0:
+                return out, incoming
+            if sub_end - sub_start > remaining:
+                sub_end = sub_start + remaining
+            body = data[sub_start:sub_end]
+            scanned_bytes += len(body)
+            if len(body) < 5:
+                continue
+            va_base = section.start + (sub_start - section.file_offset)
+            if image.arch == "x86":
+                unpack_i = struct.Struct(image.endian + "i").unpack_from
+                limit = len(body) - 4
+                pos = body.find(b"\xe8", 0, limit)
+                while pos != -1:
+                    target = va_base + pos + 5 + unpack_i(body, pos + 1)[0]
+                    _edge(out, incoming, addrs, sizes, va_base + pos, target, limits["edges"])
+                    pos = body.find(b"\xe8", pos + 1, limit)
+            else:
+                unpack_u = struct.Struct(image.endian + "I").unpack_from
+                aligned_len = len(body) - (len(body) % 4)
+                top = body[3:aligned_len:4] if image.endian == "<" else body[0:aligned_len:4]
+                for match in _ARM64_BL_TOP.finditer(top):
+                    index = match.start() * 4
+                    word = unpack_u(body, index)[0]
+                    immediate = word & 0x03FFFFFF
+                    if immediate & 0x02000000:
+                        immediate -= 0x04000000
+                    target = va_base + index + (immediate << 2)
+                    _edge(out, incoming, addrs, sizes, va_base + index, target, limits["edges"])
     return out, incoming
 
 
@@ -214,7 +273,9 @@ def _owner(addrs: list[int], sizes: dict[int, int], address: int) -> int | None:
         return None
     start = addrs[index]
     size = sizes.get(start, 0)
-    if size and address >= start + size:
+    if size <= 0:
+        return start if address == start else None
+    if address >= start + size:
         return None
     return start
 
@@ -226,29 +287,44 @@ def _strings(image: _Image, data: bytes, cap: int, text_clip: int) -> tuple[list
     """Printable runs of four characters or more in the sections that hold content, bounded."""
     rows: list[dict[str, str]] = []
     total = 0
+    covered: list[tuple[int, int]] = []
+    scanned_bytes = 0
+    count_limit = max(cap * 4, MAX_STRINGS_COUNT)
     for section in image.sections:
         if section.file_size <= 0 or _name_is_metadata(section.name):
             continue
-        body = _bytes_at(data, section.file_offset, section.file_size)
-        index = 0
-        while index < len(body):
-            while index < len(body) and not 0x20 <= body[index] <= 0x7E:
-                index += 1
-            end = index
-            while end < len(body) and 0x20 <= body[end] <= 0x7E:
-                end += 1
-            if end - index >= 4:
+        if section.file_offset < 0 or section.file_offset >= len(data):
+            continue
+        sec_end = min(len(data), section.file_offset + section.file_size)
+        for sub_start, sub_end in _uncovered_ranges(covered, section.file_offset, sec_end):
+            remaining = MAX_SCAN_BYTES - scanned_bytes
+            if remaining <= 0 or total >= count_limit:
+                return rows, total
+            if sub_end - sub_start > remaining:
+                sub_end = sub_start + remaining
+            body = data[sub_start:sub_end]
+            scanned_bytes += len(body)
+            va_base = section.start + (sub_start - section.file_offset)
+            for match in _PRINTABLE_RUN.finditer(body):
                 total += 1
                 if len(rows) < cap:
                     rows.append({
-                        "address": _hex(section.start + index),
-                        "value": _clean(body[index:end].decode("ascii", "replace"), text_clip),
+                        "address": _hex(va_base + match.start()),
+                        "value": _clean(match.group(0).decode("ascii", "replace"), text_clip),
                     })
-            index = end if end > index else index + 1
+                if total >= count_limit:
+                    return rows, total
     return rows, total
 
 
 # ── the answer ──────────────────────────────────────────────────────────────────────────────
+
+
+def _section_end(sections: list[_Section], address: int) -> int:
+    for section in sections:
+        if section.size > 0 and section.start <= address < section.start + section.size:
+            return section.start + section.size
+    return 0
 
 
 def _finish(image: _Image, data: bytes, caps: Mapping[str, int]) -> dict[str, Any]:
@@ -257,8 +333,15 @@ def _finish(image: _Image, data: bytes, caps: Mapping[str, int]) -> dict[str, An
     sizes: dict[int, int] = {}
     for index, addr in enumerate(addrs):
         size = image.sizes.get(addr, 0)
-        if size <= 0 and index + 1 < len(addrs):
-            size = addrs[index + 1] - addr
+        if size <= 0:
+            sec_end = _section_end(image.sections, addr)
+            next_addr = addrs[index + 1] if index + 1 < len(addrs) else 0
+            if next_addr and sec_end:
+                size = min(next_addr, sec_end) - addr
+            elif next_addr:
+                size = next_addr - addr
+            elif sec_end:
+                size = sec_end - addr
         sizes[addr] = max(0, size)
     out, incoming = _scan_calls(image, data, addrs, sizes, caps)
     unique_imports: list[tuple[str, str]] = []
@@ -346,7 +429,7 @@ def _elf(data: bytes) -> _Image:
         if e_shentsize < section_size:
             raise UnsupportedFormat("ELF section headers are smaller than the format allows")
         _need(data, e_shoff, e_shnum * e_shentsize)
-        for index in range(e_shnum):
+        for index in range(min(e_shnum, MAX_SECTIONS)):
             headers.append(_unpack(data, endian, section_format, e_shoff + index * e_shentsize))
     else:
         raise UnsupportedFormat("an ELF file with no section table")
@@ -400,7 +483,7 @@ def _elf(data: bytes) -> _Image:
             elif kind == 2 and st_value:
                 functions.setdefault(st_value, symbol)
                 sizes.setdefault(st_value, int(st_size))
-    compiler = _elf_compiler(sections, data)
+    compiler = _elf_compiler(names, headers, data)
     return _Image(
         format="Executable and Linking Format (ELF)", language=_language(arch, width, endian),
         compiler=compiler, bits=width, image_base=min((s.start for s in sections), default=0),
@@ -437,11 +520,14 @@ def _elf_libraries(data: bytes, endian: str, headers: list[tuple[int, ...]], nam
     return []
 
 
-def _elf_compiler(sections: list[_Section], data: bytes) -> str:
-    for section in sections:
-        if section.name != ".comment":
+def _elf_compiler(names: list[str], headers: list[tuple[int, ...]], data: bytes) -> str:
+    for name, header in zip(names, headers, strict=False):
+        if name != ".comment":
             continue
-        text = _bytes_at(data, section.file_offset, section.file_size).decode("utf-8", "replace")
+        sh_type, sh_offset, sh_size = header[1], header[4], header[5]
+        if sh_type == 8 or sh_size <= 0:
+            continue
+        text = _bytes_at(data, sh_offset, min(sh_size, 65_536)).decode("utf-8", "replace")
         if "GCC" in text:
             return "GCC"
         lowered = text.lower()
@@ -463,15 +549,18 @@ def _pe(data: bytes) -> _Image:
         data, "<", "HHIIIHH", e_lfanew + 4
     )
     optional = e_lfanew + 24
+    if optional_size < 32:
+        raise UnsupportedFormat("a PE optional header shorter than the format allows")
+    _need(data, optional, optional_size)
     magic = _unpack(data, "<", "H", optional)[0]
     if magic == 0x10B:
         bits, image_base, entry = 32, _unpack(data, "<", "I", optional + 28)[0], _unpack(data, "<", "I", optional + 16)[0]
         directories = optional + 96
-        directory_count = _unpack(data, "<", "I", optional + 92)[0]
+        directory_count = _unpack(data, "<", "I", optional + 92)[0] if optional_size >= 96 else 0
     elif magic == 0x20B:
         bits, image_base, entry = 64, _unpack(data, "<", "Q", optional + 24)[0], _unpack(data, "<", "I", optional + 16)[0]
         directories = optional + 112
-        directory_count = _unpack(data, "<", "I", optional + 108)[0]
+        directory_count = _unpack(data, "<", "I", optional + 108)[0] if optional_size >= 112 else 0
     else:
         raise UnsupportedFormat("a PE optional header this reader does not understand")
     arch, width = {(0x14C): ("x86", 32), (0x8664): ("x86", 64), (0xAA64): ("arm64", 64)}.get(
@@ -481,7 +570,7 @@ def _pe(data: bytes) -> _Image:
     raw_sections: list[tuple[int, int, int, int, int]] = []  # va, vsize, raw offset, raw size, characteristics
     table = optional + optional_size
     _need(data, table, section_count * 40)
-    for index in range(section_count):
+    for index in range(min(section_count, MAX_SECTIONS)):
         offset = table + index * 40
         name = data[offset:offset + 8].split(_NULL, 1)[0].decode("utf-8", "replace")
         virtual_size, virtual_address, raw_size, raw_offset = _unpack(data, "<", "IIII", offset + 8)
@@ -506,8 +595,10 @@ def _pe(data: bytes) -> _Image:
         offset = rva_offset(rva)
         return _cstr(data, offset, limit) if offset is not None else ""
 
+    max_directories = max(0, (optional + optional_size - directories) // 8)
+
     def directory(index: int) -> tuple[int, int]:
-        if index >= directory_count:
+        if index >= directory_count or index >= max_directories:
             return 0, 0
         _need(data, directories + index * 8, 8)
         return _unpack(data, "<", "II", directories + index * 8)
@@ -545,11 +636,12 @@ def _pe(data: bytes) -> _Image:
                 at = offset + index * 20
                 if at + 20 > len(data):
                     break
-                original, name_rva, _first, _stamp = _unpack(data, "<", "IIII", at)
-                if not (original or name_rva):
+                original, _stamp, _forwarder, name_rva, first_thunk = _unpack(data, "<", "IIIII", at)
+                if not (original or name_rva or first_thunk):
                     break
                 library = read_rva(name_rva, 120)
-                thunk_offset = rva_offset(original) if original else None
+                lookup_rva = original or first_thunk
+                thunk_offset = rva_offset(lookup_rva) if lookup_rva else None
                 if thunk_offset is None:
                     continue
                 size = 8 if bits == 64 else 4
@@ -562,7 +654,7 @@ def _pe(data: bytes) -> _Image:
                         break
                     if bits == 64 and value & (1 << 63):
                         continue
-                    if not bits and value & (1 << 31):
+                    if bits == 32 and value & (1 << 31):
                         continue
                     imported = read_rva(int(value) + 2, 200)
                     if imported:
@@ -571,22 +663,27 @@ def _pe(data: bytes) -> _Image:
     # COFF symbols make an object file useful even when it has no export table.
     if symbol_ptr and symbol_count:
         string_table = symbol_ptr + symbol_count * 18
-        for index in range(min(symbol_count, 200_000)):
+        sym_limit = min(symbol_count, 200_000)
+        index = 0
+        while index < sym_limit:
             at = symbol_ptr + index * 18
             if at + 18 > len(data):
                 break
             raw_name = data[at:at + 8]
-            value, section_number, kind = _unpack(data, "<", "IhH", at + 8)
-            if raw_name.startswith(b"/") and raw_name[1:].isdigit() and string_table + 4 <= len(data):
-                name = _cstr(data, string_table + int(raw_name[1:]), 120)
+            value, section_number, kind, _storage_class, num_aux = _unpack(data, "<", "IhHBB", at + 8)
+            if raw_name[:4] == b"\x00\x00\x00\x00":
+                str_offset = struct.unpack_from("<I", raw_name, 4)[0]
+                if str_offset >= 4 and string_table + str_offset < len(data):
+                    name = _cstr(data, string_table + str_offset, 120)
+                else:
+                    name = ""
             else:
                 name = raw_name.split(_NULL, 1)[0].decode("utf-8", "replace")
-            if not name:
-                continue
-            if section_number > 0 and section_number <= len(raw_sections) and kind & 0x20:
+            if name and 0 < section_number <= len(raw_sections) and kind & 0x20:
                 address = image_base + raw_sections[section_number - 1][0] + int(value)
                 functions.setdefault(address, name)
                 sizes.setdefault(address, 0)
+            index += 1 + int(num_aux)
 
     compiler = ""
     for section in sections:
@@ -608,20 +705,26 @@ def _pe(data: bytes) -> _Image:
 # ── Mach-O ──────────────────────────────────────────────────────────────────────────────────
 
 
-def _macho(data: bytes) -> _Image:
+def _macho(data: bytes, _depth: int = 0) -> _Image:
     if len(data) < 4:
         raise UnsupportedFormat("not a Mach-O file")
     magic_be = struct.unpack_from(">I", data, 0)[0]
     magic_le = struct.unpack_from("<I", data, 0)[0]
     if magic_be in (0xCAFEBABE, 0xCAFEBABF) and len(data) >= 8:
+        if _depth >= _MAX_FAT_DEPTH:
+            raise UnsupportedFormat("a fat Mach-O is nested too deeply")
         count = struct.unpack_from(">I", data, 4)[0]
-        if count == 0 or len(data) < 8 + 20:
-            raise UnsupportedFormat("a fat Mach-O with no architecture")
-        offset = struct.unpack_from(">I", data, 16)[0]
-        size = struct.unpack_from(">I", data, 20)[0]
-        if offset + size > len(data):
+        if magic_be == 0xCAFEBABF:
+            if count == 0 or len(data) < 8 + 32:
+                raise UnsupportedFormat("a fat Mach-O with no architecture")
+            offset, size = struct.unpack_from(">QQ", data, 16)
+        else:
+            if count == 0 or len(data) < 8 + 20:
+                raise UnsupportedFormat("a fat Mach-O with no architecture")
+            offset, size = struct.unpack_from(">II", data, 16)
+        if offset <= 0 or size <= 0 or size >= len(data) or offset + size > len(data):
             raise UnsupportedFormat("a fat Mach-O slice is outside the file")
-        return _macho(data[offset:offset + size])
+        return _macho(data[offset:offset + size], _depth + 1)
     if magic_le == 0xFEEDFACF:
         endian, bits = "<", 64
     elif magic_le == 0xFEEDFACE:
@@ -649,50 +752,82 @@ def _macho(data: bytes) -> _Image:
     dylibs: list[str] = []
     symoff = stroff = nsyms = 0
     offset = header
-    for _ in range(command_count):
+    for _ in range(min(command_count, 4096)):
         if offset + 8 > len(data):
             break
         command, command_size = _unpack(data, endian, "II", offset)
         if command_size < 8 or offset + command_size > len(data):
             break
-        if command in (0x1, 0x19):  # LC_SEGMENT, LC_SEGMENT_64
+        if command == 0x19:  # LC_SEGMENT_64
             if bits == 64 and command_size >= 72:
                 vmaddr, vmsize, fileoff, filesize = _unpack(data, endian, "QQQQ", offset + 24)
-                initprot = _unpack(data, endian, "i", offset + 56)[0]
+                initprot = _unpack(data, endian, "i", offset + 60)[0]
                 section_count = _unpack(data, endian, "I", offset + 64)[0]
                 section_at = offset + 72
                 section_stride = 80
-            else:
+                segments.append((int(vmaddr), int(vmsize), int(fileoff), int(filesize)))
+                for index in range(min(section_count, 256)):
+                    if len(sections) >= MAX_SECTIONS:
+                        break
+                    at = section_at + index * section_stride
+                    if at + section_stride > offset + command_size or at + section_stride > len(data):
+                        break
+                    name = data[at:at + 16].split(_NULL, 1)[0].decode("utf-8", "replace")
+                    seg = data[at + 16:at + 32].split(_NULL, 1)[0].decode("utf-8", "replace")
+                    address, size, file_at = _unpack(data, endian, "QQI", at + 32)
+                    sect_flags = _unpack(data, endian, "I", at + 64)[0]
+                    sect_type = int(sect_flags) & 0xFF
+                    zerofill = sect_type in (0x1, 0xC, 0x12) or int(file_at) == 0
+                    readable = bool(int(initprot) & 1)
+                    writable = bool(int(initprot) & 2)
+                    executable = bool(int(initprot) & 4)
+                    sections.append(_Section(
+                        name=f"{seg},{name}" if seg else name, start=int(address), size=int(size),
+                        file_offset=0 if zerofill else int(file_at),
+                        file_size=0 if zerofill else int(size),
+                        perms=_perms(readable, writable, executable),
+                        executable=executable,
+                    ))
+        elif command == 0x1:  # LC_SEGMENT (32-bit)
+            if bits == 32 and command_size >= 56:
                 vmaddr, vmsize, fileoff, filesize = _unpack(data, endian, "IIII", offset + 24)
                 initprot = _unpack(data, endian, "i", offset + 44)[0]
                 section_count = _unpack(data, endian, "I", offset + 48)[0]
                 section_at = offset + 56
                 section_stride = 68
-            segments.append((int(vmaddr), int(vmsize), int(fileoff), int(filesize)))
-            for index in range(min(section_count, 256)):
-                at = section_at + index * section_stride
-                if at + section_stride > offset + command_size or at + section_stride > len(data):
-                    break
-                name = data[at:at + 16].split(_NULL, 1)[0].decode("utf-8", "replace")
-                seg = data[at + 16:at + 32].split(_NULL, 1)[0].decode("utf-8", "replace")
-                if bits == 64:
-                    address, size, file_at = _unpack(data, endian, "QQI", at + 32)
-                else:
+                segments.append((int(vmaddr), int(vmsize), int(fileoff), int(filesize)))
+                for index in range(min(section_count, 256)):
+                    if len(sections) >= MAX_SECTIONS:
+                        break
+                    at = section_at + index * section_stride
+                    if at + section_stride > offset + command_size or at + section_stride > len(data):
+                        break
+                    name = data[at:at + 16].split(_NULL, 1)[0].decode("utf-8", "replace")
+                    seg = data[at + 16:at + 32].split(_NULL, 1)[0].decode("utf-8", "replace")
                     address, size, file_at = _unpack(data, endian, "III", at + 32)
-                writable = bool(int(initprot) & 2)
-                executable = bool(int(initprot) & 4)
-                sections.append(_Section(
-                    name=f"{seg},{name}" if seg else name, start=int(address), size=int(size),
-                    file_offset=int(file_at), file_size=int(size), perms=_perms(True, writable, executable),
-                    executable=executable,
-                ))
+                    sect_flags = _unpack(data, endian, "I", at + 56)[0]
+                    sect_type = int(sect_flags) & 0xFF
+                    zerofill = sect_type in (0x1, 0xC, 0x12) or int(file_at) == 0
+                    readable = bool(int(initprot) & 1)
+                    writable = bool(int(initprot) & 2)
+                    executable = bool(int(initprot) & 4)
+                    sections.append(_Section(
+                        name=f"{seg},{name}" if seg else name, start=int(address), size=int(size),
+                        file_offset=0 if zerofill else int(file_at),
+                        file_size=0 if zerofill else int(size),
+                        perms=_perms(readable, writable, executable),
+                        executable=executable,
+                    ))
         elif command == 0x2:  # LC_SYMTAB
-            symoff, nsyms, stroff, _strsize = _unpack(data, endian, "IIII", offset + 8)
+            if command_size >= 24:
+                symoff, nsyms, stroff, _strsize = _unpack(data, endian, "IIII", offset + 8)
         elif command in (0xC, 0xD, 0x80000018, 0x8000001F):  # dylib load commands
-            name_at = _unpack(data, endian, "I", offset + 8)[0]
-            name = _cstr(data, offset + int(name_at), 200)
-            if name:
-                dylibs.append(name.rsplit("/", 1)[-1])
+            if command_size >= 12:
+                name_at = int(_unpack(data, endian, "I", offset + 8)[0])
+                if 12 <= name_at < command_size:
+                    name = _cstr(data[:offset + command_size], offset + name_at, 200)
+                    if name:
+                        dylibs.append(name.rsplit("/", 1)[-1])
         offset += command_size
     library = dylibs[0] if len(dylibs) == 1 else ""
     if symoff and nsyms:

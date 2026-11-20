@@ -1,7 +1,7 @@
 ---
 name: working-style
 description: Restate the goal, read before planning, work in small verified steps, and show the command that proved each claim.
-moves: recon, plan, write, verify, read_file, search_code, run_command, todo
+moves: recon, plan, ask_user, write, verify, read_file, search_code, run_command, todo
 ---
 
 # Working style

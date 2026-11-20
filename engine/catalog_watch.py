@@ -164,6 +164,10 @@ class CatalogWatch:
         if self._subscribers == 0:
             return {}
         catalog = await self._catalog.get(refresh=True)
+        if self._subscribers == 0:
+            # The last subscriber left while the refresh was in flight: keep
+            # `_last` cleared so the next subscriber gets a silent baseline.
+            return {}
         current = ids_by_provider(catalog.get("models") or [])
         changes = catalog_changes(self._last, current)
         baseline = self._last is None

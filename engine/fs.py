@@ -161,6 +161,18 @@ AUTORUN_DIRS = (
 )
 
 
+def _guarded_paths(path: Path) -> list[Path]:
+    """Both the literal path under `$HOME` and its resolved target (when a symlink redirects it)."""
+    paths = [path]
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return paths
+    if resolved != path:
+        paths.append(resolved)
+    return paths
+
+
 def protected_root_reason(root: Path) -> str | None:
     """Why `root` may not be a workspace, or None when it may.
 
@@ -184,17 +196,19 @@ def protected_root_reason(root: Path) -> str | None:
         if spelled in SYSTEM_ROOTS:
             return f"{spelled} is a system directory, not a project"
     for name in CREDENTIAL_DIRS:
-        guarded = real_home / name
-        if resolved == guarded or guarded in resolved.parents:
-            return f"{guarded} holds credentials, not a project"
+        raw_guarded = real_home / name
+        for guarded in _guarded_paths(raw_guarded):
+            if resolved == guarded or guarded in resolved.parents:
+                return f"{raw_guarded} holds credentials, not a project"
     for name in AUTORUN_DIRS:
-        guarded = real_home / name
-        if resolved == guarded or guarded in resolved.parents or resolved in guarded.parents:
-            return (
-                f"it is or contains {guarded}, which holds what runs when you log in (startup entries, user "
-                "services, commands on your PATH), so a goal could plant something there; choose a folder that "
-                "does not contain it"
-            )
+        raw_guarded = real_home / name
+        for guarded in _guarded_paths(raw_guarded):
+            if resolved == guarded or guarded in resolved.parents or resolved in guarded.parents:
+                return (
+                    f"it is or contains {raw_guarded}, which holds what runs when you log in (startup entries, user "
+                    "services, commands on your PATH), so a goal could plant something there; choose a folder that "
+                    "does not contain it"
+                )
     # The state directory by the same reach rule as `$HOME`: a goal rooted *in* it, or in something
     # that contains it, can rewrite the database, the token and the stored keys; one rooted in a
     # subfolder cannot get out of that subfolder.
@@ -217,6 +231,18 @@ def looks_binary(raw: bytes) -> bool:
 def version_of(raw: bytes) -> str:
     """The identity of a file's bytes, which is all a save needs to know the file has not moved under it."""
     return hashlib.sha256(raw).hexdigest()
+
+
+def _hash_file(path: Path) -> str | None:
+    """Stream-hash a file that exceeded `MAX_DIFF_BYTES` so `expected_versions` never confuses it with an absent file."""
+    digest = hashlib.sha256()
+    try:
+        with path.open("rb") as fh:
+            while chunk := fh.read(65536):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
 
 
 @dataclass(frozen=True)
@@ -423,6 +449,17 @@ class FileSystemService:
             raise FileAccessError(exc.strerror or str(exc)) from exc
         return TextFile(rel, content, version_of(data), len(data))
 
+    def _has_symlink_component(self, rel: str) -> bool:
+        """True if `rel` or any intermediate directory component under `self.root` is a symbolic link."""
+        cur = self.root
+        for part in Path(rel).parts:
+            if part in ("", "."):
+                continue
+            cur = cur / part
+            if cur.is_symlink():
+                return True
+        return False
+
     def create_text(self, rel: str, content: str) -> TextFile:
         """Create one new text file, and never replace one.
 
@@ -440,10 +477,9 @@ class FileSystemService:
         if reason is not None:
             raise ProtectedRootError(str(self.root), reason)
         target = self.resolve(rel)
-        # `resolve` follows the final link, which would make a skill through a link write the file it
-        # points at. A create is not allowed to follow one: it would create somewhere that is not the
-        # path the person named, and the skill loader refuses links for the same reason.
-        if (self.root / rel).is_symlink():
+        # `resolve` follows links, which would make a skill through a link (or linked parent dir)
+        # write somewhere else. A create is not allowed to follow any symlink component.
+        if self._has_symlink_component(rel):
             raise FileAlreadyExistsError(rel)
         try:
             if target.exists():
@@ -496,12 +532,18 @@ class FileSystemService:
             # Only the prefix the cap can use is read, not the whole file to slice it afterwards.
             with path.open("rb") as fh:
                 raw = fh.read(MAX_DIFF_BYTES)
-                cut = bool(fh.read(1))
+                extra = fh.read(65536)
+                cut = bool(extra)
+                if cut:
+                    digest = hashlib.sha256(raw)
+                    while extra:
+                        digest.update(extra)
+                        extra = fh.read(65536)
+                    version: str | None = digest.hexdigest()
+                else:
+                    version = version_of(raw)
         except OSError:
             return None, None
-        # A cut file was not shown whole, and `apply` cannot hash its whole bytes either (
-        # `_read_for_diff` answers None for an over-cap file), so a guard would compare two absences.
-        version = None if cut else version_of(raw)
         if looks_binary(raw):
             return None, version
         try:
@@ -560,10 +602,15 @@ class FileSystemService:
         """
         # The target itself was resolved through containment, but its parents
         # were not: a symlinked directory inside the workspace would redirect
-        # the write outside it. Resolve the parent and re-check containment.
+        # the write outside it or into `.git` metadata. Resolve the parent and re-check both.
         real_parent = target.parent.resolve()
         if real_parent != self.root and self.root not in real_parent.parents:
             raise PathEscapeError(str(target))
+        if (
+            target.name.casefold() == GIT_DIRNAME
+            or any(part.casefold() == GIT_DIRNAME for part in real_parent.relative_to(self.root).parts)
+        ):
+            raise GitMetadataError(str(target))
         created: list[Path] = []
         probe = real_parent
         while not probe.exists():
@@ -753,6 +800,7 @@ class FileSystemService:
         spelled: dict[Path, str] = {}  # how the batch wrote each path, for a reason that names it
         # The bytes each path held before this batch touched it, for a dry run's Apply guard.
         bases: dict[Path, str | None] = {}
+        intermediate_symlinks: list[str] = []
         for item in files:
             rel = item["path"]
             action = item["action"]
@@ -769,6 +817,8 @@ class FileSystemService:
                     f"file the link names, and a delete would remove it and leave the link dangling. Replace "
                     f"{rel} with a regular file, or name the file it points at."
                 )
+            if self._has_symlink_component(rel):
+                intermediate_symlinks.append(rel)
             if target.is_dir():
                 raise ValueError(f"{rel} is a directory, not a file")
             if target.exists() and not target.is_file():
@@ -780,7 +830,6 @@ class FileSystemService:
                 exists = planned is not None
             else:
                 before, note, raw_before = self._read_for_diff(target)
-                bases[target] = None if raw_before is None else version_of(raw_before)
                 exists = target.is_file()
                 if exists and note is not None and note.startswith(UNREADABLE):
                     # Its bytes are unknown, so a rollback could neither put them back nor leave the file be:
@@ -789,9 +838,16 @@ class FileSystemService:
                         f"{rel} exists but cannot be read ({note[len(UNREADABLE):]}), so it cannot be changed "
                         f"or deleted safely. Leave {rel} alone"
                     )
+                if raw_before is not None:
+                    bases[target] = version_of(raw_before)
+                elif exists:
+                    bases[target] = _hash_file(target)
+                else:
+                    bases[target] = None
             if expected is not None and target in expected and target not in virtual:
                 # `""` and None both mean "the path did not exist" (a create proposal stores `""`;
-                # an absent file's version is None). Normalising them keeps a create checkable.
+                # an absent file's version is None). An existing >1 MB file has a real SHA-256 in `bases[target]`,
+                # so it never matches `""`.
                 if (bases.get(target) or "") != (expected[target] or ""):
                     # Its own class: a malformed proposal and a file that moved are different answers. A
                     # fresh run asks the fixer once more with the current bytes; a replay fails the step.
@@ -828,9 +884,10 @@ class FileSystemService:
                     )
             if action != "delete":
                 _require_writable_text(after, rel, "text")
-            # A delete changes the tree iff the file is there — an *empty* file
-            # still disappears, which `before != after` alone would miss.
-            changed = exists if action == "delete" else before != after
+            # A delete changes the tree iff the file is there; a create/update changes it
+            # whenever the file did not exist yet (including a new empty file like `__init__.py`
+            # or `.gitkeep`) or its content differs.
+            changed = exists if action == "delete" else (not exists or before != after)
             if note is not None and exists and action != "delete":
                 # `before` is "" for a file the diff cannot show, so comparing text says nothing: compare the bytes.
                 changed = _read_bytes(target) != after.encode("utf-8")
@@ -864,6 +921,12 @@ class FileSystemService:
                 }
             )
         self._refuse_file_directory_clash(virtual, spelled)
+        if intermediate_symlinks:
+            bad = intermediate_symlinks[0]
+            raise ValueError(
+                f"{bad} passes through a symbolic link. Codify does not write through a link: that would change "
+                f"a file outside the path named. Replace the link with a real directory, or name the target directly."
+            )
         if dry_run:
             return summaries
 
@@ -874,6 +937,8 @@ class FileSystemService:
             # Deletions first. A file replaced by a folder of the same name (`utils.py` -> `utils/__init__.py`) needs
             # the file gone before anything is made inside it, whichever order the batch listed them in.
             for target, final in sorted(virtual.items(), key=lambda item: item[1] is not None):
+                if target.is_symlink():
+                    raise ValueError(f"{self._named(target)} is a symbolic link and was not modified")
                 on_disk = target.is_file()
                 if final is None:
                     if not on_disk:
@@ -882,6 +947,8 @@ class FileSystemService:
                     continue
                 originals[target] = _Original.of(target)
                 if final is None:
+                    if target.is_symlink():
+                        raise ValueError(f"{self._named(target)} is a symbolic link and was not deleted")
                     target.unlink(missing_ok=True)
                 else:
                     made.extend(self._write_atomic(target, final.encode("utf-8")))

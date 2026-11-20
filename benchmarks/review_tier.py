@@ -22,7 +22,7 @@ import time
 from pathlib import Path
 from typing import Any
 
-from benchmarks.runner import BenchmarkError, SkippedGate, _build_registry, materialize
+from benchmarks.runner import BenchmarkError, SkippedGate, _build_registry, _start_repository, call_health, materialize
 from engine import review
 from engine.db import connect
 from engine.executor import ExecutorService
@@ -123,7 +123,13 @@ def run_review_check(
 
 
 async def run_review_task(
-    task: dict[str, Any], work_root: Path, *, canned: bool, engine_db: Path | None = None, attempt: int = 1,
+    task: dict[str, Any],
+    work_root: Path,
+    *,
+    canned: bool,
+    engine_db: Path | None = None,
+    attempt: int = 1,
+    trace: bool = False,
 ) -> dict[str, Any]:
     """Review one fixed diff in one mode and score it. See the module docstring."""
     mode = str(task["mode"])
@@ -133,6 +139,7 @@ async def run_review_task(
     slug = str(task["id"]).replace("@", "-") + ("" if attempt == 1 else f"-attempt{attempt}")
     workspace = work_root / slug
     materialize(str(task["repo"]), workspace)
+    _start_repository(workspace)
 
     conn = connect(work_root / f"{slug}.db")
     decision = "approve"
@@ -145,6 +152,8 @@ async def run_review_task(
         goal = goals.create(GoalCreate(
             workspace_id=ws.id, title=str(task["title"]), description=str(task.get("description", "")),
         ))
+        if trace:
+            goals.set_trace(goal.id, True)
         settings = SettingsService(conn)
         settings.set_int("review_deep", 1 if mode == "deep" else 0)
         executor = ExecutorService(
@@ -196,6 +205,15 @@ async def run_review_task(
 
     findings = [f for e in events if e["type"] == "review_report" for f in e["payload"].get("findings", [])]
     loud = [f for f in findings if f.get("severity") in ("blocker", "major")]
+    stage_ms: dict[str, int] = {}
+    tokens = 0
+    for event in events:
+        if event["type"] == "stage_result":
+            stage = str(event["payload"].get("stage"))
+            stage_ms[stage] = stage_ms.get(stage, 0) + int(event["payload"].get("duration_ms") or 0)
+            tokens += int(event["payload"].get("tokens") or 0)
+    if tokens == 0:
+        tokens = sum(int(e["payload"].get("total_tokens") or 0) for e in events if e["type"] == "usage")
     return {
         "id": task["id"],
         "attempt": attempt,
@@ -204,12 +222,12 @@ async def run_review_task(
         "conductor_calls": None,
         "status": "REVIEWED",
         "wall_ms": round((time.monotonic() - started) * 1000),
-        "stage_ms": {},
-        "tokens": 0,
+        "stage_ms": stage_ms,
+        "tokens": tokens,
         "tokens_are_synthetic": canned,
         "checks": harness,
         "quality_checks": quality,
-        "call_health": {"ran": {}, "reasks": {}, "failed_calls": {}},
+        "call_health": call_health(events),
         "failure": None,
         "passed": all(c["status"] == "passed" for c in harness) and all(q["status"] != "failed" for q in quality),
         "review": {

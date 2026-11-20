@@ -37,18 +37,44 @@ case $action in
       echo "install-local: no release build yet — run 'make build-app' first" >&2
       exit 1
     fi
-    # The Exec line is parsed by the desktop-entry spec, not by a shell: a path with any of these
-    # in it cannot be quoted safely, and a menu entry that quietly does nothing is worse than a
-    # refusal that says why.
+    # The Exec line is parsed by the desktop-entry spec, not by a shell: a path with newlines,
+    # control characters, or characters that cannot be safely carried in Exec is refused up front,
+    # literal `%` is doubled so it is never read as a field code, and paths with spaces or
+    # FreeDesktop reserved characters are double-quoted.
+    nl='
+'
     case $link in
-      *[\"\`\$\\]*)
-        echo "install-local: $link contains a quote, backtick, dollar or backslash, which a" >&2
+      *"$nl"*|*[\"\`\$\\]*)
+        echo "install-local: $link contains a newline, quote, backtick, dollar or backslash, which a" >&2
         echo "install-local: .desktop Exec line cannot carry; set XDG_BIN_HOME to a plainer path" >&2
         exit 1
         ;;
     esac
-    exec_path=$link
-    case $link in *" "*) exec_path="\"$link\"" ;; esac
+    if printf '%s' "$link" | LC_ALL=C tr -d '\t' | LC_ALL=C grep -q '[[:cntrl:]]'; then
+      echo "install-local: $link contains a control character, which a" >&2
+      echo "install-local: .desktop Exec line cannot carry; set XDG_BIN_HOME to a plainer path" >&2
+      exit 1
+    fi
+    exec_path=
+    rest=$link
+    while :; do
+      case $rest in
+        *%*)
+          exec_path="${exec_path}${rest%%\%*}%%"
+          rest=${rest#*\%}
+          ;;
+        *)
+          exec_path="${exec_path}${rest}"
+          break
+          ;;
+      esac
+    done
+    tab=$(printf '\t')
+    case $exec_path in
+      *" "*|*"$tab"*|*"'"*|*">"*|*"<"*|*"~"*|*"|"*|*"&"*|*";"*|*"*"*|*"?"*|*"#"*|*"("*|*")"*)
+        exec_path="\"$exec_path\""
+        ;;
+    esac
 
     mkdir -p "$bin_dir" "$data_dir/applications" "$(dirname -- "$icon")"
     ln -sf "$root/scripts/codify" "$link"

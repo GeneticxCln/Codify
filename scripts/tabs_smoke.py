@@ -151,6 +151,8 @@ class SmokeRun(NamedTuple):
     engaged: bool
     passed: bool
     elapsed_s: float
+    child_rc: int | None = None
+    interrupted: bool = False
 
 
 def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRun:
@@ -236,6 +238,7 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
             previous_handlers[number] = signal.signal(number, stop)
     atexit.register(terminate_if_running)
 
+    interrupted = False
     pipe = child.stdout
     if pipe is None:
         raise RuntimeError("the smoke child was launched without a stdout pipe")
@@ -259,7 +262,7 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
                 if match is not None:
                     state["failed"] = match.group("why")
     except KeyboardInterrupt:
-        pass
+        interrupted = True
     finally:
         timer.cancel()
         engage_timer.cancel()
@@ -293,6 +296,16 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
     seed = "k_tabs_smoke_seed"
     keys = {key for _kind, key in restored}
 
+    if interrupted:
+        return SmokeRun(
+            code=130,
+            engaged=engaged,
+            passed=passed,
+            elapsed_s=elapsed,
+            child_rc=child.returncode,
+            interrupted=True,
+        )
+
     if engaged and passed and child.returncode == 0 and seed in keys:
         print(
             f"\ntabs-smoke: PASS in {elapsed:.1f}s — the engine's seed came back "
@@ -300,7 +313,14 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
             "window seated a webview for it",
             flush=True,
         )
-        return SmokeRun(code=0, engaged=engaged, passed=passed, elapsed_s=elapsed)
+        return SmokeRun(
+            code=0,
+            engaged=engaged,
+            passed=passed,
+            elapsed_s=elapsed,
+            child_rc=child.returncode,
+            interrupted=False,
+        )
 
     print(
         f"\ntabs-smoke: FAIL after {elapsed:.1f}s (child exit status {child.returncode})",
@@ -355,7 +375,14 @@ def run_smoke(argv: list[str], env: dict[str, str], timeout_s: float) -> SmokeRu
             file=sys.stderr,
             flush=True,
         )
-    return SmokeRun(code=1, engaged=engaged, passed=passed, elapsed_s=elapsed)
+    return SmokeRun(
+        code=1,
+        engaged=engaged,
+        passed=passed,
+        elapsed_s=elapsed,
+        child_rc=child.returncode,
+        interrupted=False,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -432,7 +459,14 @@ def main(argv: list[str] | None = None) -> int:
         # louder, later, or both).
         for attempt in range(1, GUARD_RETRIES + 1):
             run = run_smoke([str(SHELL_BINARY)], env, args.timeout)
-            refusal = run.code != 0 and not run.engaged and run.elapsed_s < 5.0
+            if run.interrupted:
+                return 130
+            refusal = (
+                run.code != 0
+                and not run.engaged
+                and run.child_rc == 0
+                and run.elapsed_s < 5.0
+            )
             if not refusal:
                 return run.code
             print(

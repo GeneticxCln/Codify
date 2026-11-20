@@ -79,7 +79,7 @@ class _Plan(_Design):
                 else:
                     laya_stage.record("allow")
             except Exception as exc:  # pragma: no cover - decide() already guards
-                decision = LayaDecision(engine="skipped", skipped_reason=f"gate error: {exc}")
+                decision = LayaDecision(engine="skipped", unavailable=True, skipped_reason=f"gate error: {exc}")
                 # The block reached the end without declaring an outcome, and a
                 # gate that raised is the one outcome that is not a clean skip.
                 laya_stage.record("unavailable", decision.skipped_reason)
@@ -206,7 +206,8 @@ class _Plan(_Design):
                 cancelled = False
                 async with self._stage(goal_id, "planner", "planner", ordinal=round_no) as plan_stage:
                     out = await self.orchestrator.run_agent(
-                        "planner", goal_id, None, prompt, accept=self._accept_plan_reply,
+                        "planner", goal_id, None, prompt,
+                        accept=self._accept_plan_reply,
                     )
                     # A cancel that landed while the planner was thinking must
                     # win: a goal the user cancelled must not reappear as PENDING
@@ -221,16 +222,24 @@ class _Plan(_Design):
                         # block below, so the measurement covers the call that
                         # produced the outcome without re-indenting the
                         # bookkeeping that follows it. A consult is a real
-                        # answer, not a failure: the planner asked for what it
-                        # was missing and got it.
+                        # answer, not a failure — unless the planner already
+                        # exhausted MAX_PLANNER_CONSULTS, in which case raise
+                        # before recording so stage metrics record `"invalid"`.
                         consult = out.get("consult") if isinstance(out, dict) else None
-                        plan_stage.record(
-                            "consult"
-                            if not out.get("steps") and isinstance(consult, dict)
-                            and (consult.get("reads") or consult.get("searches")
-                                 or consult.get("git") or consult.get("run"))
-                            else "plan"
+                        is_consult = (
+                            not out.get("steps")
+                            and isinstance(consult, dict)
+                            and bool(
+                                consult.get("reads") or consult.get("searches")
+                                or consult.get("git") or consult.get("run")
+                            )
                         )
+                        if is_consult and consults_left <= 0:
+                            raise AgentOutputInvalid(
+                                "planner consulted the librarian after its last allowed follow-up",
+                                role="planner",
+                            )
+                        plan_stage.record("consult" if is_consult else "plan")
                 if cancelled:
                     self._log(goal_id, None, "info", "cancelled during planning — discarding the plan")
                     return
@@ -241,15 +250,10 @@ class _Plan(_Design):
                     and (consult.get("reads") or consult.get("searches")
                          or consult.get("git") or consult.get("run"))
                 ):
-                    if consults_left <= 0:
-                        raise AgentOutputInvalid(
-                            "planner consulted the librarian after its last allowed follow-up",
-                            role="planner",
-                        )
                     consults_left -= 1
                     ws_root = ws.root_path
                     served, _opened, _matched, refused = await self._serve_library_requests(
-                        goal_id, LibraryService(ws_root),
+                        goal_id, LibraryService(ws_root, sandbox=getattr(self, "sandbox", None)),
                         self._library_requests(consult),
                     )
                     self._log(

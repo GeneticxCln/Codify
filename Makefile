@@ -1,4 +1,4 @@
-.PHONY: help budgets test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup setup-laya doctor check ci ci-report ci-python-floor check-history check-ghidra bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-review bench-smoke smoke-tabs
+.PHONY: help budgets test test-engine test-streams smoke-embed test-ui typecheck-ui-tests lint typecheck build-ui dev-ui check-tauri build-tauri build-app package-app install-local uninstall-local run-app dev-app run-engine run-engine-preview run-engine-scratch setup setup-laya doctor check ci ci-report ci-python-floor check-history check-ghidra audit audit-python bundle-engine lock-engine check-bundle verify-package hooks clean bench bench-review bench-smoke smoke-tabs
 
 # A checkout's own virtualenv (`make setup` makes one) wins over whatever `python3` is on
 # PATH, so `make setup && make check` works with nothing activated. The floor leg sets
@@ -370,9 +370,9 @@ check: lint typecheck test-ui typecheck-ui-tests test test-streams bench-smoke b
 # that quietly drops its oldest leg is exactly how a PEP 701 f-string shipped from a 3.14
 # laptop and died on the floor. The targets are the CI job's command list, unchanged.
 ci-python-floor:
-	scripts/ci-python-floor.sh $(PY_MIN) $(PY_MIN_VENV)
+	scripts/ci-python-floor.sh "$(PY_MIN)" "$(PY_MIN_VENV)"
 	@echo "==> python $(PY_MIN) leg"
-	PATH=$(PY_MIN_VENV)/bin:$$PATH CODIFY_FLOOR_LEG=1 $(MAKE) --no-print-directory lint typecheck test test-streams
+	PATH=$(PY_MIN_VENV)/bin:$$PATH CODIFY_FLOOR_LEG=1 $(MAKE) --no-print-directory lint typecheck test test-streams bench-smoke
 
 # The whole gate, locally, in one command: every leg CI covered — the host interpreter,
 # the declared minimum, the UI and the Rust shell — with the floor provisioned on demand
@@ -402,11 +402,21 @@ ci-report:
 # skipped rather than checked: it has no middle, and `make ci` already gates the tip.
 # That skip is what makes this affordable enough to run at pre-push at all — the case
 # where a red middle is actually possible is the case where the check is worth minutes.
-HISTORY_RANGE ?= $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null | sed 's|^|origin/|')..HEAD
+HISTORY_RANGE ?= $(shell branch=$$(git rev-parse --abbrev-ref HEAD 2>/dev/null); \
+	if [ -n "$$branch" ] && [ "$$branch" != "HEAD" ] && git rev-parse --verify --quiet "refs/remotes/origin/$$branch" >/dev/null 2>&1; then \
+		printf '%s..HEAD' "origin/$$branch"; \
+	elif base=$$(git merge-base HEAD origin/HEAD 2>/dev/null || git merge-base HEAD origin/master 2>/dev/null || git merge-base HEAD origin/main 2>/dev/null); then \
+		printf '%s..HEAD' "$$base"; \
+	elif git rev-parse --verify --quiet HEAD~1 >/dev/null 2>&1; then \
+		printf 'HEAD~1..HEAD'; \
+	else \
+		printf 'HEAD'; \
+	fi)
 HISTORY_FLAGS ?=
 
+check-history: export CODIFY_HISTORY_RANGE := $(HISTORY_RANGE)
 check-history:
-	python3 scripts/check_history.py --range '$(HISTORY_RANGE)' $(HISTORY_FLAGS)
+	python3 scripts/check_history.py --range "$$CODIFY_HISTORY_RANGE" $(HISTORY_FLAGS)
 
 # Not part of `check` or `ci`: it needs a real Ghidra (GHIDRA_INSTALL_DIR) and does not skip without one. The gate drives a
 # stand-in for analyzeHeadless; this is the check that the export script runs inside the real thing. It forces the
@@ -424,17 +434,18 @@ check-ghidra:
 #
 # cargo-audit 0.22 reads no config file, so the list is turned into the flags it does read. The
 # TOML stays the one place with the reasons; this recipe is how they reach the tool.
-AUDIT_IGNORE = $(shell sed -n 's/^[[:space:]]*"\(RUSTSEC-[0-9-]*\)",.*/--ignore \1/p' src-tauri/audit.toml)
+AUDIT_IGNORE = $(shell sed -n 's/^[[:space:]]*"\(RUSTSEC-[0-9-]*\)".*/--ignore \1/p' src-tauri/audit.toml)
 
 audit:
 	cd src-tauri && cargo audit --deny warnings $(AUDIT_IGNORE)
 
 # The Python half of the same question, for the same reason it is not in `check` or `ci`: pip-audit is
 # not a build dependency and the advisory database is fetched over the network. The packages ship the
-# engine's dependencies, so a vulnerable one is a vulnerability in the product, not only in a dev tool.
-# `--skip-editable` leaves this checkout out of the audit; everything it depends on is still read.
+# engine's pinned wheels from `packaging/engine.lock`, so both the installed environment and the exact
+# pinned lock are audited (`--skip-editable` leaves this checkout out of the environment audit).
 audit-python:
 	python3 -m pip_audit --skip-editable --progress-spinner off
+	python3 -m pip_audit -r packaging/engine.lock --no-deps --disable-pip --progress-spinner off
 
 # The one question the About tab's Download button cannot answer for you: is the file that landed
 # the file that was published? A truncated download looks like a whole file to `apt`, and the
@@ -476,5 +487,5 @@ hooks:
 # deletes anything version-controlled — it may clear the directory's caches wholesale.
 clean:
 	rm -rf ui/dist src-tauri/target __pycache__ engine/__pycache__ tests/__pycache__ .pytest_cache .ruff_cache .mypy_cache graphify-out/cache coverage
-	find . -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-	find . -type f -name "*.pyc" -delete 2>/dev/null || true
+	find . \( -path './.venv' -o -path './build' \) -prune -o -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
+	find . \( -path './.venv' -o -path './build' \) -prune -o -type f -name "*.pyc" -delete 2>/dev/null || true

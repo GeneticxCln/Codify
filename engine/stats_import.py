@@ -151,7 +151,14 @@ def validate_import(value: Any) -> dict[str, Any]:
         _check_fields(day_stats, DAY_STATS_FIELDS, "day_stats")
         _check_fields(day.get("goals"), GOALS_FIELDS, "goals", nullable=("success_rate",))
         _check_fields(day.get("usage"), USAGE_FIELDS, "usage", nullable=("avg_duration_ms",))
-        normalized.append({key: day[key] for key in DAY_KEYS})
+        goals_raw: dict[str, Any] = day["goals"]
+        usage_raw: dict[str, Any] = day["usage"]
+        normalized.append({
+            "day": name,
+            "day_stats": {"date": name, **{k: day_stats[k] for k in DAY_STATS_FIELDS}},
+            "goals": {k: goals_raw[k] for k in GOALS_FIELDS},
+            "usage": {k: usage_raw[k] for k in USAGE_FIELDS},
+        })
 
     # Oldest-first is the exporter's contract and what the chart assumes. A
     # file in any other order is rejected rather than quietly sorted, because

@@ -372,7 +372,7 @@ def _start_repository(workspace: Path) -> bool:
     plain directory would be measuring something other than what its report claims.
     """
     git = GitService()
-    if git.init_repo(str(workspace)) and git.commit(str(workspace), "chore: benchmark fixture", ["."]):
+    if git.init_repo(str(workspace)) and git.commit(str(workspace), "chore: benchmark fixture", ["."], allow_root=True):
         return True
     print(
         f"benchmark: could not start a git repository in {workspace} — this run's workspace is a plain "
@@ -531,7 +531,7 @@ async def run_task(
         if event["type"] != "stage_result":
             continue
         stage = str(event["payload"].get("stage"))
-        stage_ms[stage] = int(event["payload"].get("duration_ms") or 0)
+        stage_ms[stage] = stage_ms.get(stage, 0) + int(event["payload"].get("duration_ms") or 0)
         tokens += int(event["payload"].get("tokens") or 0)
 
     return {
@@ -677,7 +677,9 @@ def _run_one(
             # that module builds on this one.
             from benchmarks.review_tier import run_review_task
 
-            return asyncio.run(run_review_task(task, work_root, canned=canned, engine_db=engine_db, attempt=attempt))
+            return asyncio.run(
+                run_review_task(task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace)
+            )
         return asyncio.run(run_task(
             task, work_root, canned=canned, engine_db=engine_db, attempt=attempt, trace=trace, driver=driver,
         ))
@@ -798,38 +800,38 @@ def main(argv: list[str] | None = None) -> int:
                     f"{', '.join(missing)}. Set them in Settings → Agents, pass "
                     "--engine-db, or run `--tier smoke`."
                 )
+
+        work_root = Path(tempfile.mkdtemp(prefix="codify-bench-"))
+        try:
+            results = []
+            for attempt in range(1, args.repeat + 1):
+                for task in tasks:
+                    result = _run_one(
+                        task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt,
+                        trace=args.record is not None, driver=args.driver,
+                    )
+                    results.append(result)
+                    if args.record is not None:
+                        # Kept as each task finishes, not only at the end: a run killed part-way (a container
+                        # restart, an OOM, a closed terminal) never reaches the `finally` below, and a baseline
+                        # that takes an hour on a CPU was lost with it.
+                        _keep_record(work_root, args.record)
+                    # As each one finishes, not only in the summary: a slow real model makes a run long, and
+                    # a run that dies late should leave a record of the tasks that were done.
+                    label = task["id"] if args.repeat == 1 else f"{task['id']} (run {attempt})"
+                    print(f"finished {label}: {result['status']}, {'ok' if result['passed'] else 'FAIL'}, "
+                          f"{round(result['wall_ms'] / 1000)} s", flush=True)
+        finally:
+            if args.record is not None:
+                # Kept before it is removed: the stores hold the traced calls, the workspaces what was written.
+                _keep_record(work_root, args.record)
+            shutil.rmtree(work_root, ignore_errors=True)
     except BenchmarkError as exc:
         print(f"benchmark: {exc}", file=sys.stderr)
         return 2
     except sqlite3.Error as exc:
         print(f"benchmark: {exc}", file=sys.stderr)
         return 2
-
-    work_root = Path(tempfile.mkdtemp(prefix="codify-bench-"))
-    try:
-        results = []
-        for attempt in range(1, args.repeat + 1):
-            for task in tasks:
-                result = _run_one(
-                    task, work_root, canned=canned, engine_db=args.engine_db, attempt=attempt,
-                    trace=args.record is not None, driver=args.driver,
-                )
-                results.append(result)
-                if args.record is not None:
-                    # Kept as each task finishes, not only at the end: a run killed part-way (a container
-                    # restart, an OOM, a closed terminal) never reaches the `finally` below, and a baseline
-                    # that takes an hour on a CPU was lost with it.
-                    _keep_record(work_root, args.record)
-                # As each one finishes, not only in the summary: a slow real model makes a run long, and
-                # a run that dies late should leave a record of the tasks that were done.
-                label = task["id"] if args.repeat == 1 else f"{task['id']} (run {attempt})"
-                print(f"finished {label}: {result['status']}, {'ok' if result['passed'] else 'FAIL'}, "
-                      f"{round(result['wall_ms'] / 1000)} s", flush=True)
-    finally:
-        if args.record is not None:
-            # Kept before it is removed: the stores hold the traced calls, the workspaces what was written.
-            _keep_record(work_root, args.record)
-        shutil.rmtree(work_root, ignore_errors=True)
 
     summary = summarise(results)
     report = {
@@ -859,6 +861,9 @@ def main(argv: list[str] | None = None) -> int:
         print(f"quality   {summary['quality_failed']} failed")
     if summary["quality_passed"]:
         print(f"quality   {summary['quality_passed']} passed")
+    if summary.get("review"):
+        rev = summary["review"]
+        print(f"review    {json.dumps(rev)}")
     if summary["tokens_are_synthetic"]:
         print(f"tokens    {summary['tokens']} (synthetic — not a spend measurement)")
     print(f"wall      {summary['wall_ms']} ms")

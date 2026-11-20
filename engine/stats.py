@@ -31,6 +31,7 @@ Honesty rules the window filter enforces:
 
 from __future__ import annotations
 
+import math
 from datetime import datetime, timezone
 from typing import Any
 
@@ -72,8 +73,22 @@ def _within(ts: float, cutoff: float | None) -> bool:
     return cutoff is None or ts > cutoff
 
 
+def _finite_float(value: Any) -> float | None:
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        num = float(value)
+        if math.isfinite(num):
+            return num
+    return None
+
+
+def _finite_int(value: Any) -> int:
+    num = _finite_float(value)
+    return int(num) if num is not None else 0
+
+
 def _avg(values: list[float]) -> int | None:
-    return round(sum(values) / len(values)) if values else None
+    finite = [v for v in values if not isinstance(v, bool) and math.isfinite(v)]
+    return round(sum(finite) / len(finite)) if finite else None
 
 
 def _count(value: Any) -> int:
@@ -215,9 +230,9 @@ def summarize_usage(events: list[dict[str, Any]], window_days: int = 0, *, now: 
                 b["calls"] += 1
             continue
 
-        i = p.get("input_tokens") or 0
-        o = p.get("output_tokens") or 0
-        d = p.get("duration_ms")
+        i = _finite_int(p.get("input_tokens"))
+        o = _finite_int(p.get("output_tokens"))
+        d = _finite_float(p.get("duration_ms"))
         cr = _count(p.get("cache_read_tokens"))
         cw = _count(p.get("cache_write_tokens"))
         totals["cache_read_tokens"] += cr
@@ -226,7 +241,7 @@ def summarize_usage(events: list[dict[str, Any]], window_days: int = 0, *, now: 
         totals["output_tokens"] += o
         totals["total_tokens"] += i + o
         totals["calls"] += 1
-        if isinstance(d, (int, float)):
+        if d is not None:
             totals["durations"].append(d)
         for b in (by_role.setdefault(role, _empty_bucket()),
                   by_model.setdefault(model, _empty_bucket())):
@@ -236,7 +251,7 @@ def summarize_usage(events: list[dict[str, Any]], window_days: int = 0, *, now: 
             b["calls"] += 1
             b["cache_read_tokens"] += cr
             b["cache_write_tokens"] += cw
-            if isinstance(d, (int, float)):
+            if d is not None:
                 b["durations"].append(d)
 
     out_totals = _finish(totals)
@@ -302,7 +317,7 @@ def daily_trend(goals: list[dict[str, Any]], events: list[dict[str, Any]], windo
         if not _within(ts, cutoff):
             continue
         p = ev.get("payload") or {}
-        tokens = (p.get("input_tokens") or 0) + (p.get("output_tokens") or 0)
+        tokens = _finite_int(p.get("input_tokens")) + _finite_int(p.get("output_tokens"))
         r = row(_day(ts))
         r["total_tokens"] += tokens
         r["calls"] += 1

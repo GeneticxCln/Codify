@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import shutil
 import sys
 import tempfile
@@ -64,6 +65,16 @@ def main(argv: list[str]) -> int:
         print(f"no binary to analyse: {small}", file=sys.stderr)
         return 2
 
+    big: Path | None = None
+    if args.cancel:
+        if args.cancel_after <= 0:
+            print(f"--cancel-after must be positive (got {args.cancel_after:g})", file=sys.stderr)
+            return 2
+        big = Path(args.big or sys.executable).resolve()
+        if not big.is_file():
+            print(f"no binary to cancel: {big}", file=sys.stderr)
+            return 2
+
     try:
         install = ba.locate_ghidra()
     except ba.BinaryAnalysisError as exc:
@@ -89,7 +100,10 @@ def main(argv: list[str]) -> int:
         except ba.BinaryAnalysisError as exc:
             print(f"FAIL  the analysis did not run ({exc.code}): {exc}")
             return 1
-        results.append(say("functions" in summary and "0 functions" not in summary, f"summary lists functions ({took:.0f} s)"))
+        results.append(say(
+            "functions" in summary and not re.search(r"\b0 functions\b", summary),
+            f"summary lists functions ({took:.0f} s)",
+        ))
         results.append(say("Functions (" in functions and "(0 match)" not in functions, "functions view has rows"))
         results.append(say("Imports (" in imports, "imports view answers"))
         results.append(say("Memory blocks (" in sections and "Memory blocks (0)" not in sections, "sections view has rows"))
@@ -97,8 +111,7 @@ def main(argv: list[str]) -> int:
         runs = list((Path(os.environ["CODIFY_HOME"]) / "binary-analysis" / "runs").iterdir())
         results.append(say(not runs, "no run directory is left behind"))
 
-        if args.cancel:
-            big = Path(args.big or sys.executable).resolve()
+        if args.cancel and big is not None:
             shutil.copyfile(big, workspace / "big.bin")
             print(f"cancelling an analysis of {big.name} ({big.stat().st_size:,} bytes) after {args.cancel_after:g} s")
             cancel = threading.Event()

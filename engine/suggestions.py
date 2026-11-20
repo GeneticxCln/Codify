@@ -26,6 +26,7 @@ import json
 import re
 import sqlite3
 import sys
+import threading
 import time
 import uuid
 from collections.abc import Awaitable, Callable
@@ -43,6 +44,8 @@ OPEN_CAP = 5
 KIND_GAP_S = 3600.0
 #: How long a dismissed or accepted offer is left alone before the same finding may be offered again.
 COOLDOWN_S = 7 * 86400.0
+#: How long accepted or dismissed offers stay in the table before periodic pruning removes them.
+CLOSED_RETENTION_S = 30 * 86400.0
 #: How often the watcher looks, and how long after boot it waits before the first look.
 SWEEP_INTERVAL_S = 600.0
 FIRST_SWEEP_DELAY_S = 60.0
@@ -264,54 +267,87 @@ class SuggestionService:
 
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._db = conn
+        self._lock = threading.Lock()
 
     def offer(self, workspace_id: str, c: Candidate, now: float) -> bool:
         """Record a finding if the rules admit it. True when a row was created or reopened."""
-        row = self._db.execute(
-            "SELECT id, status, updated_at FROM suggestions WHERE workspace_id = ? AND kind = ? AND key = ?",
-            (workspace_id, c.kind, c.key),
-        ).fetchone()
-        if row is not None and (row["status"] == "open" or now - float(row["updated_at"]) < COOLDOWN_S):
-            return False
-        open_now = self._db.execute(
-            "SELECT COUNT(*) AS n FROM suggestions WHERE workspace_id = ? AND status = 'open'", (workspace_id,),
-        ).fetchone()["n"]
-        if open_now >= OPEN_CAP:
-            return False
-        last = self._db.execute(
-            "SELECT MAX(created_at) AS at FROM suggestions WHERE workspace_id = ? AND kind = ?",
-            (workspace_id, c.kind),
-        ).fetchone()["at"]
-        if last is not None and now - float(last) < KIND_GAP_S:
-            return False
         evidence = json.dumps(c.evidence)
-        if row is None:
-            self._db.execute(
-                "INSERT INTO suggestions (id, workspace_id, kind, key, title, detail, evidence, prompt, status, "
-                "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
-                (str(uuid.uuid4()), workspace_id, c.kind, c.key, c.title, c.detail, evidence, c.prompt, now, now),
-            )
-        else:
-            self._db.execute(
-                "UPDATE suggestions SET title = ?, detail = ?, evidence = ?, prompt = ?, status = 'open', "
-                "snoozed_until = NULL, goal_id = NULL, created_at = ?, updated_at = ? WHERE id = ?",
-                (c.title, c.detail, evidence, c.prompt, now, now, row["id"]),
-            )
-        self._db.commit()
-        return True
+        with self._lock:
+            row = self._db.execute(
+                "SELECT id, status, title, detail, evidence, prompt, updated_at FROM suggestions "
+                "WHERE workspace_id = ? AND kind = ? AND key = ?",
+                (workspace_id, c.kind, c.key),
+            ).fetchone()
+            if row is not None:
+                if row["status"] == "open":
+                    if (row["title"], row["detail"], row["evidence"], row["prompt"]) != (
+                        c.title, c.detail, evidence, c.prompt,
+                    ):
+                        try:
+                            self._db.execute(
+                                "UPDATE suggestions SET title = ?, detail = ?, evidence = ?, prompt = ?, "
+                                "updated_at = ? WHERE id = ?",
+                                (c.title, c.detail, evidence, c.prompt, now, row["id"]),
+                            )
+                            self._db.commit()
+                        except sqlite3.IntegrityError:
+                            self._db.rollback()
+                    return False
+                if now - float(row["updated_at"]) < COOLDOWN_S:
+                    return False
+            open_now = self._db.execute(
+                "SELECT COUNT(*) AS n FROM suggestions WHERE workspace_id = ? AND status = 'open'", (workspace_id,),
+            ).fetchone()["n"]
+            if open_now >= OPEN_CAP:
+                return False
+            last = self._db.execute(
+                "SELECT MAX(created_at) AS at FROM suggestions WHERE workspace_id = ? AND kind = ?",
+                (workspace_id, c.kind),
+            ).fetchone()["at"]
+            if last is not None and now - float(last) < KIND_GAP_S:
+                return False
+            try:
+                if row is None:
+                    self._db.execute(
+                        "INSERT INTO suggestions (id, workspace_id, kind, key, title, detail, evidence, prompt, status, "
+                        "created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'open', ?, ?)",
+                        (str(uuid.uuid4()), workspace_id, c.kind, c.key, c.title, c.detail, evidence, c.prompt, now, now),
+                    )
+                else:
+                    self._db.execute(
+                        "UPDATE suggestions SET title = ?, detail = ?, evidence = ?, prompt = ?, status = 'open', "
+                        "snoozed_until = NULL, goal_id = NULL, created_at = ?, updated_at = ? WHERE id = ?",
+                        (c.title, c.detail, evidence, c.prompt, now, now, row["id"]),
+                    )
+                self._db.commit()
+            except sqlite3.IntegrityError:
+                self._db.rollback()
+                return False
+            return True
 
     def retire(self, workspace_id: str, kind: str, live_keys: set[str]) -> int:
         """Remove the open offers of a kind whose finding no longer holds. Dismissed and accepted rows stay."""
-        rows = self._db.execute(
-            "SELECT id, key FROM suggestions WHERE workspace_id = ? AND kind = ? AND status = 'open'",
-            (workspace_id, kind),
-        ).fetchall()
-        gone = [r["id"] for r in rows if r["key"] not in live_keys]
-        for suggestion_id in gone:
-            self._db.execute("DELETE FROM suggestions WHERE id = ?", (suggestion_id,))
-        if gone:
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT id, key FROM suggestions WHERE workspace_id = ? AND kind = ? AND status = 'open'",
+                (workspace_id, kind),
+            ).fetchall()
+            gone = [r["id"] for r in rows if r["key"] not in live_keys]
+            for suggestion_id in gone:
+                self._db.execute("DELETE FROM suggestions WHERE id = ?", (suggestion_id,))
+            if gone:
+                self._db.commit()
+            return len(gone)
+
+    def prune(self, now: float, max_age_s: float = CLOSED_RETENTION_S) -> int:
+        """Delete closed (accepted or dismissed) offers older than `max_age_s`."""
+        with self._lock:
+            cur = self._db.execute(
+                "DELETE FROM suggestions WHERE status IN ('accepted', 'dismissed') AND updated_at < ?",
+                (now - max_age_s,),
+            )
             self._db.commit()
-        return len(gone)
+            return max(0, cur.rowcount)
 
     def inbox(self, now: float, workspace_id: str | None = None) -> SuggestionList:
         where, args = ("AND workspace_id = ?", (workspace_id,)) if workspace_id else ("", ())
@@ -397,11 +433,19 @@ class SuggestionWatch:
         self._ci_checker = ci_checker
         self.service = SuggestionService(conn)
         self._ci_checked: dict[str, float] = {}
+        self._sweep_lock = asyncio.Lock()
+
+    def _evict_deleted_ci(self, live_ids: set[str]) -> None:
+        for stale in list(self._ci_checked):
+            if stale not in live_ids:
+                self._ci_checked.pop(stale, None)
 
     def _sweep_database(self, now: float) -> int:
         hours = self._settings.get_int("suggest_paused_hours")
+        workspaces = self._workspaces.list_workspaces()
+        self._evict_deleted_ci({ws.id for ws in workspaces})
         made = 0
-        for ws in self._workspaces.list_workspaces():
+        for ws in workspaces:
             for kind, found in (
                 ("failing_command", detect_failing_commands(self._db, ws.id, now)),
                 ("paused_goal", detect_paused_goals(self._db, ws.id, now, hours)),
@@ -409,6 +453,7 @@ class SuggestionWatch:
             ):
                 self.service.retire(ws.id, kind, {c.key for c in found})
                 made += sum(1 for c in found if self.service.offer(ws.id, c, now))
+        self.service.prune(now)
         return made
 
     def _recently_active(self, workspace_id: str, now: float) -> bool:
@@ -421,7 +466,9 @@ class SuggestionWatch:
 
     async def _sweep_ci(self, now: float) -> int:
         made = 0
-        for ws in await asyncio.to_thread(self._workspaces.list_workspaces):
+        workspaces = await asyncio.to_thread(self._workspaces.list_workspaces)
+        self._evict_deleted_ci({ws.id for ws in workspaces})
+        for ws in workspaces:
             if now - self._ci_checked.get(ws.id, 0.0) < CI_INTERVAL_S:
                 continue
             if not await asyncio.to_thread(self._recently_active, ws.id, now):
@@ -437,13 +484,14 @@ class SuggestionWatch:
 
     async def sweep(self, now: float | None = None) -> int:
         """One look. Returns how many offers were created. Does nothing at all when the setting is off."""
-        if not self._settings.get_int("suggestions"):
-            return 0
-        moment = self._clock() if now is None else now
-        made = await asyncio.to_thread(self._sweep_database, moment)
-        if self._settings.get_int("suggest_ci"):
-            made += await self._sweep_ci(moment)
-        return made
+        async with self._sweep_lock:
+            if not self._settings.get_int("suggestions"):
+                return 0
+            moment = self._clock() if now is None else now
+            made = await asyncio.to_thread(self._sweep_database, moment)
+            if self._settings.get_int("suggest_ci"):
+                made += await self._sweep_ci(moment)
+            return made
 
     async def run(self) -> None:
         await asyncio.sleep(FIRST_SWEEP_DELAY_S)

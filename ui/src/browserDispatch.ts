@@ -102,9 +102,9 @@ function ipv4Value(host: string): number | null {
   }
   const last = nums[nums.length - 1];
   if (last >= Math.pow(256, 5 - nums.length)) return null;
-  let value = 0;
-  for (let i = 0; i < nums.length; i++) {
-    value += nums[i] * Math.pow(256, nums.length - 1 - i);
+  let value = last;
+  for (let i = 0; i < nums.length - 1; i++) {
+    value += nums[i] * Math.pow(256, 3 - i);
   }
   return value;
 }
@@ -205,7 +205,14 @@ export function classifyBrowserAddress(
   // URL parser into a host: `https://tauri://localhost/` parses with host
   // `tauri`, which would allow a page the shell refuses. The original text
   // had a scheme, and the answer was always going to be no.
-  if (!isHttp && /^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed)) {
+  if (
+    !isHttp &&
+    (/^[a-z][a-z0-9+.-]*:\/\//i.test(trimmed) ||
+      /^(?:javascript|data|vbscript|file|blob|about|mailto|tel|tauri|chrome|edge|view-source|ws|wss|ftp):/i.test(
+        trimmed,
+      ) ||
+      /^[a-z][a-z0-9+.-]*:(?!\d+(?:[/?#]|$))/i.test(trimmed))
+  ) {
     return refuse(trimmed);
   }
   const absolute = isHttp ? trimmed : `https://${trimmed}`;

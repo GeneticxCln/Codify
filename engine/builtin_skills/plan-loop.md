@@ -1,7 +1,7 @@
 ---
 name: plan-loop
 description: Read the files first, write a numbered plan with one check per step, critique it once, then execute one verified step at a time.
-moves: recon, plan, review, write, verify, todo
+moves: recon, read_file, plan, review, write, verify, run_command, todo
 ---
 
 # Plan loop

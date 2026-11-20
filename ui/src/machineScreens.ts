@@ -113,6 +113,7 @@ interface Entry {
   pending: string[];
   /** Resolves when everything written so far has been parsed. */
   settled: Promise<void>;
+  watcherScheduled: boolean;
   log: string;
   truncated: boolean;
   exited: boolean;
@@ -135,10 +136,16 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
 
   const load = (): Promise<TerminalCtor> => {
     if (ctor) return Promise.resolve(ctor);
-    loading ??= loadHeadless().then((c) => {
-      ctor = c;
-      return c;
-    });
+    loading ??= loadHeadless().then(
+      (c) => {
+        ctor = c;
+        return c;
+      },
+      (err) => {
+        loading = null;
+        throw err;
+      },
+    );
     return loading;
   };
 
@@ -149,8 +156,18 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
       entry.pending.push(chunk);
       return entry.settled;
     }
-    const parsed = new Promise<void>((resolve) => term.write(chunk, resolve));
-    entry.settled = entry.settled.then(() => parsed);
+    const parsed = new Promise<void>((resolve) => {
+      try {
+        term.write(chunk, resolve);
+      } catch {
+        // Recover cleanly if xterm's internal WriteBuffer overflows so `settled` never stays rejected.
+        resolve();
+      }
+    });
+    entry.settled = entry.settled.then(
+      () => parsed,
+      () => parsed,
+    );
     return parsed;
   };
 
@@ -162,6 +179,7 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
       term: null,
       pending: [],
       settled: Promise.resolve(),
+      watcherScheduled: false,
       log: "",
       truncated: false,
       exited: false,
@@ -174,36 +192,49 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
     entries.set(id, entry);
     // The emulator is a dynamic import away. Everything written meanwhile waits in `pending`, and the terminal is made, and
     // drained in order, the moment it is here. `settled` is what a reader waits on, so it cannot see a half-loaded screen.
-    const ready = load().then((Terminal) => {
-      if (closed.has(id) || entries.get(id) !== entry) return;
-      entry.term = new Terminal({
-        cols: entry.cols,
-        rows: entry.rows,
-        scrollback: SCROLLBACK_LINES,
-        allowProposedApi: true,
+    const ready = load()
+      .then((Terminal) => {
+        if (closed.has(id) || entries.get(id) !== entry) return;
+        entry.term = new Terminal({
+          cols: entry.cols,
+          rows: entry.rows,
+          scrollback: SCROLLBACK_LINES,
+          allowProposedApi: true,
+        });
+        const held = entry.pending.splice(0);
+        for (const chunk of held) {
+          const term = entry.term;
+          const parsed = new Promise<void>((resolve) => {
+            try {
+              term.write(chunk, resolve);
+            } catch {
+              resolve();
+            }
+          });
+          entry.settled = entry.settled.then(
+            () => parsed,
+            () => parsed,
+          );
+        }
+      })
+      .catch(() => {
+        // A transient load failure must not produce an unhandled rejection; `load()`
+        // cleared its cache so a subsequent open/read can retry.
       });
-      const held = entry.pending.splice(0);
-      for (const chunk of held) {
-        const term = entry.term;
-        const parsed = new Promise<void>((resolve) => term.write(chunk, resolve));
-        entry.settled = entry.settled.then(() => parsed);
-      }
-    });
     entry.settled = ready;
     return entry;
   };
 
   /**
-   * Wait until everything written so far has been parsed. `settled` is *extended* as work is queued (the held chunks are
-   * queued the moment the emulator loads), so a single `await entry.settled` can resolve against the promise as it was a
-   * moment ago; this waits until it stops changing.
+   * Wait until everything written up to *now* has been parsed. If the emulator is still loading, await that first
+   * (which queues held `pending` chunks onto `settled`), then await the exact `settled` snapshot once — never looping on
+   * future incoming chunks, which would livelock under continuous output (`yes`, `tail -f`, fast builds).
    */
   const settle = async (entry: Entry): Promise<void> => {
-    for (;;) {
-      const seen = entry.settled;
-      await seen;
-      if (entry.settled === seen) return;
+    if (!entry.term) {
+      await entry.settled;
     }
+    await entry.settled;
   };
 
   const snapshot = (id: string, entry: Entry, scrollback: number): ScreenSnapshot | null => {
@@ -237,15 +268,28 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
       if (!entry) return;
       entry.chunks += 1;
       entry.log += chunk;
+      // Amortise trimming to 1.25× MAX_LOG_CHARS so chatty output does not copy
+      // 512 KB on every single chunk; `replay()` enforces the exact cap on read.
       if (entry.log.length > MAX_LOG_CHARS) {
-        // `trimTail`, not a bare slice: a cut that lands inside an emoji would otherwise leave a lone low surrogate at the
-        // front of the replay, written back into every pane that mounts later.
-        entry.log = trimTail(entry.log, MAX_LOG_CHARS);
         entry.truncated = true;
+        if (entry.log.length > Math.floor(MAX_LOG_CHARS * 1.25)) {
+          // `trimTail`, not a bare slice: a cut that lands inside an emoji would otherwise leave a lone low surrogate at the
+          // front of the replay, written back into every pane that mounts later.
+          entry.log = trimTail(entry.log, MAX_LOG_CHARS);
+        }
       }
-      void feed(entry, chunk)
-        .then(() => settle(entry))
-        .then(() => entry.watchers.forEach((w) => w()));
+      const parsed = feed(entry, chunk);
+      if (!entry.watcherScheduled && entry.watchers.size > 0) {
+        entry.watcherScheduled = true;
+        void parsed
+          .then(() => {
+            entry.watcherScheduled = false;
+            entry.watchers.forEach((w) => w());
+          })
+          .catch(() => {
+            entry.watcherScheduled = false;
+          });
+      }
       entry.followers.forEach((f) => f.onChunk(chunk));
     },
 
@@ -348,7 +392,12 @@ export function createMachineScreens(loadHeadless: () => Promise<TerminalCtor>):
 
     replay(id) {
       const entry = entries.get(id);
-      return { data: entry?.log ?? "", truncated: entry?.truncated ?? false, exited: entry?.exited ?? false };
+      if (!entry) return { data: "", truncated: false, exited: false };
+      if (entry.log.length > MAX_LOG_CHARS) {
+        entry.log = trimTail(entry.log, MAX_LOG_CHARS);
+        entry.truncated = true;
+      }
+      return { data: entry.log, truncated: entry.truncated, exited: entry.exited };
     },
 
     follow(id, onChunk, onExit) {

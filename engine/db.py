@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+import weakref
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypeVar, overload
@@ -95,6 +96,9 @@ CREATE TABLE IF NOT EXISTS goals (
   model TEXT
 );
 
+CREATE INDEX IF NOT EXISTS idx_goals_workspace_created ON goals(workspace_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_goals_status ON goals(status);
+
 CREATE TABLE IF NOT EXISTS plan_steps (
   id TEXT PRIMARY KEY,
   goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
@@ -125,6 +129,7 @@ CREATE TABLE IF NOT EXISTS events (
 -- whole table on each request; with it SQLite walks back from the newest row and
 -- stops once it has the rows it wants (235 ms -> 29 ms on 300,000 events).
 CREATE INDEX IF NOT EXISTS idx_events_time ON events(timestamp, sequence);
+CREATE INDEX IF NOT EXISTS idx_events_goal_type_seq ON events(goal_id, type, sequence);
 
 CREATE TABLE IF NOT EXISTS agent_configs (
   role TEXT PRIMARY KEY,
@@ -163,6 +168,8 @@ CREATE TABLE IF NOT EXISTS proposed_files (
   content TEXT,
   created_at REAL NOT NULL
 );
+
+CREATE INDEX IF NOT EXISTS idx_proposed_files_goal_step ON proposed_files(goal_id, step_id);
 
 CREATE TABLE IF NOT EXISTS engine_settings (
   key TEXT PRIMARY KEY,
@@ -355,6 +362,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_suggestions_open ON suggestions(workspace_id, status, updated_at DESC);
+CREATE INDEX IF NOT EXISTS idx_suggestions_goal ON suggestions(goal_id);
 
 -- Notes a person keeps for every project (engine/notes.py, docs/10 §8). Deliberately not tied to a workspace and
 -- deliberately not the observations table: observations are what one workspace's own runs taught, and they never
@@ -409,10 +417,31 @@ def _add_column(conn: sqlite3.Connection, table: str, column: str, decl: str) ->
 _CursorT = TypeVar("_CursorT", bound=sqlite3.Cursor)
 
 
+class _ThreadConn:
+    """Per-thread connection holder that closes its SQLite handle when the thread exits."""
+
+    __slots__ = ("connection", "_owner", "_key")
+
+    def __init__(
+        self,
+        owner: _PerThreadConnection,
+        key: int,
+        connection: sqlite3.Connection,
+    ) -> None:
+        self.connection = connection
+        self._owner = weakref.ref(owner)
+        self._key = key
+
+    def __del__(self) -> None:
+        owner = self._owner()
+        if owner is not None:
+            owner._release_opened(self._key)
+
+
 class _ThreadSlot(threading.local):
     """The connection one thread owns; `None` until its first statement."""
 
-    connection: sqlite3.Connection | None = None
+    slot: _ThreadConn | None = None
 
 
 class _PerThreadConnection(sqlite3.Connection):
@@ -440,27 +469,53 @@ class _PerThreadConnection(sqlite3.Connection):
         self._database = database
         self._creator = threading.get_ident()
         self._local = _ThreadSlot()
-        self._opened: list[sqlite3.Connection] = []
+        self._opened: dict[int, tuple[threading.Thread, sqlite3.Connection]] = {}
         self._opened_lock = threading.Lock()
         self._closed = False
 
     def _created_here(self) -> bool:
         return threading.get_ident() == self._creator
 
+    def _release_opened(self, key: int) -> None:
+        """Pop and close one worker connection when its owning thread exits."""
+        with self._opened_lock:
+            entry = self._opened.pop(key, None)
+        if entry is not None:
+            try:
+                entry[1].close()
+            except Exception:
+                pass
+
     def _other_thread_connection(self) -> sqlite3.Connection:
         """This thread's connection, opened on first use and remembered for its next statement."""
+        stale: list[sqlite3.Connection] = []
         with self._opened_lock:
             if self._closed:
                 raise sqlite3.ProgrammingError("Cannot operate on a closed database.")
-            connection = self._local.connection
-            if connection is None:
+            slot = self._local.slot
+            if slot is None:
+                # Prune any handles belonging to threads that have already exited.
+                dead = [k for k, (thread, _conn) in self._opened.items() if not thread.is_alive()]
+                for k in dead:
+                    entry = self._opened.pop(k, None)
+                    if entry is not None:
+                        stale.append(entry[1])
                 connection = sqlite3.connect(self._database, check_same_thread=False)
                 connection.row_factory = sqlite3.Row
                 connection.execute("PRAGMA busy_timeout = 5000")
                 connection.execute("PRAGMA foreign_keys = ON")
-                self._local.connection = connection
-                self._opened.append(connection)
-            return connection
+                key = id(connection)
+                self._opened[key] = (threading.current_thread(), connection)
+                slot = _ThreadConn(self, key, connection)
+                self._local.slot = slot
+            else:
+                connection = slot.connection
+        for old in stale:
+            try:
+                old.close()
+            except Exception:
+                pass
+        return connection
 
     def execute(self, *args: Any, **kwargs: Any) -> sqlite3.Cursor:
         if self._created_here():
@@ -528,10 +583,43 @@ class _PerThreadConnection(sqlite3.Connection):
     def close(self) -> None:
         with self._opened_lock:
             self._closed = True
-            opened, self._opened = self._opened, []
+            opened = [conn for _thread, conn in self._opened.values()]
+            self._opened.clear()
         for connection in opened:
             connection.close()
         super().close()
+
+    def events_for_goals(
+        self,
+        goal_ids: list[str],
+        *,
+        event_type: str | None = None,
+        per_goal_limit: int | None = None,
+    ) -> dict[str, list[sqlite3.Row]]:
+        """Batch-fetch event rows for multiple goals in a single query, ordered by sequence ascending."""
+        ids = [gid for gid in goal_ids if gid]
+        if not ids:
+            return {}
+        out: dict[str, list[sqlite3.Row]] = {gid: [] for gid in ids}
+        placeholders = ",".join("?" for _ in ids)
+        where = f"goal_id IN ({placeholders})"
+        params: list[Any] = list(ids)
+        if event_type is not None:
+            where += " AND type = ?"
+            params.append(event_type)
+        if per_goal_limit is not None:
+            sql = (
+                f"SELECT * FROM ("  # noqa: S608
+                f"  SELECT *, ROW_NUMBER() OVER (PARTITION BY goal_id ORDER BY sequence DESC) AS _rn"
+                f"  FROM events WHERE {where}"
+                f") WHERE _rn <= ? ORDER BY goal_id, sequence ASC"
+            )
+            params.append(int(per_goal_limit))
+        else:
+            sql = f"SELECT * FROM events WHERE {where} ORDER BY goal_id, sequence ASC"  # noqa: S608
+        for row in self.execute(sql, params).fetchall():
+            out.setdefault(row["goal_id"], []).append(row)
+        return out
 
 
 def connect(
@@ -731,13 +819,15 @@ def migrate_agent_roles(conn: sqlite3.Connection) -> list[tuple[str, str]]:
                 """UPDATE agent_configs SET
                      provider = ?, protocol = ?, model_name = ?, api_key_ref = ?,
                      base_url = ?, system_prompt_override = ?, temperature = ?,
-                     max_tokens = ?, fallback_provider = ?, fallback_model_name = ?,
+                     max_tokens = ?, thinking_effort = ?, num_ctx = ?, keep_alive = ?,
+                     fallback_provider = ?, fallback_model_name = ?,
                      fallback_protocol = ?, fallback_base_url = ?, updated_at = ?
                    WHERE role = ?""",
                 (
                     row["provider"], row["protocol"], row["model_name"], row["api_key_ref"],
                     row["base_url"], row["system_prompt_override"], row["temperature"],
-                    row["max_tokens"], row["fallback_provider"], row["fallback_model_name"],
+                    row["max_tokens"], row["thinking_effort"], row["num_ctx"], row["keep_alive"],
+                    row["fallback_provider"], row["fallback_model_name"],
                     row["fallback_protocol"], row["fallback_base_url"], row["updated_at"],
                     new_role,
                 ),

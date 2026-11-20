@@ -109,7 +109,11 @@ const TRAIL_SECONDS = 0.5;
  * `active`: it changes at runtime, and a dependency would restart the
  * effect. Here it is simply the one value the body used to close over.
  */
-export function createEventHorizonPainter(read: (name: string) => string, active: boolean): AtmospherePainter {
+export function createEventHorizonPainter(
+  read: (name: string) => string,
+  active: boolean | (() => boolean),
+): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let motes: Mote[] = [];
 
@@ -131,7 +135,7 @@ export function createEventHorizonPainter(read: (name: string) => string, active
 
   return {
     step(dt) {
-      const rate = active ? 2 : 1;
+      const rate = isActive() ? 2 : 1;
       for (const m of motes) {
         m.a += m.spin * dt * rate * (1 - m.r * 0.45);
       }
@@ -140,9 +144,10 @@ export function createEventHorizonPainter(read: (name: string) => string, active
       // Resolved per frame rather than once at creation, so a theme or a
       // custom tint restyles this canvas on the next frame instead of
       // waiting for a remount. See the hook's note on live reads.
-        const arc = channelsOf(read("--void-arc"));
-        const dust = channelsOf(read("--void-dust"));
-        const beam = channelsOf(read("--void-beam"));
+      const busy = isActive();
+      const arc = channelsOf(read("--void-arc"));
+      const dust = channelsOf(read("--void-dust"));
+      const beam = channelsOf(read("--void-beam"));
       if (motes.length === 0) seed();
       const { width: w, height: h } = size;
       ctx.clearRect(0, 0, w, h);
@@ -154,11 +159,11 @@ export function createEventHorizonPainter(read: (name: string) => string, active
       for (const m of motes) {
         const rx = m.r * R;
         const ry = m.r * R * INCLINE;
-        const rate = active ? 2 : 1;
+        const rate = busy ? 2 : 1;
         const spin = m.spin * rate;
         const base = (0.1 + 0.46 * m.near) * (0.35 + 0.65 * m.depth);
         // Matter falling in: the tight orbits flare while a run is in flight.
-        const heat = active ? 1 + 1.1 * m.near : 1;
+        const heat = busy ? 1 + 1.1 * m.near : 1;
         const colour = m.near > 0.55 ? arc : dust;
 
         // Walk backwards along the orbit, oldest sample first, keeping only
@@ -185,20 +190,22 @@ export function createEventHorizonPainter(read: (name: string) => string, active
         }
         if (pts.length < 2) continue;
 
-        // One stroke per streak, tapered by a gradient along its own length
-        // rather than by a stroke per segment: nine strokes per mote is nine
-        // draw calls per mote, and the taper is the same shape either way.
+        // Two tapered solid-alpha segments instead of allocating 90 Cairo
+        // LinearGradient objects per frame (2,700 allocations/s).
         const head = pts[pts.length - 1];
-        const tail = pts[0];
-        const g = ctx.createLinearGradient(tail.x, tail.y, head.x, head.y);
-        g.addColorStop(0, withAlpha(colour, tail.a * 0.2));
-        g.addColorStop(1, withAlpha(colour, head.a));
-        ctx.strokeStyle = g;
+        const mid = Math.floor(pts.length / 2);
         ctx.lineWidth = m.dot;
         ctx.lineCap = "round";
+        ctx.strokeStyle = withAlpha(colour, (pts[0].a * 0.25 + pts[mid].a * 0.45));
         ctx.beginPath();
-        ctx.moveTo(tail.x, tail.y);
-        for (let k = 1; k < pts.length; k++) ctx.lineTo(pts[k].x, pts[k].y);
+        ctx.moveTo(pts[0].x, pts[0].y);
+        for (let k = 1; k <= mid; k++) ctx.lineTo(pts[k].x, pts[k].y);
+        ctx.stroke();
+
+        ctx.strokeStyle = withAlpha(colour, head.a * 0.85);
+        ctx.beginPath();
+        ctx.moveTo(pts[mid].x, pts[mid].y);
+        for (let k = mid + 1; k < pts.length; k++) ctx.lineTo(pts[k].x, pts[k].y);
         ctx.stroke();
 
         // A small bright head, so the direction of travel is readable at a
@@ -210,7 +217,7 @@ export function createEventHorizonPainter(read: (name: string) => string, active
         ctx.fill();
       }
 
-      if (!active) return;
+      if (!busy) return;
       /**
        * Jets, at the two limb points of the innermost orbit and only while
        * work is in flight. A limb point is the one place on an orbit the viewer
@@ -245,14 +252,22 @@ export const EventHorizon: React.FC<EventHorizonProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--void-arc": "#c084fc",
     "--void-dust": "#64748b",
     "--void-beam": "#a855f7",
   };
 
-
-  const canvasRef = useAtmosphereCanvas({ maxDimension, fps, animated, active, vars, create: (read) => createEventHorizonPainter(read, active) });
+  const canvasRef = useAtmosphereCanvas({
+    maxDimension,
+    fps,
+    animated,
+    active,
+    vars,
+    create: (read) => createEventHorizonPainter(read, () => activeRef.current === true),
+  });
 
   return (
     <canvas

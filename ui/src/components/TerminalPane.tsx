@@ -178,20 +178,10 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
      * workspace replay below applies only where this shell has nothing of its
      * own to show.
      */
-    const backlogged = claimTerminal(terminalIdRef.current);
-
-    /**
-     * What earlier sessions left in this workspace's scrollback, read *now*.
-     *
-     * Not when xterm arrives: the output listener below files this shell's own
-     * chunks into the same record, so a chunk that lands in the gap while
-     * xterm is still loading would already be in the record when it was read,
-     * be written as part of the "restored session", and be written again by the
-     * buffer's flush — the first prompt twice.
-     */
-    const tail = workspaceIdRef.current
-      ? readTerminalHistory(workspaceIdRef.current)
-      : "";
+    // Claim is deferred until after xterm imports so an unmount while loading
+    // (e.g. React StrictMode double-mount or a fast tab switch) never drops
+    // the terminal's backlog.
+    let claimed = false;
 
     const publish = (grid: Grid): void => {
       if (!gridChanged(current, grid)) return;
@@ -214,63 +204,61 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     };
 
     void (async () => {
-      // Subscribed first, for the reason in the module docs.
-      track(
-        listenShellEvent<unknown>(TERMINAL_OUTPUT, (payload) => {
-          const chunk = readTerminalOutput(payload);
-          if (!chunk) return;
-          // Only this terminal's chunks are held (`bufferOwnOutput` says why): another
-          // terminal's output is not this pane's to keep, and was never drained.
-          if (!bufferOwnOutput(outputBuffer, terminalIdRef.current, chunk.id, chunk.data)) return;
-          // File **this** terminal's bytes, and only its own — the one owner per
-          // chunk that `terminalBuffer`'s rules are built on. It used to file
-          // every chunk that arrived, before this check, on the theory that
-          // anything this workspace's terminals said belongs to the workspace.
-          // That was right when this was the only listener and is a duplicate
-          // now that the app-level recorder holds what no pane is displaying:
-          // the *other* terminal's mounted pane files this terminal's background
-          // build into the same workspace record the backlog will replay from,
-          // so a returning pane prints every line of that build twice. The pane
-          // files what it displays, the store files the rest (and merges it on
-          // `retireTerminal`, so a tab closed in the background is still part
-          // of what the next pane in this workspace restores).
-          if (workspaceIdRef.current) {
-            appendTerminalHistory(workspaceIdRef.current, chunk.data);
-          }
-          // No xterm yet means the text waits: it is written in one go the
-          // moment the renderer exists, just below. Draining it into nothing
-          // would be losing it with extra steps.
-          if (!term) return;
-          const held = drainOutput(outputBuffer, chunk.id);
-          if (held) term.write(held);
-        }),
-      );
-      track(
-        listenShellEvent<unknown>(TERMINAL_EXIT, (payload) => {
-          const id = readTerminalExit(payload);
-          if (id !== terminalIdRef.current) return;
-          if (term) {
-            // The exit goes *into* the scrollback, not only into a banner above
-            // it: scrolling up after a command fails is the normal way to read a
-            // failure, and a banner outside the terminal is not in that
-            // scrollback.
-            term.write("\r\n\x1b[2m— process exited —\x1b[0m\r\n");
-            term.options.disableStdin = true;
-          }
-          // The marker is display-only, as it always was: the workspace tail
-          // keeps the byte stream, and a background shell whose exit the store
-          // recorded gets its marker merged at retirement instead. Two filers
-          // for one marker is how it ends up in a restore twice.
-          onExitRef.current?.(id);
-        }),
-      );
+      // Subscribe AND await registration BEFORE claiming the terminal so the global
+      // recorder cannot drop output between `claimTerminal` and IPC `listen()` completing.
+      const outputSub = listenShellEvent<unknown>(TERMINAL_OUTPUT, (payload) => {
+        if (!claimed) return;
+        const chunk = readTerminalOutput(payload);
+        if (!chunk) return;
+        // Only this terminal's chunks are held (`bufferOwnOutput` says why): another
+        // terminal's output is not this pane's to keep, and was never drained.
+        if (!bufferOwnOutput(outputBuffer, terminalIdRef.current, chunk.id, chunk.data)) return;
+        if (workspaceIdRef.current) {
+          appendTerminalHistory(workspaceIdRef.current, chunk.data);
+        }
+        // No xterm yet means the text waits: it is written in one go the
+        // moment the renderer exists, just below. Draining it into nothing
+        // would be losing it with extra steps.
+        if (!term) return;
+        const held = drainOutput(outputBuffer, chunk.id);
+        if (held) term.write(held);
+      });
+      track(outputSub);
+      const exitSub = listenShellEvent<unknown>(TERMINAL_EXIT, (payload) => {
+        const id = readTerminalExit(payload);
+        if (id !== terminalIdRef.current) return;
+        if (term) {
+          // The exit goes *into* the scrollback, not only into a banner above
+          // it: scrolling up after a command fails is the normal way to read a
+          // failure, and a banner outside the terminal is not in that
+          // scrollback.
+          term.write("\r\n\x1b[2m— process exited —\x1b[0m\r\n");
+          term.options.disableStdin = true;
+        }
+        // The marker is display-only, as it always was: the workspace tail
+        // keeps the byte stream, and a background shell whose exit the store
+        // recorded gets its marker merged at retirement instead. Two filers
+        // for one marker is how it ends up in a restore twice.
+        onExitRef.current?.(id);
+      });
+      track(exitSub);
 
       if (disposed) return;
-      const [{ Terminal }, { FitAddon }] = await Promise.all([
+      const [, , { Terminal }, { FitAddon }] = await Promise.all([
+        outputSub.catch(() => () => {}),
+        exitSub.catch(() => () => {}),
         import("@xterm/xterm"),
         import("@xterm/addon-fit"),
       ]);
       if (disposed || !hostRef.current) return;
+
+      // Read workspace tail BEFORE claiming and filing this session's backlog so
+      // nothing written here is replayed twice.
+      const tail = workspaceIdRef.current
+        ? readTerminalHistory(workspaceIdRef.current)
+        : "";
+      claimed = true;
+      const backlogged = claimTerminal(terminalIdRef.current);
 
       term = new Terminal({
         // A shell the user is typing at, not a page: a blinking cursor is noise
@@ -410,12 +398,8 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       unsubscribes.length = 0;
       observer?.disconnect();
       term?.dispose();
-      // Hand the terminal back to the recorder. What the shell says from here
-      // is a background terminal's output again: held by the store, replayed
-      // by the next pane to claim it. (A closed tab is already retired by
-      // `handleCloseTab` before this runs; retiring twice is idempotent, and
-      // a release after a retire simply has nothing to release.)
-      releaseTerminal(terminalIdRef.current);
+      // Hand the terminal back to the recorder only if this mount claimed it.
+      if (claimed) releaseTerminal(terminalIdRef.current);
     };
   }, []);
 

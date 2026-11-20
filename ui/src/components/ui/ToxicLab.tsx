@@ -60,12 +60,17 @@ const BURST_TIME = 0.34;
 
 export function createToxicLabPainter(
   read: (name: string) => string,
-  active: boolean,
+  active: boolean | (() => boolean),
 ): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let bubbles: Bubble[] = [];
+  let seededW = 0;
+  let seededH = 0;
 
   const seed = (w: number, h: number): void => {
+    seededW = w;
+    seededH = h;
     bubbles = Array.from({ length: BUBBLES }, (_, i) => {
       const left = i % 2 === 0;
       return {
@@ -89,9 +94,10 @@ export function createToxicLabPainter(
   return {
     step(dt, tick) {
       const { width: w, height: h } = tick.size;
+      const busy = isActive();
       for (const b of bubbles) {
         b.phase += dt * b.drift;
-        b.y -= b.rise * dt * (active ? 1.8 : 1);
+        b.y -= b.rise * dt * (busy ? 1.8 : 1);
         if (b.burst > 0) b.burst = Math.max(0, b.burst - dt);
         const ceiling = -b.r * GROWTH - 8;
         if (b.y > ceiling) continue;
@@ -114,9 +120,11 @@ export function createToxicLabPainter(
       // Resolved per frame rather than once at creation, so a theme or a
       // custom tint restyles this canvas on the next frame instead of
       // waiting for a remount. See the hook's note on live reads.
-        const reagent = channelsOf(read("--reagent"));
-        const skin = channelsOf(read("--reagent-skin"));
-      if (bubbles.length === 0) seed(size.width, size.height);
+      const reagent = channelsOf(read("--reagent"));
+      const skin = channelsOf(read("--reagent-skin"));
+      if (bubbles.length === 0 || size.width !== seededW || size.height !== seededH) {
+        seed(size.width, size.height);
+      }
       const { width: w, height: h } = size;
       ctx.clearRect(0, 0, w, h);
       ctx.lineCap = "round";
@@ -184,6 +192,8 @@ export const ToxicLab: React.FC<ToxicLabProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--reagent": "#9dff3c",
     "--reagent-skin": "#d4ff7a",
@@ -195,7 +205,7 @@ export const ToxicLab: React.FC<ToxicLabProps> = ({
     animated,
     active,
     vars,
-    create: (read) => createToxicLabPainter(read, active),
+    create: (read) => createToxicLabPainter(read, () => activeRef.current === true),
   });
 
   return (

@@ -76,11 +76,17 @@ const GUTTER = 0.21;
  * `active`: it changes at runtime, and a dependency would restart the
  * effect. Here it is simply the one value the body used to close over.
  */
-export function createCyberOrganismPainter(read: (name: string) => string, active: boolean): AtmospherePainter {
+export function createCyberOrganismPainter(
+  read: (name: string) => string,
+  active: boolean | (() => boolean),
+): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let nodes: Node[] = [];
   let tendrils: Tendril[] = [];
   let signals: Signal[] = [];
+  let seededW = 0;
+  let seededH = 0;
 
   const place = (n: Node, w: number, h: number): void => {
     n.x = n.left ? Math.random() * GUTTER * w : w - Math.random() * GUTTER * w;
@@ -88,6 +94,8 @@ export function createCyberOrganismPainter(read: (name: string) => string, activ
   };
 
   const seed = (w: number, h: number): void => {
+    seededW = w;
+    seededH = h;
     nodes = Array.from({ length: NODES }, () => {
       const left = Math.random() < 0.5;
       const n: Node = { x: 0, y: 0, r: 1.4 + Math.random() * 2.4, phase: Math.random() * Math.PI * 2, left };
@@ -120,14 +128,15 @@ export function createCyberOrganismPainter(read: (name: string) => string, activ
 
   return {
     step(dt) {
+      const busy = isActive();
       for (const s of signals) {
-        s.t += s.speed * dt * (active ? 1.8 : 1);
+        s.t += s.speed * dt * (busy ? 1.8 : 1);
         if (s.t > 1) s.t = 0;
       }
       // Signals are only launched while the agent is working. At rest the
       // nodes keep their slow pulse and nothing travels, which is the
       // difference between a resting brainwave and a firing one.
-      if (active && signals.length < SIGNALS) {
+      if (busy && signals.length < SIGNALS) {
         const n = Math.floor(Math.random() * NODES);
         signals.push({ node: n, t: 0, speed: 0.35 + Math.random() * 0.4 });
       }
@@ -137,9 +146,12 @@ export function createCyberOrganismPainter(read: (name: string) => string, activ
       // Resolved per frame rather than once at creation, so a theme or a
       // custom tint restyles this canvas on the next frame instead of
       // waiting for a remount. See the hook's note on live reads.
-        const node = channelsOf(read("--organ-node"));
-        const tendril = channelsOf(read("--organ-tendril"));
-      if (nodes.length === 0) seed(size.width, size.height);
+      const busy = isActive();
+      const node = channelsOf(read("--organ-node"));
+      const tendril = channelsOf(read("--organ-tendril"));
+      if (nodes.length === 0 || size.width !== seededW || size.height !== seededH) {
+        seed(size.width, size.height);
+      }
       const { width: w } = size;
       ctx.clearRect(0, 0, w, size.height);
 
@@ -150,7 +162,7 @@ export function createCyberOrganismPainter(read: (name: string) => string, activ
         const inward = Math.min(n.x, w - n.x) / (w * GUTTER);
         const fade = Math.max(0, 1 - inward) ** 1.5;
         if (fade < 0.03) continue;
-        const alpha = fade * (active ? 0.3 : 0.16);
+        const alpha = fade * (busy ? 0.3 : 0.16);
         ctx.strokeStyle = withAlpha(tendril, alpha);
         ctx.lineWidth = 1;
         ctx.beginPath();
@@ -166,7 +178,7 @@ export function createCyberOrganismPainter(read: (name: string) => string, activ
         // The resting pulse is slow and per-node; the floor rises while the
         // agent is working, so the whole field is visibly "up".
         const rest = 0.5 + 0.5 * Math.sin(tick.seconds * 0.6 + n.phase);
-        const alpha = fade * (active ? 0.5 + 0.35 * rest : 0.16 + 0.3 * rest);
+        const alpha = fade * (busy ? 0.5 + 0.35 * rest : 0.16 + 0.3 * rest);
         if (alpha < 0.02) continue;
         ctx.fillStyle = withAlpha(tendril, alpha * 0.3);
         ctx.beginPath();
@@ -204,13 +216,21 @@ export const CyberOrganism: React.FC<CyberOrganismProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--organ-node": "#00e5ff",
     "--organ-tendril": "#0077ff",
   };
 
-
-  const canvasRef = useAtmosphereCanvas({ maxDimension, fps, animated, active, vars, create: (read) => createCyberOrganismPainter(read, active) });
+  const canvasRef = useAtmosphereCanvas({
+    maxDimension,
+    fps,
+    animated,
+    active,
+    vars,
+    create: (read) => createCyberOrganismPainter(read, () => activeRef.current === true),
+  });
 
   return (
     <canvas

@@ -1,3 +1,21 @@
+use std::path::Path;
+
+fn watch_tree(path: &Path) {
+    println!("cargo:rerun-if-changed={}", path.display());
+    let Ok(entries) = std::fs::read_dir(path) else {
+        return;
+    };
+    let mut children: Vec<_> = entries.flatten().map(|e| e.path()).collect();
+    children.sort();
+    for child in children {
+        if child.is_dir() {
+            watch_tree(&child);
+        } else {
+            println!("cargo:rerun-if-changed={}", child.display());
+        }
+    }
+}
+
 fn main() {
     // Re-run when the *frontend* changes, not just when Rust does.
     //
@@ -9,11 +27,11 @@ fn main() {
     // slow to notice; it is a build that silently ships the old frontend while
     // every source-level test passes against the new one.
     //
-    // Emitting the dist directory as a build-script input is the fix: the
-    // fingerprint covers the files, so a change to any of them re-runs the
-    // script and forces lib.rs to be re-expanded with the new assets.
+    // Emitting `../ui/dist` and every file/directory beneath it as build-script
+    // inputs ensures nested asset changes and in-place edits (e.g. `index.html`)
+    // also invalidate the build script and force lib.rs to re-embed the new assets.
     println!("cargo:rerun-if-changed=build.rs");
     println!("cargo:rerun-if-changed=tauri.conf.json");
-    println!("cargo:rerun-if-changed=../ui/dist");
+    watch_tree(Path::new("../ui/dist"));
     tauri_build::build()
 }

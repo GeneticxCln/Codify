@@ -13,9 +13,27 @@ import { hexChannels } from "./appearance";
  * second one that agrees with it by coincidence.
  */
 
+const channelCache = new Map<string, string>();
+const tupleCache = new Map<string, readonly [number, number, number]>();
+
+function parseTuple(channels: string): readonly [number, number, number] {
+  let cached = tupleCache.get(channels);
+  if (cached) return cached;
+  const parts = channels.split(",");
+  cached = [Number(parts[0]), Number(parts[1]), Number(parts[2])];
+  if (tupleCache.size > 256) tupleCache.clear();
+  tupleCache.set(channels, cached);
+  return cached;
+}
+
 /** `#00e5ff` → `"0, 229, 255"`. Throws on anything that is not `#rrggbb`. */
 export function channelsOf(hex: string): string {
-  return hexChannels(hex).split(" ").join(", ");
+  let cached = channelCache.get(hex);
+  if (cached !== undefined) return cached;
+  cached = hexChannels(hex).split(" ").join(", ");
+  if (channelCache.size > 256) channelCache.clear();
+  channelCache.set(hex, cached);
+  return cached;
 }
 
 /** `"0, 229, 255"` + `0.5` → `"rgba(0, 229, 255, 0.5)"`. */
@@ -34,9 +52,9 @@ export function toRgba(hex: string, alpha: number): string {
  */
 export function mix(from: string, to: string, t: number): string {
   const k = Math.min(1, Math.max(0, t));
-  const a = from.split(",").map(Number);
-  const b = to.split(",").map(Number);
-  return a.map((channel, i) => Math.round(channel + (b[i] - channel) * k)).join(", ");
+  const a = parseTuple(from);
+  const b = parseTuple(to);
+  return `${Math.round(a[0] + (b[0] - a[0]) * k)}, ${Math.round(a[1] + (b[1] - a[1]) * k)}, ${Math.round(a[2] + (b[2] - a[2]) * k)}`;
 }
 
 /** A cheap deterministic wobble in `[-1, 1]`, for drifting without state. */

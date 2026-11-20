@@ -3,7 +3,8 @@
 # package is a binary install and does not compile the Rust shell on the user's
 # machine. The version and the source digest are filled in by the workflow.
 pkgname=codify-bin
-pkgver=@VERSION@
+pkgver=@PKGVER@
+_srcver=@VERSION@
 pkgrel=1
 pkgdesc='A local-first, multi-agent AI coding assistant'
 arch=('x86_64')
@@ -18,11 +19,11 @@ optdepends=(
 provides=('codify')
 conflicts=('codify')
 options=('!strip')
-source=("Codify_${pkgver}_amd64.tar.gz")
+source=("Codify_${_srcver}_amd64.tar.gz")
 sha256sums=('@SHA256@')
 
 package() {
-  cd "$srcdir/Codify_${pkgver}_amd64"
+  cd "$srcdir/Codify_${_srcver}_amd64"
   install -d "$pkgdir/usr"
   cp -a usr/. "$pkgdir/usr/"
   install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"

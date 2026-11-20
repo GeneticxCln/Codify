@@ -228,14 +228,15 @@ jobs:
         with:
           python-version: "3.14"
 
-      # The packages an install ships: pip-audit reads the environment the engine and its dev extra
-      # produce, which is the same graph `pip install -e ".[dev]"` resolves in the release bundle.
+      # The packages an install ships: `make audit-python` runs pip-audit both against the installed
+      # environment (`pip install -e ".[dev]"`) and directly against the exact pinned release wheels
+      # in `packaging/engine.lock` (`--no-deps --disable-pip`).
       - name: Install the engine and pip-audit
         run: |
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
 
-      - name: Audit the installed environment
+      - name: Audit the installed environment and release lock
         run: make audit-python
 
   audit:

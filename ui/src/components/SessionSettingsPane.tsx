@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, AlertCircle, Check } from "lucide-react";
 
 import { getEngineSettings, saveEngineSettings } from "../api.ts";
@@ -24,9 +24,18 @@ export const SessionSettingsPane: React.FC = () => {
   const [saving, setSaving] = useState(false);
   const [saved, setSaved] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const savedTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  const load = useCallback(async () => {
-    setLoading(true);
+  useEffect(() => {
+    return () => {
+      if (savedTimerRef.current !== null) {
+        clearTimeout(savedTimerRef.current);
+      }
+    };
+  }, []);
+
+  const load = useCallback(async (showSpinner = true) => {
+    if (showSpinner) setLoading(true);
     try {
       const next = await getEngineSettings();
       setSettings(next);
@@ -35,7 +44,7 @@ export const SessionSettingsPane: React.FC = () => {
     } catch (err) {
       setError(readRejection(err, "Failed to read session settings"));
     } finally {
-      setLoading(false);
+      if (showSpinner) setLoading(false);
     }
   }, []);
 
@@ -50,9 +59,15 @@ export const SessionSettingsPane: React.FC = () => {
     try {
       await saveEngineSettings(patch);
       setSaved(true);
-      window.setTimeout(() => setSaved(false), 1500);
+      if (savedTimerRef.current !== null) {
+        clearTimeout(savedTimerRef.current);
+      }
+      savedTimerRef.current = setTimeout(() => {
+        savedTimerRef.current = null;
+        setSaved(false);
+      }, 1500);
       // The engine clamps the number, so re-read what it actually stored.
-      await load();
+      await load(false);
     } catch (err) {
       setError(readRejection(err, "Failed to save session settings"));
     } finally {

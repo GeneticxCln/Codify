@@ -153,6 +153,9 @@ class _Design(_Evidence):
         planner planned from. A goal planned before this stage existed has no
         contract, and an empty lookup is the answer, never a failure.
         """
+        if hasattr(self.goals, "latest_event"):
+            ev = self.goals.latest_event(goal_id, "design_contract")
+            return (ev.payload or {}) if ev is not None else {}
         latest: dict[str, Any] = {}
         for ev in self.goals.events_after(goal_id, 0):
             if ev.type == "design_contract":
@@ -660,6 +663,14 @@ class _Design(_Evidence):
         """
         if not path:
             return (None, "")
+        try:
+            is_dry_run = bool(self.goals.get(goal_id).dry_run)
+        except Exception:
+            is_dry_run = False
+        if is_dry_run:
+            proposed = self.goals.proposed_content(goal_id, step.id, path)
+            if proposed is not None:
+                return (proposed, ARTIFACT_PROPOSED)
         written = FileSystemService(ws_root).read_text_or_none(path)
         if written is not None:
             return (written, ARTIFACT_WRITTEN)

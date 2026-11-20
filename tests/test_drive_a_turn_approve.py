@@ -47,7 +47,7 @@ class DriveCase(unittest.TestCase):
     def drive(self, *prompt: str, approve: bool = True) -> tuple[int, str, Path]:
         argv = [
             sys.executable, "-m", "scripts.drive_a_turn", "--provider", "ollama", "--model", "qwen2.5-coder:7b",
-            "--base-url", self.url, "--timeout", "90", *(["--approve"] if approve else []), *prompt,
+            "--base-url", self.url, "--timeout", "90", "--keep-scratch", *(["--approve"] if approve else []), *prompt,
         ]
         done = subprocess.run(argv, cwd=ROOT, capture_output=True, text=True, timeout=180, check=False)
         out = done.stdout + done.stderr

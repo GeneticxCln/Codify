@@ -59,6 +59,7 @@ import tempfile
 from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -201,13 +202,17 @@ def format_table(results: Sequence[CommitResult], legs: Sequence[str]) -> str:
 
 def _run(argv: Sequence[str], cwd: Path) -> tuple[int, str]:
     """argv, never a shell. Returns (status, combined output)."""
-    completed = subprocess.run(  # noqa: S603 — argv list, no shell, no user input
-        list(argv),
-        cwd=str(cwd),
-        capture_output=True,
-        text=True,
-        check=False,
-    )
+    try:
+        completed = subprocess.run(  # noqa: S603 — argv list, no shell, no user input
+            list(argv),
+            cwd=str(cwd),
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+    except (FileNotFoundError, OSError) as exc:
+        tool = argv[0] if argv else "command"
+        return 127, f"{tool}: {exc}"
     return completed.returncode, completed.stdout + completed.stderr
 
 
@@ -278,6 +283,19 @@ def build_legs(venv: Path, node_modules: Path) -> list[Leg]:
 
 
 _worktrees_created: list[Path] = []
+_temp_parents: list[Path] = []
+
+
+class _Interrupted(BaseException):
+    """Signal received mid-sweep.
+
+    Unwinding via BaseException lets Python's `subprocess.run` kill and reap the
+    active child process before `finally` tears down its worktree and temp dir.
+    """
+
+    def __init__(self, signum: int) -> None:
+        super().__init__(f"signal {signum}")
+        self.signum = signum
 
 
 def _remove_worktree(path: Path) -> None:
@@ -294,9 +312,13 @@ def _remove_worktree(path: Path) -> None:
 def _cleanup_all() -> None:
     for path in list(_worktrees_created):
         _remove_worktree(path)
+    for parent in list(_temp_parents):
+        shutil.rmtree(parent, ignore_errors=True)
+        if parent in _temp_parents:
+            _temp_parents.remove(parent)
 
 
-def _install_signal_cleanup() -> None:
+def _install_signal_cleanup() -> dict[int, Any]:
     """Tear the worktrees down on Ctrl-C too.
 
     `atexit` does not run for SIGINT's default disposition, and a sweep that
@@ -305,20 +327,35 @@ def _install_signal_cleanup() -> None:
     """
 
     def _stop(signum: int, _frame: object) -> None:
-        _cleanup_all()
-        sys.exit(130)
+        raise _Interrupted(signum)
 
+    previous: dict[int, Any] = {}
     for sig in (signal.SIGINT, signal.SIGTERM):
-        signal.signal(sig, _stop)
+        previous[sig] = signal.signal(sig, _stop)
+    return previous
 
 
 def _deps_moved(commits: Sequence[str]) -> bool:
-    """Whether any commit in the range touches the UI dependency files."""
+    """Whether any commit in the range differs from HEAD's UI dependency files.
+
+    Reusing the main checkout's `ui/node_modules` is only honest when every commit
+    in `commits` carries the exact same `UI_DEPS` as `HEAD`. Checking `commits[0]`
+    against `HEAD` plus any change across `commits[0]..commits[-1]` avoids `^`
+    (which fails on a root commit) and also catches older ranges whose lockfile
+    differs from `HEAD`.
+    """
     if not commits:
         return False
-    spec = f"{commits[0]}^..{commits[-1]}" if len(commits) > 1 else f"{commits[0]}^..{commits[0]}"
-    status, out = _git(["diff", "--name-only", spec, "--", *UI_DEPS])
-    return status == 0 and bool(out.strip())
+    status, out = _git(["diff", "--name-only", commits[0], "HEAD", "--", *UI_DEPS])
+    if status != 0 or bool(out.strip()):
+        return True
+    if len(commits) > 1:
+        status, out = _git(
+            ["log", "-n", "1", "--format=%H", f"{commits[0]}..{commits[-1]}", "--", *UI_DEPS]
+        )
+        if status != 0 or bool(out.strip()):
+            return True
+    return False
 
 
 def _commits_in_range(spec: str) -> tuple[list[str], str]:
@@ -354,13 +391,17 @@ def check_one(commit: str, root: Path, legs: Sequence[Leg], install: bool) -> Co
         return result
 
     try:
-        _prepare_ui_deps(worktree, install, result)
+        if any(leg.cwd == "ui" for leg in legs):
+            _prepare_ui_deps(worktree, install, result)
         for leg in legs:
             if result.blocked:
                 break
             code, output = _run(leg.argv, worktree / leg.cwd)
             if code == 0:
                 result.legs[leg.name] = "ok"
+            elif code == 127:
+                result.legs[leg.name] = "missing"
+                result.reasons[leg.name] = first_error_line(leg.name, output)
             else:
                 result.legs[leg.name] = "FAIL"
                 result.reasons[leg.name] = first_error_line(leg.name, output)
@@ -444,8 +485,11 @@ def main(argv: Sequence[str] | None = None) -> int:
             print(f"check-history: {problem}", file=sys.stderr)
             return 2
 
-    install = args.install_deps or _deps_moved(commits)
+    needs_ui = any(leg.cwd == "ui" for leg in legs)
+    install = needs_ui and (args.install_deps or _deps_moved(commits))
     parent = Path(args.worktrees) if args.worktrees else Path(tempfile.mkdtemp(prefix="codify-hist-"))
+    if not args.worktrees:
+        _temp_parents.append(parent)
     parent.mkdir(parents=True, exist_ok=True)
 
     # Armed before the sweep, not after: the sweep is minutes per commit, and a
@@ -465,13 +509,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     print("  a leg that cannot run reports itself missing; it never counts as a pass\n")
 
     atexit.register(_cleanup_all)
-    _install_signal_cleanup()
+    previous_handlers = _install_signal_cleanup()
 
     results: list[CommitResult] = []
-    for commit in commits:
-        print(f"  {commit[:7]} {_subject(commit)}")
-        sys.stdout.flush()
-        results.append(check_one(commit, parent, legs, install))
+    try:
+        for commit in commits:
+            print(f"  {commit[:7]} {_subject(commit)}")
+            sys.stdout.flush()
+            results.append(check_one(commit, parent, legs, install))
+    except _Interrupted as exc:
+        return 128 + exc.signum
+    finally:
+        _cleanup_all()
+        atexit.unregister(_cleanup_all)
+        for sig, handler in previous_handlers.items():
+            if handler is not None:
+                signal.signal(sig, handler)
 
     print()
     print(format_table(results, [leg.name for leg in legs]))
@@ -489,8 +542,6 @@ def main(argv: Sequence[str] | None = None) -> int:
             f"  Fix by reordering (the shell and the engine's app.py have to arrive before\n"
             f"  the commits whose tests assert on them), or squash the range back to one commit."
         )
-    if not args.worktrees:
-        shutil.rmtree(parent, ignore_errors=True)
     return code
 
 

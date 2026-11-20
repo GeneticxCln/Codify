@@ -36,8 +36,10 @@ from pathlib import Path
 
 REPO = "github.com/GeneticxCln/Codify"
 
-# The three files, in the order a person would look at them.
+# The three required files, in the order a person would look at them, plus `pyproject.toml`
+# when present in the checkout.
 VERSION_FILES = ("src-tauri/tauri.conf.json", "src-tauri/Cargo.toml", "ui/package.json")
+OPTIONAL_VERSION_FILES = ("pyproject.toml",)
 
 # The `[package]` version in a Cargo.toml: at the start of a line, so a dependency's inline
 # `{ version = "2" }` and the `rust-version` key below it are both excluded.
@@ -74,6 +76,19 @@ def versions(root: Path) -> list[tuple[str, str]]:
         if not isinstance(version, str) or not version.strip():
             raise SystemExit(f"release_notes: {name} carries no version")
         found.append((name, version.strip()))
+    for name in OPTIONAL_VERSION_FILES:
+        path = root / name
+        if not path.is_file():
+            continue
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError as error:
+            raise SystemExit(f"release_notes: cannot read {name} ({error})") from error
+        match = CRATE_VERSION.search(text)
+        version = match.group(1) if match else None
+        if not isinstance(version, str) or not version.strip():
+            raise SystemExit(f"release_notes: {name} carries no version")
+        found.append((name, version.strip()))
     return found
 
 
@@ -85,7 +100,7 @@ def tag_version(tag: str) -> str:
 def disagreements(tag: str, found: list[tuple[str, str]]) -> list[str]:
     """Everything about this tag and these versions that does not add up, one sentence each."""
     wanted = tag_version(tag)
-    if not re.fullmatch(r"\d+(\.\d+)*", wanted):
+    if not re.fullmatch(r"\d+(\.\d+)*(?:-[0-9A-Za-z.]+)?", wanted):
         return [
             f"the tag {tag!r} does not name a version, so a package built from it could not be "
             f"compared with any release"
@@ -116,7 +131,7 @@ def notes(tag: str, version: str) -> str:
 | `{tarball}` | A portable `/usr` tree. Extract it, then run `AppRun`; no root needed. |
 | `{appimage}` | One self-contained file. Needs only `chmod +x`. |
 | `{arch}` | An Arch Linux package, built from the portable tar. |
-| `{pkgbuild}` | The PKGBUILD that built the Arch package. Put it beside the tar and run `makepkg -si`. |
+| `{pkgbuild}` | The PKGBUILD that built the Arch package. Put it beside the tar and run `makepkg -si -p {pkgbuild}`. |
 | `SHA256SUMS` | The checksums of the six files above. |
 
 ```bash

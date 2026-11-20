@@ -364,10 +364,14 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[tupl
     must resolve to exactly `<workspace>/.codify/skills`, which refuses a link at
     `.codify` or at `skills` alike.
     """
-    if not directory.is_dir():
-        return [], []
-    root = directory.resolve()
-    if within is not None and root != within.resolve() / SKILLS_DIRNAME:
+    try:
+        if not directory.is_dir():
+            return [], []
+        root = directory.resolve()
+        expected = within.resolve() / SKILLS_DIRNAME if within is not None else None
+    except (OSError, RuntimeError) as exc:
+        return [], [f"{SKILLS_DIRNAME}: refused — could not resolve skills directory ({exc})"]
+    if expected is not None and root != expected:
         return [], [
             f"{SKILLS_DIRNAME}: refused — it resolves to {root}, outside the workspace's own "
             f"{SKILLS_DIRNAME}; a link to a directory elsewhere would load someone else's files "
@@ -389,7 +393,10 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[tupl
 
     # Names, not `Path` objects: a hostile directory can hold hundreds of thousands, and only the first
     # `MAX_SCANNED_ENTRIES` by name are looked at.
-    names = sorted(os.listdir(directory))
+    try:
+        names = sorted(os.listdir(directory))
+    except OSError as exc:
+        return [], [f"{SKILLS_DIRNAME}: could not be read ({exc.strerror or exc})"]
     not_examined = max(0, len(names) - MAX_SCANNED_ENTRIES)
     for path in (directory / name for name in names[:MAX_SCANNED_ENTRIES]):
         if path.is_symlink():
@@ -403,17 +410,29 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[tupl
             if skill_file.is_symlink() or not skill_file.is_file():
                 say(f"{path.name}/: ignored — a skill folder must contain a real SKILL.md file")
                 continue
-            if skill_file.resolve().parent != path.resolve() or path.resolve().parent != root:
+            try:
+                resolved_skill = skill_file.resolve()
+                resolved_dir = path.resolve()
+            except (OSError, RuntimeError):
+                say(
+                    f"{path.name}/SKILL.md: refused — a skill folder and its SKILL.md must be "
+                    f"inside {SKILLS_DIRNAME}, not links to somewhere else"
+                )
+                continue
+            if resolved_skill.parent != resolved_dir or resolved_dir.parent != root:
                 say(
                     f"{path.name}/SKILL.md: refused — a skill folder and its SKILL.md must be "
                     f"inside {SKILLS_DIRNAME}, not links to somewhere else"
                 )
                 continue
             files.append((skill_file, path.name.lower()))
-            extras = sorted(
-                (e for e in itertools.islice(path.iterdir(), MAX_SCANNED_ENTRIES + 1) if e.name != "SKILL.md"),
-                key=lambda p: p.name,
-            )
+            try:
+                extras = sorted(
+                    (e for e in itertools.islice(path.iterdir(), MAX_SCANNED_ENTRIES + 1) if e.name != "SKILL.md"),
+                    key=lambda p: p.name,
+                )
+            except OSError:
+                extras = []
             for extra in extras[:MAX_EXTRAS_LISTED]:
                 say(
                     f"{path.name}/{extra.name}: ignored — a skill is its SKILL.md; "
@@ -426,7 +445,11 @@ def _skill_files(directory: Path, within: Path | None = None) -> tuple[list[tupl
         if path.suffix != ".md":
             say(f"{path.name}: ignored — a skill is a .md file or a folder with a SKILL.md")
             continue
-        if path.resolve().parent != root:
+        try:
+            resolved_parent = path.resolve().parent
+        except (OSError, RuntimeError):
+            resolved_parent = None
+        if resolved_parent != root:
             say(
                 f"{path.name}: refused — a skill file must be a real file inside "
                 f"{SKILLS_DIRNAME}, not a link to one somewhere else"
@@ -514,11 +537,12 @@ def load_skills(
     ordered: dict[str, Skill] = {
         s.name: s for s in builtin if s.name not in blocked
     }
+    builtin_names = set(ordered.keys())
     shadows: list[str] = []
     for skill in workspace:
         if skill.name in blocked:
             continue
-        if skill.name in ordered:
+        if skill.name in builtin_names and skill.name not in shadows:
             shadows.append(skill.name)
         ordered[skill.name] = skill
 

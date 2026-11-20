@@ -1,5 +1,5 @@
 import { readRejection } from "../rejection.ts";
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import {
   AgentConfig,
   ModelCatalog,
@@ -67,8 +67,31 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
   const [catalog, setCatalog] = useState<ModelOption[]>([]);
   const [status, setStatus] = useState<ProviderModelStatus[]>([]);
   const [loadError, setLoadError] = useState<string | null>(null);
+  const requestRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      requestRef.current += 1;
+    };
+  }, []);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        e.preventDefault();
+        e.stopPropagation();
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    return () => window.removeEventListener("keydown", onKeyDown, true);
+  }, [onClose]);
 
   const load = async () => {
+    const req = ++requestRef.current;
     setLoading(true);
     setLoadError(null);
     try {
@@ -77,21 +100,29 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
         fetchProviderKeys(),
         fetchModelCatalog(true),
       ]);
+      if (!mountedRef.current || requestRef.current !== req) return;
       setConfigs(cfg ?? []);
       setKeys(keyList ?? []);
       setCatalog((cat as ModelCatalog).models ?? []);
       setStatus((cat as ModelCatalog).providers ?? []);
     } catch (err: any) {
+      if (!mountedRef.current || requestRef.current !== req) return;
+      setConfigs([]);
+      setKeys([]);
+      setCatalog([]);
+      setStatus([]);
       setLoadError(readRejection(err, "Could not read the engine's current state."));
     } finally {
-      setLoading(false);
+      if (mountedRef.current && requestRef.current === req) {
+        setLoading(false);
+      }
     }
   };
 
   useEffect(() => {
-    load();
+    void load();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [error.code, error.message]);
+  }, [error.code, error.message, error.role]);
 
   const config = configs.find((c) => c.role === error.role);
   const provider = config?.provider;
@@ -108,7 +139,12 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
   });
 
   return (
-    <div className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 bg-black/70 z-50 flex items-center justify-center p-4"
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onClose();
+      }}
+    >
       <div
         role="dialog"
         aria-modal="true"
@@ -168,7 +204,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
             </div>
           )}
 
-          {!loading && !loadError && (
+          {!loading && (
             <>
               {verdicts.map((v, i) => (
                 <div key={i} className={`border rounded-xl px-3.5 py-2.5 ${LEVEL_STYLE[v.level].wrap}`}>
@@ -192,6 +228,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
                 </div>
               ))}
 
+              {!loadError && (
               <div className="bg-codify-bg border border-codify-border rounded-xl px-3.5 py-2.5 flex flex-col gap-2">
                 <span className="text-xs font-semibold text-codify-muted uppercase tracking-wider">
                   What the engine holds
@@ -250,6 +287,7 @@ export const FailureDiagnosisPanel: React.FC<FailureDiagnosisPanelProps> = ({
                   </span>
                 )}
               </div>
+              )}
 
               <p className="text-xs text-codify-muted leading-relaxed">
                 Engine said: <span className="font-mono text-codify-muted">{error.message}</span>

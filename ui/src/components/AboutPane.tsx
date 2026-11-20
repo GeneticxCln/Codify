@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Info, Keyboard, FolderOpen, Cpu, Globe, RefreshCw, Download } from "lucide-react";
 
 import {
@@ -107,33 +107,87 @@ const DownloadBar: React.FC<{
   );
 };
 
+/**
+ * The one download in flight, held outside the component: closing and reopening About must
+ * re-attach to it rather than reset to "idle" and let a second `codify_update_download` start.
+ */
+interface ActiveDownload {
+  check: UpdateCheck;
+  promise: Promise<UpdateDownload>;
+  progress: UpdateProgress | null;
+  listeners: Set<(progress: UpdateProgress) => void>;
+}
+let activeDownload: ActiveDownload | null = null;
+
+function startOrJoinDownload(known: UpdateCheck): ActiveDownload {
+  if (activeDownload) return activeDownload;
+  const entry: ActiveDownload = {
+    check: known,
+    progress: null,
+    listeners: new Set(),
+    promise: Promise.resolve() as unknown as Promise<UpdateDownload>,
+  };
+  entry.promise = downloadUpdate((progress) => {
+    entry.progress = progress;
+    for (const listener of entry.listeners) listener(progress);
+  }).finally(() => {
+    if (activeDownload === entry) activeDownload = null;
+  });
+  activeDownload = entry;
+  return entry;
+}
+
 /** The update section: a check a person starts, and the package it hands them. */
 const UpdatePanel: React.FC = () => {
-  const [state, setState] = useState<UpdateState>({ kind: "idle" });
+  const [state, setState] = useState<UpdateState>(() =>
+    activeDownload
+      ? { kind: "downloading", check: activeDownload.check, progress: activeDownload.progress }
+      : { kind: "idle" },
+  );
+  const mountedRef = useRef(true);
 
   const check = useCallback(async () => {
     setState({ kind: "checking" });
     try {
-      setState({ kind: "answered", check: await checkForUpdate() });
+      const answer = await checkForUpdate();
+      if (mountedRef.current) setState({ kind: "answered", check: answer });
     } catch (err) {
-      setState({ kind: "failed", check: null, message: readRejection(err) });
+      if (mountedRef.current) setState({ kind: "failed", check: null, message: readRejection(err) });
     }
   }, []);
 
-  const fetch = useCallback(async (known: UpdateCheck) => {
-    setState({ kind: "downloading", check: known, progress: null });
+  const follow = useCallback(async (entry: ActiveDownload) => {
+    const known = entry.check;
+    const listener = (progress: UpdateProgress) => {
+      if (mountedRef.current) setState({ kind: "downloading", check: known, progress });
+    };
+    entry.listeners.add(listener);
     try {
-      const download = await downloadUpdate((progress) => {
-        // The only download on screen is this one: the button is disabled while this runs, so there
-        // is no second download whose receipts could arrive here, and the subscription ends with
-        // the call that started it.
-        setState({ kind: "downloading", check: known, progress });
-      });
-      setState({ kind: "downloaded", check: known, download });
+      const download = await entry.promise;
+      if (mountedRef.current) setState({ kind: "downloaded", check: known, download });
     } catch (err) {
-      setState({ kind: "failed", check: known, message: readRejection(err) });
+      if (mountedRef.current) setState({ kind: "failed", check: known, message: readRejection(err) });
+    } finally {
+      entry.listeners.delete(listener);
     }
   }, []);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    if (activeDownload) void follow(activeDownload);
+    return () => {
+      mountedRef.current = false;
+    };
+  }, [follow]);
+
+  const fetch = useCallback(
+    async (known: UpdateCheck) => {
+      const entry = startOrJoinDownload(known);
+      setState({ kind: "downloading", check: entry.check, progress: entry.progress });
+      await follow(entry);
+    },
+    [follow],
+  );
 
   const busy = state.kind === "checking" || state.kind === "downloading";
   // The offer survives a *failed download*: that failure is about the download, and the release

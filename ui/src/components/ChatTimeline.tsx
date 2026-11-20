@@ -386,7 +386,7 @@ const TurnExchange: React.FC<{
   onAnswerQuestion?: (text: string) => void;
   /** Nothing has followed this turn, so a question in it is still waiting for an answer. */
   answerable: boolean;
-}> = ({ msg, traceOpen, onToggleTrace, autoRead, onOpenLink, onAnswerQuestion, answerable }) => {
+}> = React.memo(({ msg, traceOpen, onToggleTrace, autoRead, onOpenLink, onAnswerQuestion, answerable }) => {
   const reply = turnReply(msg.events);
   const question = turnQuestion(msg.events);
   // Only while there is nothing to show yet: the streamed snapshot *is* the
@@ -471,7 +471,7 @@ const TurnExchange: React.FC<{
       )}
     </div>
   );
-};
+});
 
 /** Edit a plan step's title, description, and target paths before execution. */
 const PlanStepEditor: React.FC<{
@@ -734,11 +734,24 @@ const auditMarkerCursor = new Map<string, number>();
  */
 const auditMarkerViewed = new Map<string, number>();
 
+const MAX_AUDIT_CURSORS = 200;
+
+function setBounded<K, V>(map: Map<K, V>, key: K, value: V): void {
+  if (!map.has(key) && map.size >= MAX_AUDIT_CURSORS) {
+    const oldest = map.keys().next().value;
+    if (oldest !== undefined) map.delete(oldest);
+  }
+  map.set(key, value);
+}
+
 /**
  * The badge label's ordinal for the tooltip: 1-based human form.
  */
 function ordinalLabel(n: number): string {
-  return `${n}${n === 1 ? "st" : n === 2 ? "nd" : n === 3 ? "rd" : "th"}`;
+  const mod100 = n % 100;
+  if (mod100 >= 11 && mod100 <= 13) return `${n}th`;
+  const mod10 = n % 10;
+  return `${n}${mod10 === 1 ? "st" : mod10 === 2 ? "nd" : mod10 === 3 ? "rd" : "th"}`;
 }
 
 /**
@@ -844,7 +857,7 @@ interface ChatTimelineProps {
   onAnswerQuestion?: (text: string) => void;
 }
 
-export const ChatTimeline: React.FC<ChatTimelineProps> = ({
+export const ChatTimeline: React.FC<ChatTimelineProps> = React.memo(({
   messages,
   onStartGoal,
   onEnableExecution,
@@ -918,6 +931,22 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
   // entries in ITS card's transcript, not the first card that happens to
   // render. Keyed by message id; entries clean up on unmount.
   const cardScopes = useRef(new Map<string, HTMLElement>());
+  // Stable per-message ref callbacks so React does not detach/reattach refs on every render.
+  const scopeRefCallbacks = useRef(new Map<string, (node: HTMLDivElement | null) => void>());
+  const getScopeRef = (msgId: string): ((node: HTMLDivElement | null) => void) => {
+    let cb = scopeRefCallbacks.current.get(msgId);
+    if (!cb) {
+      cb = (node: HTMLDivElement | null) => {
+        if (node) cardScopes.current.set(msgId, node);
+        else {
+          cardScopes.current.delete(msgId);
+          scopeRefCallbacks.current.delete(msgId);
+        }
+      };
+      scopeRefCallbacks.current.set(msgId, cb);
+    }
+    return cb;
+  };
   // Bumped on every audit-badge click: the cursor and viewed maps live at
   // module level, so without a state change the re-render (and thus the
   // updated "showing 2nd of 3" tooltip) would never happen. Streaming events
@@ -1034,10 +1063,7 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
         // Scope the audit-badge jumps to THIS card: several goal cards render
         // in one transcript, and an unscoped document query would jump to the
         // first card's entry regardless of which badge was clicked.
-        const scopeRef = (node: HTMLDivElement | null) => {
-          if (node) cardScopes.current.set(msg.id, node);
-          else cardScopes.current.delete(msg.id);
-        };
+        const scopeRef = getScopeRef(msg.id);
         // The toggle only appears on cards that have something to filter: a
         // pill that filters nothing is noise, not a control.
         const hasIssues = (msg.events ?? []).some(isIssueEvent);
@@ -1229,16 +1255,18 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                             const positionSuffix = (
                               kind: AuditMarkerKind,
                             ): string => {
+                              const viewed = auditMarkerViewed.get(
+                                `${msg.id}:${kind}`,
+                              );
+                              if (viewed === undefined) return "";
+                              // Read the live marker count only after the user has clicked
+                              // (avoiding up to 6 querySelectorAll DOM walks per card on every render).
                               const scope = cardScopes.current.get(msg.id);
                               const total =
                                 scope?.querySelectorAll(
                                   `[data-audit-marker="${kind}"]`,
                                 ).length ?? 0;
-                              const viewed = auditMarkerViewed.get(
-                                `${msg.id}:${kind}`,
-                              );
-                              if (!scope || total === 0 || viewed === undefined)
-                                return "";
+                              if (!scope || total === 0) return "";
                               return ` — showing ${ordinalLabel(viewed + 1)} of ${total}`;
                             };
                             const jump = (kind: AuditMarkerKind) => () => {
@@ -1251,8 +1279,8 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                               const key = `${msg.id}:${kind}`;
                               const index = auditMarkerCursor.get(key) ?? 0;
                               scrollToAuditMarker(kind, scope, index);
-                              auditMarkerViewed.set(key, index);
-                              auditMarkerCursor.set(key, (index + 1) % total);
+                              setBounded(auditMarkerViewed, key, index);
+                              setBounded(auditMarkerCursor, key, (index + 1) % total);
                               setAuditTick((t) => t + 1); // tooltip is DOM-derived; force the re-render
                             };
                             return (
@@ -1465,7 +1493,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                   a.href = url;
                                   a.download = `audit-${slug}-${stamp}.json`;
                                   a.click();
-                                  URL.revokeObjectURL(url);
+                                  // Defer revocation so WebKitGTK's async blob download can read the URL.
+                                  const timer = window.setTimeout(() => URL.revokeObjectURL(url), 10_000);
+                                  (timer as unknown as { unref?: () => void })?.unref?.();
                                 } catch (err: any) {
                                   setExportError(
                                     readRejection(err, "Could not export the audit trail."),
@@ -1526,18 +1556,20 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
                                 ? buildStepWindows(msg.events)
                                 : new Map();
                               let axisStart = Infinity;
-                              let axisEnd: number | null = null;
+                              let maxEnd = -Infinity;
+                              let hasRunningWindow = false;
                               for (const ws of windowsByStep.values()) {
                                 for (const w of ws) {
                                   axisStart = Math.min(axisStart, w.start);
-                                  axisEnd =
-                                    w.end === null
-                                      ? null
-                                      : axisEnd === null
-                                        ? Math.max(axisEnd ?? 0, w.end)
-                                        : Math.max(axisEnd, w.end);
+                                  if (w.end === null) {
+                                    hasRunningWindow = true;
+                                  } else {
+                                    maxEnd = Math.max(maxEnd, w.end);
+                                  }
                                 }
                               }
+                              const axisEnd: number | null =
+                                hasRunningWindow || !Number.isFinite(maxEnd) ? null : maxEnd;
                               const axis = Number.isFinite(axisStart)
                                 ? { start: axisStart, end: axisEnd }
                                 : null;
@@ -2537,4 +2569,4 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = ({
       )}
     </div>
   );
-};
+});

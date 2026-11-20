@@ -197,9 +197,22 @@ class TraceService:
         """
         return self.delete_older_than(settings.get_int(RETENTION_SETTING))
 
+    def _summary_rows(self, goal_id: str) -> list[dict[str, Any]]:
+        """Metadata-only rows for `summary()`, excluding multi-MB prompt/response bodies."""
+        rows = self._db.execute(
+            """SELECT seq, role, model, prompt_hash, input_tokens, output_tokens,
+                      duration_ms, created_at,
+                      (user_prompt IS NOT NULL AND user_prompt != '') AS has_prompt
+               FROM trace_calls
+               WHERE goal_id = ?
+               ORDER BY seq""",
+            (goal_id,),
+        ).fetchall()
+        return [dict(r) for r in rows]
+
     def summary(self, goal_id: str) -> dict[str, Any]:
         """What a goal recorded, for the UI: per role, in order, without bodies."""
-        calls = self.calls(goal_id)
+        calls = self._summary_rows(goal_id)
         by_role: dict[str, int] = {}
         for call in calls:
             role = str(call.get("role") or "unknown")
@@ -219,7 +232,7 @@ class TraceService:
             ),
             # True only when the text was actually kept. Stated so the UI can
             # say "digests only" rather than implying a transcript exists.
-            "prompts_kept": any(call.get("user_prompt") for call in calls),
+            "prompts_kept": any(call.get("has_prompt") for call in calls),
             "recorded": [
                 {
                     "seq": call["seq"],
@@ -258,7 +271,7 @@ class ReplayProvider(BaseProvider):
 
     def __init__(self, calls: list[dict[str, Any]]) -> None:
         self._calls = list(calls)
-        self._served: set[str] = set()
+        self._served: set[int] = set()
         self.served: list[str] = []
         # Which role this instance is serving. Set by the factory that builds
         # it, from the `AgentConfig` it was asked for — the same signal the
@@ -270,15 +283,16 @@ class ReplayProvider(BaseProvider):
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
         temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
+        json_mode: bool = True,
     ) -> str:
         role = self.current_role or "unknown"
         digest = prompt_digest(system_prompt, user_prompt)
-        for call in self._calls:
-            key = f"{call['role']}:{call['prompt_hash']}"
-            if key in self._served or call["role"] != role or call["prompt_hash"] != digest:
+        for idx, call in enumerate(self._calls):
+            if idx in self._served or call["role"] != role or call["prompt_hash"] != digest:
                 continue
-            self._served.add(key)
+            self._served.add(idx)
             self.served.append(role)
             return str(call.get("response") or "")
         raise TraceMismatch(

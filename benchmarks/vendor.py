@@ -40,6 +40,7 @@ import argparse
 import datetime
 import io
 import json
+import re
 import shutil
 import sys
 import tarfile
@@ -47,6 +48,9 @@ import urllib.error
 import urllib.request
 from pathlib import Path
 from typing import Any
+
+_SPEC_SEGMENT = re.compile(r"^[A-Za-z0-9._-]+$")
+_SPEC_SHA = re.compile(r"^[0-9a-fA-F]{7,40}$")
 
 BENCH_DIR = Path(__file__).resolve().parent
 DEFAULT_MANIFEST = BENCH_DIR / "manifest.json"
@@ -160,15 +164,21 @@ def extract_snapshot(
         # repository, not a directory named after it.
         roots.pop()
 
+        sub_parts = tuple(p for p in Path(subpath).parts if p not in ("", ".")) if subpath else ()
+        if subpath and (Path(subpath).is_absolute() or ".." in sub_parts):
+            raise VendorError(f"refusing unsafe --subpath: {subpath!r}")
+
         for member in members:
             if member.isdir():
                 continue
             parts = Path(member.name).parts[1:]
-            rel = Path(*parts) if parts else Path(member.name)
-            if subpath:
-                if parts[:1] != (subpath,):
+            if sub_parts:
+                if parts[: len(sub_parts)] != sub_parts:
                     continue
-                rel = Path(*parts[1:])
+                parts = parts[len(sub_parts) :]
+            if not parts:
+                continue
+            rel = Path(*parts)
             rel_str = str(rel)
             if not rel_str or rel_str == "." or _pruned(rel_str):
                 continue
@@ -259,12 +269,18 @@ def parse_spec(spec: str) -> tuple[str, str]:
         )
     upstream, _, sha = spec.partition("@")
     sha = sha.strip()
-    if len(sha) < 7:
+    if not _SPEC_SHA.fullmatch(sha):
         raise VendorError(f"{spec!r} has no usable commit SHA")
     if not upstream or upstream.count("/") != 1:
         raise VendorError(
             f"{upstream!r} is not an owner/repo pair — e.g. pallets/click"
         )
+    owner, _, repo = upstream.partition("/")
+    for label, segment in (("owner", owner), ("repository", repo)):
+        if segment in (".", "..") or not _SPEC_SEGMENT.fullmatch(segment):
+            raise VendorError(
+                f"{upstream!r} has an invalid {label} name {segment!r} — e.g. pallets/click"
+            )
     return upstream, sha
 
 
@@ -297,17 +313,22 @@ def vendor(
 
     if source is not None:
         if source.is_dir():
-            source = _tar_dir(source)
-        if not source.is_file():
+            data = _tar_dir(source)
+            origin = f"local directory {source}"
+        elif source.is_file():
+            data = source.read_bytes()
+            origin = f"local archive {source}"
+        else:
             raise VendorError(f"--source {source} is not a file")
-        data = source.read_bytes()
-        origin = f"local archive {source}"
     else:
         url = f"https://codeload.github.com/{upstream}/tar.gz/{sha}"
         data = _download(url, timeout_s)
         origin = url
 
+    repos_root = (root / "repos").resolve()
     dest = root / "repos" / name
+    if dest.resolve().parent != repos_root:
+        raise VendorError(f"refusing unsafe repository destination: {dest}")
     if dest.exists():
         shutil.rmtree(dest)
     dest.mkdir(parents=True, exist_ok=True)
@@ -334,16 +355,14 @@ def vendor(
     return entry
 
 
-def _tar_dir(directory: Path) -> Path:
+def _tar_dir(directory: Path) -> bytes:
     """Pack a local directory in the shape `extract_snapshot` expects."""
     buffer = io.BytesIO()
     with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
         for path in sorted(directory.rglob("*")):
             if path.is_file():
                 archive.add(path, arcname=f"{directory.name}/{path.relative_to(directory)}")
-    packed = directory.parent / f"{directory.name}.tar.gz"
-    packed.write_bytes(buffer.getvalue())
-    return packed
+    return buffer.getvalue()
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -176,11 +176,19 @@ const spinX = (v: Vec, a: number): Vec => [
  * `active`: it changes at runtime, and a dependency would restart the
  * effect. Here it is simply the one value the body used to close over.
  */
-export function createVectorWirePainter(read: (name: string) => string, active: boolean): AtmospherePainter {
+export function createVectorWirePainter(
+  read: (name: string) => string,
+  active: boolean | (() => boolean),
+): AtmospherePainter {
+  const isActive = typeof active === "function" ? active : () => active;
 
   let bodies: Body[] = [];
+  let seededW = 0;
+  let seededH = 0;
 
   const seed = (w: number, h: number): void => {
+    seededW = w;
+    seededH = h;
     bodies = Array.from({ length: WIDGETS }, (_, i) => {
       const left = i % 2 === 0;
       return {
@@ -201,17 +209,21 @@ export function createVectorWirePainter(read: (name: string) => string, active: 
 
   return {
     step(dt) {
+      const busy = isActive();
       for (const b of bodies) {
-        b.spin += b.spinRate * dt * (active ? 1.8 : 1);
+        b.spin += b.spinRate * dt * (busy ? 1.8 : 1);
       }
     },
     draw(ctx, size, tick) {
       // Resolved per frame rather than once at creation, so a theme or a
       // custom tint restyles this canvas on the next frame instead of
       // waiting for a remount. See the hook's note on live reads.
-        const line = channelsOf(read("--vector-line"));
-        const lock = channelsOf(read("--vector-lock"));
-      if (bodies.length === 0) seed(size.width, size.height);
+      const busy = isActive();
+      const line = channelsOf(read("--vector-line"));
+      const lock = channelsOf(read("--vector-lock"));
+      if (bodies.length === 0 || size.width !== seededW || size.height !== seededH) {
+        seed(size.width, size.height);
+      }
       const { width: w } = size;
       ctx.clearRect(0, 0, w, size.height);
       ctx.lineWidth = 1;
@@ -235,7 +247,7 @@ export function createVectorWirePainter(read: (name: string) => string, active: 
           const k = b.size / (PERSPECTIVE + z);
           return { x: b.x + r[0] * k, y: b.y + r[1] * k, z };
         });
-        const locked = active && target === b;
+        const locked = busy && target === b;
 
         const drawEdge = (a: number, c: number, alpha: number): void => {
           // Depth as alpha, never as width: a wireframe that thickens as it
@@ -248,7 +260,7 @@ export function createVectorWirePainter(read: (name: string) => string, active: 
           ctx.stroke();
         };
         for (const [a, c] of solid.e) drawEdge(a, c, 0.5);
-        if (active) for (const [a, c] of solid.chords) drawEdge(a, c, 0.22);
+        if (busy) for (const [a, c] of solid.chords) drawEdge(a, c, 0.22);
 
         // Vertices, only on the locked one, and only while working: a dot on
         // every vertex of every solid is the opposite of vector art.
@@ -292,13 +304,21 @@ export const VectorWire: React.FC<VectorWireProps> = ({
   active = false,
   animated,
 }) => {
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
   const vars = {
     "--vector-line": "#00ff66",
     "--vector-lock": "#ff007f",
   };
 
-
-  const canvasRef = useAtmosphereCanvas({ maxDimension, fps, animated, active, vars, create: (read) => createVectorWirePainter(read, active) });
+  const canvasRef = useAtmosphereCanvas({
+    maxDimension,
+    fps,
+    animated,
+    active,
+    vars,
+    create: (read) => createVectorWirePainter(read, () => activeRef.current === true),
+  });
 
   return (
     <canvas

@@ -98,6 +98,14 @@ export function openEngineStream(opts: {
     provenTimer = null;
   };
 
+  const scheduleReconnect = () => {
+    if (destroyed) return;
+    attempt += 1;
+    const delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
+    onReconnecting?.(attempt);
+    retryTimer = setTimeout(connect, delay);
+  };
+
   const connect = () => {
     if (destroyed) return;
     const engine = getEngineInfo();
@@ -106,7 +114,13 @@ export function openEngineStream(opts: {
       return;
     }
 
-    const sock = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/engine`);
+    let sock: WebSocket;
+    try {
+      sock = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/engine`);
+    } catch {
+      scheduleReconnect();
+      return;
+    }
     ws = sock;
 
     // Per socket. The timers above are shared, so every handler first checks it is still the
@@ -128,7 +142,16 @@ export function openEngineStream(opts: {
         stableTimer = null;
         attempt = 0;
       }, STABLE_CONNECTION_MS);
-      sock.send(JSON.stringify({ type: "auth", token: engine.token }));
+      try {
+        sock.send(JSON.stringify({ type: "auth", token: engine.token }));
+      } catch {
+        try {
+          sock.close();
+        } catch {
+          /* noop */
+        }
+        return;
+      }
       clearProvenTimer();
       provenTimer = setTimeout(prove, CONNECTION_PROVEN_MS);
     };
@@ -144,11 +167,7 @@ export function openEngineStream(opts: {
       if (ws !== sock) return;
       clearStableTimer();
       clearProvenTimer();
-      if (destroyed) return;
-      attempt += 1;
-      const delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
-      onReconnecting?.(attempt);
-      retryTimer = setTimeout(connect, delay);
+      scheduleReconnect();
     };
 
     sock.onerror = () => {

@@ -94,6 +94,10 @@ const aborted = (signal: AbortSignal, error: unknown): boolean =>
 
 export async function runSurfaceLoop(io: SurfaceLoopIo, registry: SurfaceRegistry, signal: AbortSignal): Promise<void> {
   let pause = FIRST_PAUSE_MS;
+  // Serialize requests per surface so no handler ever receives overlapping calls, while
+  // allowing independent surfaces (e.g. editor reads during a 30s machine.run) to run
+  // concurrently and keeping the poll loop alive so `_last_seen` never expires.
+  const queues = new Map<string, Promise<void>>();
   while (!signal.aborted) {
     const started = io.now();
     let request: SurfaceRequest | null;
@@ -120,11 +124,21 @@ export async function runSurfaceLoop(io: SurfaceLoopIo, registry: SurfaceRegistr
       }
       continue;
     }
-    const reply = await registry.dispatch(request);
-    try {
-      await io.answer(reply.ok ? { id: request.id, ok: true, result: reply.result } : { id: request.id, ok: false, error: reply.error });
-    } catch {
-      // The engine will give up on a question nobody answers; the loop's job is to be there for the next one.
-    }
+    const req = request;
+    const prev = queues.get(req.surface) ?? Promise.resolve();
+    const run = prev.then(async () => {
+      const reply = await registry.dispatch(req);
+      try {
+        await io.answer(
+          reply.ok ? { id: req.id, ok: true, result: reply.result } : { id: req.id, ok: false, error: reply.error },
+        );
+      } catch {
+        // The engine will give up on a question nobody answers; the loop's job is to be there for the next one.
+      }
+    });
+    const tail = run.finally(() => {
+      if (queues.get(req.surface) === tail) queues.delete(req.surface);
+    });
+    queues.set(req.surface, tail);
   }
 }

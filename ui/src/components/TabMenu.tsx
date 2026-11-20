@@ -71,6 +71,12 @@ export const TabMenu: React.FC<TabMenuProps> = ({ items, x, y, onChoose, onClose
     const at = rows.indexOf(document.activeElement as HTMLButtonElement);
     if (event.key === "Escape") {
       event.stopPropagation();
+      event.nativeEvent.stopImmediatePropagation?.();
+      onClose();
+      return;
+    }
+    if (event.key === "Tab") {
+      // Focus is leaving the menu; a menu left open behind it would trap clicks under its sheet.
       onClose();
       return;
     }

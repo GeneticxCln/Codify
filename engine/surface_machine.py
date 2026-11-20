@@ -31,9 +31,9 @@ the model reads frames it as a quotation before it arrives.
 
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, field_validator, model_validator
 
 from engine.surfaces import Op
 
@@ -67,7 +67,7 @@ def _cap_str(limit: int) -> BeforeValidator:
 
 
 def _cap_list(limit: int) -> BeforeValidator:
-    return BeforeValidator(lambda v: v[:limit] if isinstance(v, list) else v)
+    return BeforeValidator(lambda v: v[-limit:] if isinstance(v, list) else v)
 
 
 Line = Annotated[str, _cap_str(MAX_LINE_CHARS)]
@@ -158,6 +158,15 @@ class MachineRunResult(_Answer):
     settled: bool
     alive: bool
     truncated: bool = False
+
+    @model_validator(mode="before")
+    @classmethod
+    def _mark_truncated(cls, data: Any) -> Any:
+        if isinstance(data, dict):
+            output = data.get("output")
+            if isinstance(output, list) and len(output) > MAX_OUTPUT_LINES and not data.get("truncated"):
+                return {**data, "truncated": True}
+        return data
 
 
 class MachineKeyResult(_Answer):

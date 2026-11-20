@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import signal
+import stat
 import subprocess
 import time
 from collections.abc import Mapping
@@ -34,7 +35,7 @@ from engine.spawn_guard import guarded_argv, guarded_env
 # was another door onto the same program a commit was already refused for; `git add` and
 # `git commit` reach it on their way into the index. Every one of them is checked at the
 # class's one git door before it runs (`_run_bytes`).
-_FILTER_RUNNING_SUBCOMMANDS = frozenset({"status", "diff", "add", "commit"})
+_FILTER_RUNNING_SUBCOMMANDS = frozenset({"status", "diff", "add", "commit", "blame", "ls-files", "grep"})
 
 
 def sanitize_remote_url(url: str) -> str:
@@ -143,14 +144,58 @@ class GitService:
         }
         if not self.is_git_repo(root_path):
             return {**clean, "reason": "This workspace is not a git repository."}
+        resolved_root = str(Path(root_path).resolve())
+        readonly_env = git_readonly.runner_env(os.environ, root_path)
+        if not check_filters:
+            # Push only needs the current branch name; never invoke `git status` here, because
+            # `git status` scans the working tree and runs repo-configured `filter.*.clean`.
+            try:
+                sym = self._run_text(
+                    ["symbolic-ref", "--quiet", "--short", "HEAD"],
+                    cwd=resolved_root,
+                    env=readonly_env,
+                    timeout=self.read_only_timeout_s,
+                    capped=True,
+                    check_filters=False,
+                )
+                head_res = self._run_text(
+                    ["rev-parse", "--verify", "--quiet", "HEAD"],
+                    cwd=resolved_root,
+                    env=readonly_env,
+                    timeout=self.read_only_timeout_s,
+                    capped=True,
+                    check_filters=False,
+                )
+            except subprocess.TimeoutExpired:
+                return {
+                    **clean,
+                    "reason": f"git symbolic-ref did not finish in {self.read_only_timeout_s:g}s.",
+                }
+            except OSError as exc:
+                return {**clean, "reason": f"git symbolic-ref could not run: {exc}"}
+            if sym.returncode == 0 and sym.stdout.strip():
+                branch_name = sym.stdout.strip().splitlines()[0].strip()
+                if head_res.returncode != 0:
+                    return {**clean, "reason": "This repository has no commits yet."}
+                return {
+                    "branch": branch_name, "detached": False, "dirty": False,
+                    "ahead": 0, "behind": 0, "reason": None,
+                }
+            if head_res.returncode == 0:
+                return {
+                    **clean, "detached": True,
+                    "reason": "HEAD is detached; there is no branch to show.",
+                }
+            said = (sym.stderr or sym.stdout or "").strip().splitlines()
+            return {**clean, "reason": said[0] if said else "HEAD could not be read."}
         try:
             res = self._run_text(
                 ["status", "--porcelain=v2", "--branch"],
-                cwd=str(Path(root_path).resolve()),
-                env=git_readonly.runner_env(os.environ, root_path),
+                cwd=resolved_root,
+                env=readonly_env,
                 timeout=self.read_only_timeout_s,
                 capped=True,
-                check_filters=check_filters,
+                check_filters=True,
             )
         except subprocess.TimeoutExpired:
             return {
@@ -326,6 +371,36 @@ class GitService:
             "sha": self.head_sha(root), "reason": None,
         }
 
+    @staticmethod
+    def _check_config_lines(stdout: str, command: str) -> tuple[str | None, bool]:
+        """Inspect `git config --list` output for unsafe filters/worktree redirects and worktreeConfig flag."""
+        worktree_config = False
+        for line in stdout.splitlines():
+            # `git config --list` writes `key=value`, or just `key` for a boolean. The key is
+            # everything before the first `=`; a value may contain anything at all.
+            key_raw, has_eq, val_raw = line.partition("=")
+            key = key_raw.strip()
+            lower_key = key.lower()
+            val = val_raw.strip().lower()
+            setting = lower_key.rsplit(".", 1)[-1]
+            if lower_key.startswith("filter.") and setting in {"clean", "smudge", "process"}:
+                return (
+                    f"this repository's config names a git filter Codify will not run ({key}), "
+                    f"so it did not run `git {command}`. Run it yourself, or remove that setting and try again."
+                ), worktree_config
+            if lower_key == "core.worktree":
+                return (
+                    f"this repository's config sets `core.worktree`, which points git outside the workspace, "
+                    f"so it did not run `git {command}`."
+                ), worktree_config
+            if lower_key == "core.bare" and (not has_eq or val in {"true", "yes", "on", "1"}):
+                return (
+                    f"this repository's config sets `core.bare = true`, so it did not run `git {command}`."
+                ), worktree_config
+            if lower_key == "extensions.worktreeconfig":
+                worktree_config = (not has_eq) or val in {"true", "yes", "on", "1"}
+        return None, worktree_config
+
     def _untrusted_config_reason(self, cwd: str, command: str) -> str | None:
         """Why this repository's config cannot be trusted to run `command`, or None.
 
@@ -337,9 +412,19 @@ class GitService:
         filters have no equivalent switch, so a command that would run one is refused
         instead. The check is in `_run_bytes`, the one door every git command goes through,
         because `status` and `diff` compare the worktree through the same filter: refusing
-        only the commit left the UI's status poll as another way to start it. The person
-        can run the command themselves, or remove the setting.
+        only the commit left the UI's status poll as another way to start it. Both `--local`
+        and `--worktree` (when `extensions.worktreeConfig` is enabled) are checked. The
+        person can run the command themselves, or remove the setting.
         """
+        for path in git_readonly._config_files(cwd):
+            try:
+                st = path.stat()
+            except FileNotFoundError:
+                continue
+            except OSError as exc:
+                return f"the repository's {path.name} could not be read: {exc}"
+            if not stat.S_ISREG(st.st_mode):
+                return f"the repository's {path.name} is not a regular file, so Codify did not run `git {command}`"
         try:
             res = self._run_text(
                 ["config", "--local", "--includes", "--list"],
@@ -353,16 +438,32 @@ class GitService:
         if res.returncode != 0:
             said = (res.stderr or res.stdout or "").strip().splitlines()
             return f"the repository's config could not be read: {said[0] if said else res.returncode}"
-        for line in res.stdout.splitlines():
-            # `git config --list` writes `key=value`, or just `key` for a boolean. The key is
-            # everything before the first `=`; a value may contain anything at all.
-            key = line.split("=", 1)[0].strip()
-            setting = key.rsplit(".", 1)[-1].lower()
-            if key.lower().startswith("filter.") and setting in {"clean", "smudge", "process"}:
-                return (
-                    f"this repository's config names a git filter Codify will not run ({key}), "
-                    f"so it did not run `git {command}`. Run it yourself, or remove that setting and try again."
-                )
+        reason, worktree_config = self._check_config_lines(res.stdout, command)
+        if reason is not None:
+            return reason
+        if worktree_config:
+            gitdir = git_readonly._git_dir(Path(cwd))
+            wt_file = gitdir / "config.worktree" if gitdir is not None else None
+            if wt_file is not None and wt_file.exists():
+                try:
+                    wt_res = self._run_text(
+                        ["config", "--worktree", "--includes", "--list"],
+                        cwd=cwd, env=self._workspace_env(), timeout=self.read_only_timeout_s,
+                        check_filters=False,
+                    )
+                except subprocess.TimeoutExpired:
+                    return (
+                        "the repository's worktree config did not finish reading in time, "
+                        "so Codify cannot check what its filters run"
+                    )
+                except OSError as exc:
+                    return f"the repository's worktree config could not be read: {exc}"
+                if wt_res.returncode != 0:
+                    said = (wt_res.stderr or wt_res.stdout or "").strip().splitlines()
+                    return f"the repository's worktree config could not be read: {said[0] if said else wt_res.returncode}"
+                wt_reason, _ = self._check_config_lines(wt_res.stdout, command)
+                if wt_reason is not None:
+                    return wt_reason
         return None
 
     # ── the one way this class starts a process ─────────────────────────
@@ -412,7 +513,8 @@ class GitService:
                 return subprocess.CompletedProcess(
                     [self._git_bin, *args], 1, b"", reason.encode("utf-8"),
                 )
-        args = git_readonly.runner_args(args) if hardened else ["--no-pager", *args]
+        work_tree = str(Path(cwd).resolve()) if (args and args[0] != "init" and self.is_git_repo(cwd)) else None
+        args = git_readonly.runner_args(args, work_tree=work_tree) if hardened else ["--no-pager", *args]
         proc = subprocess.Popen(  # noqa: S603 — git's own binary and an argv list already validated by the caller; guarded, no shell
             guarded_argv([self._git_bin, *args]),
             cwd=cwd,
@@ -429,17 +531,27 @@ class GitService:
         if capped:
             drains = (_Drain(proc.stdout), _Drain(proc.stderr))
             deadline = time.monotonic() + (timeout if timeout is not None else 1e9)
-            if not _settle(proc, drains, deadline):
+            try:
+                settled = _settle(proc, drains, deadline)
+            except BaseException:
+                SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+                _settle(proc, drains, time.monotonic() + 5)
+                raise
+            if not settled:
                 SandboxService._kill_group(proc.pid)
                 if not _settle(proc, drains, time.monotonic() + 5):
                     SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
                     _settle(proc, drains, time.monotonic() + 5)
                 raise subprocess.TimeoutExpired(proc.args, timeout or 0.0)
             marker = b"\n\xe2\x80\xa6 (output truncated)"
+            with drains[0]._lock:
+                out_raw, out_trunc = bytes(drains[0].kept), drains[0].truncated
+            with drains[1]._lock:
+                err_raw, err_trunc = bytes(drains[1].kept), drains[1].truncated
             return subprocess.CompletedProcess(
                 proc.args, proc.returncode,
-                bytes(drains[0].kept) + (marker if drains[0].truncated else b""),
-                bytes(drains[1].kept) + (marker if drains[1].truncated else b""),
+                out_raw + (marker if out_trunc else b""),
+                err_raw + (marker if err_trunc else b""),
             )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -450,12 +562,18 @@ class GitService:
                 proc.communicate(timeout=5)
             except subprocess.TimeoutExpired:
                 SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
-                proc.communicate()
+                try:
+                    proc.communicate(timeout=5)
+                except (subprocess.TimeoutExpired, OSError):
+                    pass
             raise
         except BaseException:
             # Interrupted while waiting: leave nothing running behind us.
             SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
-            proc.communicate()
+            try:
+                proc.communicate(timeout=5)
+            except (subprocess.TimeoutExpired, OSError):
+                pass
             raise
         return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
@@ -571,6 +689,8 @@ class GitService:
                 f"git {' '.join(args)} did not finish in {self.read_only_timeout_s:g}s and "
                 "was stopped. Ask for less: a path, a smaller range, or -n."
             )
+        except OSError as exc:
+            return f"git {' '.join(args)} could not run: {exc.strerror or exc}"
         out = (res.stdout or "").strip() or (res.stderr or "").strip()
         return f"$ git {' '.join(args)} (exit {res.returncode})\n{out}"
 
@@ -581,9 +701,13 @@ class GitService:
         paths: list[str],
         author_name: str = "Codify",
         author_email: str = "codify@local",
+        *,
+        allow_root: bool = False,
     ) -> str | None:
         """The commit's hash, or None. Same contract as ever; see `commit_with_reason`."""
-        return self.commit_with_reason(root_path, message, paths, author_name, author_email)[0]
+        return self.commit_with_reason(
+            root_path, message, paths, author_name, author_email, allow_root=allow_root
+        )[0]
 
     def commit_with_reason(
         self,
@@ -592,6 +716,8 @@ class GitService:
         paths: list[str],
         author_name: str = "Codify",
         author_email: str = "codify@local",
+        *,
+        allow_root: bool = False,
     ) -> tuple[str | None, str | None]:
         """Commit exactly `paths`, and say why when git refused.
 
@@ -632,12 +758,28 @@ class GitService:
         root = Path(cwd)
         tracked = set(self._tracked_files(cwd, env))
         stageable: list[str] = []
+        seen_stageable: set[str] = set()
         for p in paths:
-            resolved = (root / p).resolve()
-            if resolved != root and root not in resolved.parents:
-                continue  # outside the workspace: git could not commit it anyway
-            if resolved.exists() or p in tracked:
-                stageable.append(p)
+            try:
+                resolved = (root / p).resolve()
+            except (OSError, RuntimeError, ValueError):
+                continue
+            if resolved == root:
+                if not allow_root:
+                    continue  # reject workspace root (`.` / ``) unless caller opted in explicitly
+            elif root not in resolved.parents:
+                continue  # outside the workspace
+            try:
+                rel = resolved.relative_to(root).as_posix()
+            except ValueError:
+                continue
+            if not rel or (rel == "." and not allow_root) or any(part.casefold() == ".git" for part in Path(rel).parts):
+                continue
+            if rel in seen_stageable:
+                continue
+            if resolved.exists() or rel in tracked:
+                seen_stageable.add(rel)
+                stageable.append(rel)
         if not stageable:
             return None, None
 
@@ -654,6 +796,8 @@ class GitService:
             )
         except subprocess.TimeoutExpired:
             return None, f"git ls-files did not finish in {self.commit_timeout_s:g}s"
+        except OSError as exc:
+            return None, f"git ls-files failed: {exc.strerror or exc}"
         if listed.returncode == 0:
             ignored = {p for p in listed.stdout.split("\0") if p}
             stageable = [p for p in stageable if p not in ignored]
@@ -672,10 +816,13 @@ class GitService:
         # `-A` also records deletions. Only these paths are touched in the index.
         try:
             added = self._run_text(
-                ["add", "-A", "--", *stageable], cwd=cwd, env=env, timeout=self.commit_timeout_s,
+                ["add", "-A", "--", *stageable], cwd=cwd, env=env,
+                timeout=self.commit_timeout_s, check_filters=False,
             )
         except subprocess.TimeoutExpired:
             return None, f"git add did not finish in {self.commit_timeout_s:g}s"
+        except OSError as exc:
+            return None, f"git add failed: {exc.strerror or exc}"
         if added.returncode != 0:
             said = (added.stderr or added.stdout or "").strip().splitlines()
             return None, f"git add failed: {said[0] if said else added.returncode}"
@@ -689,26 +836,34 @@ class GitService:
                 cwd=cwd,
                 env=env,
                 timeout=self.commit_timeout_s,
+                check_filters=False,
             )
         except subprocess.TimeoutExpired:
             # The hook outlived its welcome. `_run_bytes` has already killed git's
             # process group, including the hook's children; the commit may or may
             # not exist, so this reports no revision rather than a wrong one.
             return None, f"git commit did not finish in {self.commit_timeout_s:g}s"
+        except OSError as exc:
+            return None, f"git commit failed: {exc.strerror or exc}"
         if res.returncode != 0:
             # Exit 1 means "nothing to commit" for these paths — the step's files
             # already match the last commit, or git refused for its own reasons.
             # Only the first is quiet; everything else is git's own reason.
+            combined = "\n".join(part for part in (res.stderr, res.stdout) if part).strip()
+            lowered = combined.lower()
+            if "nothing to commit" in lowered or "no changes added" in lowered:
+                return None, None
             said = (res.stderr or res.stdout or "").strip().splitlines()
             reason = said[0] if said else f"git commit exited {res.returncode}"
-            if "nothing to commit" in reason or "no changes added" in reason:
-                return None, None
             return None, reason
 
         # Return hash
-        rev = self._run_text(
-            ["rev-parse", "HEAD"], cwd=cwd, env=env, timeout=self.commit_timeout_s,
-        )
+        try:
+            rev = self._run_text(
+                ["rev-parse", "HEAD"], cwd=cwd, env=env, timeout=self.commit_timeout_s,
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None, None
         if rev.returncode != 0:
             return None, "the commit was made, but HEAD could not be read"
         return rev.stdout.strip(), None

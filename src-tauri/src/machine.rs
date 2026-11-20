@@ -291,9 +291,17 @@ pub(crate) fn jail_argv(spec: &JailSpec, host: &HostLayout) -> Vec<String> {
     // `PS1` and nothing else, so its prompt names the directory with `$PWD`. Either way it is
     // `[machine] <directory> $ `, the marker the assistant looks for. The bash prompt is assigned on bash's
     // branch only; the fallback sets its own, and neither adds a command the person did not type.
+    // Soft limits are lowered before hard limits so `setrlimit` never fails with `EINVAL` when
+    // the inherited soft limit is `unlimited`. Both `-S` and `-H` are set explicitly so `dash`
+    // (`/bin/sh` on Debian/Ubuntu, which defaults to soft-only) enforces hard caps that jailed
+    // processes cannot raise back to `unlimited`. `dash` uses `-p` for `RLIMIT_NPROC` while
+    // `bash` uses `-u`, so `||` falls back in the current shell (never a subshell).
     let wrapper = format!(
-        "ulimit -c 0 2>/dev/null; ulimit -u {NPROC} 2>/dev/null; \
-         ulimit -t {cpu} 2>/dev/null; ulimit -f {blocks} 2>/dev/null; \
+        "ulimit -Sc 0 2>/dev/null; ulimit -Hc 0 2>/dev/null; \
+         ulimit -Su {NPROC} 2>/dev/null || ulimit -Sp {NPROC} 2>/dev/null; \
+         ulimit -Hu {NPROC} 2>/dev/null || ulimit -Hp {NPROC} 2>/dev/null; \
+         ulimit -St {cpu} 2>/dev/null; ulimit -Ht {cpu} 2>/dev/null; \
+         ulimit -Sf {blocks} 2>/dev/null; ulimit -Hf {blocks} 2>/dev/null; \
          b=$(command -v bash) && PS1='[machine] \\w \\\\$ ' && export PS1 && exec \"$b\"; \
          PS1='[machine] $PWD $ '; export PS1; exec sh",
         cpu = spec.limits.cpu_secs,
@@ -521,6 +529,14 @@ struct Entry {
 #[derive(Default)]
 pub struct Machines {
     entries: HashMap<String, Entry>,
+    /// The latest generation assigned to each machine id that is open or has been reset.
+    /// Cleared only when the machine is explicitly closed (`close` / `close_all`), so an old
+    /// reader thread whose machine is mid-reset — or whose reset failed — sees the newer epoch
+    /// (`Some(now) != Some(old_epoch)`) and never emits stale output or a duplicate `machine-exit`.
+    epochs: HashMap<String, u64>,
+    /// Number of `open` / `reset` spawns currently in flight outside the registry lock, so
+    /// concurrent opens still strictly respect [`MAX_MACHINES`].
+    opening: usize,
     seq: u64,
     epoch: u64,
 }
@@ -677,67 +693,81 @@ pub(crate) fn prepare(recipe: &Recipe) -> Result<Launch, String> {
     })
 }
 
-/// Start a machine's process under `id` and the threads that serve it, with `guard` held. The one place a
-/// machine's process is started, for a machine that is opening and for one that is being reset.
-fn start(
-    guard: &mut Machines,
-    machines: &Arc<Mutex<Machines>>,
-    id: &str,
-    recipe: &Recipe,
-    (cols, rows): (u16, u16),
-    on_text: &TextSink,
-    on_exit: &ExitSink,
-) -> Result<ProjectNote, String> {
+/// A spawned machine process and its PTY reader before registration in [`Machines`].
+struct SpawnedMachine {
+    session: Session,
+    reader: Box<dyn std::io::Read + Send>,
+    stage: Option<Stage>,
+    project: ProjectNote,
+}
+
+/// Prepare the jail and spawn its PTY process outside the global [`Machines`] lock.
+fn prepare_and_spawn(recipe: &Recipe, cols: u16, rows: u16) -> Result<SpawnedMachine, String> {
     let Launch {
         cmd,
         stage,
         project,
     } = prepare(recipe)?;
-    let (session, reader) = match terminal::spawn_pty(cmd, cols, rows) {
-        Ok(started) => started,
+    match terminal::spawn_pty(cmd, cols, rows) {
+        Ok((session, reader)) => Ok(SpawnedMachine {
+            session,
+            reader,
+            stage,
+            project,
+        }),
         Err(why) => {
             if let Some(stage) = stage {
                 stage.release();
             }
-            return Err(why);
+            Err(why)
         }
-    };
-    let pid = session.child.process_id();
-    guard.epoch += 1;
-    let epoch = guard.epoch;
-    guard.entries.insert(
-        id.to_string(),
-        Entry {
-            session,
-            recipe: recipe.clone(),
-            stage,
-            epoch,
-        },
-    );
+    }
+}
 
+/// Spawn the reader and memory-guard threads for a machine generation that has been registered.
+fn spawn_machine_threads(
+    machines: &Arc<Mutex<Machines>>,
+    (id, epoch, pid): (&str, u64, Option<u32>),
+    limits: Limits,
+    reader: Box<dyn std::io::Read + Send>,
+    (on_text, on_exit): (&TextSink, &ExitSink),
+) {
     let current = {
         let (machines, id) = (machines.clone(), id.to_string());
         move || {
-            machines
-                .lock()
-                .map(|m| m.entries.get(&id).map(|e| e.epoch))
-                .unwrap_or(None)
+            machines.lock().ok().and_then(|m| {
+                m.epochs
+                    .get(&id)
+                    .copied()
+                    .or_else(|| m.entries.get(&id).map(|e| e.epoch))
+            })
         }
     };
     let (text, exit) = (on_text.clone(), on_exit.clone());
     let (read_id, exit_id, read_current) = (id.to_string(), id.to_string(), current.clone());
+    let machines_for_reap = machines.clone();
     std::thread::spawn(move || {
         run_reader(
             reader,
             epoch,
             read_current,
             |chunk| text(&read_id, chunk),
-            || exit(exit_id),
+            || {
+                terminal::reap_exited_session(|| {
+                    let Ok(mut guard) = machines_for_reap.lock() else {
+                        return true;
+                    };
+                    match guard.entries.get_mut(&exit_id) {
+                        Some(entry) if entry.epoch == epoch => entry.session.try_reap_on_exit(),
+                        _ => true,
+                    }
+                });
+                exit(exit_id);
+            },
         );
     });
     if let Some(pid) = pid {
         let (watch_id, say) = (id.to_string(), on_text.clone());
-        let limits = recipe.limits.clone();
         std::thread::spawn(move || {
             guard::watch(
                 pid,
@@ -747,7 +777,6 @@ fn start(
             );
         });
     }
-    Ok(project)
 }
 
 /// A machine, started and registered; its output goes to `on_text` and its end to `on_exit`.
@@ -759,23 +788,68 @@ pub(crate) fn open_with_sink(
     on_text: TextSink,
     on_exit: ExitSink,
 ) -> Result<OpenedMachine, String> {
-    let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
-    if guard.entries.len() >= MAX_MACHINES {
-        return Err(format!(
-            "{MAX_MACHINES} machines are already open — close one first"
-        ));
+    {
+        let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
+        if guard.entries.len() + guard.opening >= MAX_MACHINES {
+            return Err(format!(
+                "{MAX_MACHINES} machines are already open — close one first"
+            ));
+        }
+        guard.opening += 1;
     }
-    guard.seq += 1;
-    let id = format!("mach-{}", guard.seq);
-    let project = start(
-        &mut guard,
+
+    let SpawnedMachine {
+        session,
+        reader,
+        stage,
+        project,
+    } = match prepare_and_spawn(recipe, cols, rows) {
+        Ok(started) => started,
+        Err(why) => {
+            if let Ok(mut guard) = machines.lock() {
+                guard.opening = guard.opening.saturating_sub(1);
+            }
+            return Err(why);
+        }
+    };
+
+    let pid = session.child.process_id();
+    let (id, epoch) = {
+        let mut guard = match machines.lock() {
+            Ok(guard) => guard,
+            Err(_) => {
+                terminal::kill_and_reap(session.child);
+                if let Some(stage) = stage {
+                    stage.release();
+                }
+                return Err("machine state poisoned".to_string());
+            }
+        };
+        guard.opening = guard.opening.saturating_sub(1);
+        guard.seq += 1;
+        let id = format!("mach-{}", guard.seq);
+        guard.epoch += 1;
+        let epoch = guard.epoch;
+        guard.epochs.insert(id.clone(), epoch);
+        guard.entries.insert(
+            id.clone(),
+            Entry {
+                session,
+                recipe: recipe.clone(),
+                stage,
+                epoch,
+            },
+        );
+        (id, epoch)
+    };
+
+    spawn_machine_threads(
         machines,
-        &id,
-        recipe,
-        (cols, rows),
-        &on_text,
-        &on_exit,
-    )?;
+        (&id, epoch, pid),
+        recipe.limits.clone(),
+        reader,
+        (&on_text, &on_exit),
+    );
     Ok(OpenedMachine {
         id,
         copy_on_write: project.copy_on_write,
@@ -797,14 +871,27 @@ pub(crate) fn reset_with_sink(
     on_text: TextSink,
     on_exit: ExitSink,
 ) -> Result<OpenedMachine, String> {
-    // The lock is held from the old machine's end to the new one's start. The old reader thread, when it
-    // sees its machine end, asks who is current, and has to find the new one and not an empty place.
-    let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
-    let old = guard
-        .entries
-        .remove(id)
-        .ok_or_else(|| format!("no such machine: {id}"))?;
-    let recipe = old.recipe.clone();
+    // Advance the machine's epoch in `guard.epochs` before releasing the lock. The old reader
+    // thread immediately sees the new epoch (`Some(epoch) != Some(old.epoch)`), so it drops any
+    // buffered output and never emits a spurious `machine-exit` while the old process is being
+    // reaped or if remaking the jail fails.
+    let (mut old, epoch) = {
+        let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
+        let old = guard
+            .entries
+            .remove(id)
+            .ok_or_else(|| format!("no such machine: {id}"))?;
+        guard.epoch += 1;
+        let epoch = guard.epoch;
+        guard.epochs.insert(id.to_string(), epoch);
+        guard.opening += 1;
+        (old, epoch)
+    };
+
+    old.session.master = None;
+    if let Ok(mut writer) = old.session.writer.try_lock() {
+        *writer = None;
+    }
     terminal::kill_and_reap(old.session.child);
     if let Some(stage) = old.stage {
         stage.release();
@@ -814,21 +901,66 @@ pub(crate) fn reset_with_sink(
         id,
         "\x1bc[machine reset: a clean project, nothing from before]\r\n".to_string(),
     );
-    match start(
-        &mut guard,
-        machines,
-        id,
-        &recipe,
-        (cols, rows),
-        &on_text,
-        &on_exit,
-    ) {
-        Ok(project) => Ok(OpenedMachine {
-            id: id.to_string(),
-            copy_on_write: project.copy_on_write,
-            note: project.reason,
-        }),
+
+    let spawned = prepare_and_spawn(&old.recipe, cols, rows);
+    let mut guard = match machines.lock() {
+        Ok(guard) => guard,
+        Err(_) => {
+            if let Ok(started) = spawned {
+                terminal::kill_and_reap(started.session.child);
+                if let Some(stage) = started.stage {
+                    stage.release();
+                }
+            }
+            return Err("machine state poisoned".to_string());
+        }
+    };
+    guard.opening = guard.opening.saturating_sub(1);
+    if guard.epochs.get(id) != Some(&epoch) {
+        if let Ok(started) = spawned {
+            drop(guard);
+            terminal::kill_and_reap(started.session.child);
+            if let Some(stage) = started.stage {
+                stage.release();
+            }
+        }
+        return Err(format!("no such machine: {id}"));
+    }
+
+    match spawned {
+        Ok(SpawnedMachine {
+            session,
+            reader,
+            stage,
+            project,
+        }) => {
+            let pid = session.child.process_id();
+            let limits = old.recipe.limits.clone();
+            guard.entries.insert(
+                id.to_string(),
+                Entry {
+                    session,
+                    recipe: old.recipe,
+                    stage,
+                    epoch,
+                },
+            );
+            drop(guard);
+            spawn_machine_threads(
+                machines,
+                (id, epoch, pid),
+                limits,
+                reader,
+                (&on_text, &on_exit),
+            );
+            Ok(OpenedMachine {
+                id: id.to_string(),
+                copy_on_write: project.copy_on_write,
+                note: project.reason,
+            })
+        }
         Err(why) => {
+            drop(guard);
             // The machine is gone and could not be remade: say so the way an exit does.
             on_exit(id.to_string());
             Err(why)
@@ -861,10 +993,17 @@ fn layer_base() -> PathBuf {
 }
 
 fn recipe_for(root_path: Option<&str>, network: bool) -> Recipe {
+    let path_var = match (std::env::var_os("PATH"), crate::appimage_env::appdir()) {
+        (Some(path), Some(appdir)) => crate::appimage_env::without_appdir(&path, &appdir)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_default(),
+        (Some(path), None) => path.to_string_lossy().into_owned(),
+        (None, _) => String::new(),
+    };
     Recipe {
         root_path: root_path.map(str::to_string),
         network,
-        path_var: std::env::var("PATH").unwrap_or_default(),
+        path_var,
         uid: None,
         limits: Limits::default(),
         layer_base: Some(layer_base()),
@@ -914,12 +1053,15 @@ pub fn write(machines: &Arc<Mutex<Machines>>, id: &str, data: &str) -> Result<()
             data.len()
         ));
     }
-    let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
-    let entry = guard
-        .entries
-        .get_mut(id)
-        .ok_or_else(|| format!("no such machine: {id}"))?;
-    entry.session.send(data)
+    let writer = {
+        let guard = machines.lock().map_err(|_| "machine state poisoned")?;
+        let entry = guard
+            .entries
+            .get(id)
+            .ok_or_else(|| format!("no such machine: {id}"))?;
+        entry.session.writer.clone()
+    };
+    Session::send_to(&writer, data)
 }
 
 /// Resize the machine's PTY, so a command wraps at the pane's width.
@@ -941,9 +1083,14 @@ pub fn resize(
 pub fn close(machines: &Arc<Mutex<Machines>>, id: &str) -> Result<(), String> {
     let entry = {
         let mut guard = machines.lock().map_err(|_| "machine state poisoned")?;
+        guard.epochs.remove(id);
         guard.entries.remove(id)
     };
-    if let Some(entry) = entry {
+    if let Some(mut entry) = entry {
+        entry.session.master = None;
+        if let Ok(mut writer) = entry.session.writer.try_lock() {
+            *writer = None;
+        }
         terminal::kill_and_reap(entry.session.child);
         if let Some(stage) = entry.stage {
             stage.release();
@@ -955,11 +1102,16 @@ pub fn close(machines: &Arc<Mutex<Machines>>, id: &str) -> Result<(), String> {
 /// Close every machine. Called when the app exits, so a quit does not leave a jail running.
 pub fn close_all(machines: &Arc<Mutex<Machines>>) {
     let entries: Vec<Entry> = if let Ok(mut guard) = machines.lock() {
+        guard.epochs.clear();
         guard.entries.drain().map(|(_, e)| e).collect()
     } else {
         return;
     };
-    for entry in entries {
+    for mut entry in entries {
+        entry.session.master = None;
+        if let Ok(mut writer) = entry.session.writer.try_lock() {
+            *writer = None;
+        }
         terminal::kill_and_reap(entry.session.child);
         if let Some(stage) = entry.stage {
             stage.release();

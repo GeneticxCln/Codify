@@ -87,7 +87,8 @@ function downloadJson(payload: unknown, filename: string): void {
   anchor.href = url;
   anchor.download = filename;
   anchor.click();
-  URL.revokeObjectURL(url);
+  const timer = setTimeout(() => URL.revokeObjectURL(url), 10_000);
+  (timer as unknown as { unref?: () => void })?.unref?.();
 }
 
 /** One summary card: an icon, a big number, and the sentence that says what it

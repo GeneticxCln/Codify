@@ -32,7 +32,13 @@ def main() -> int:
     sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
     from engine.library import scan_regex
 
-    request = json.load(sys.stdin)
+    try:
+        request = json.load(sys.stdin)
+        if not isinstance(request, dict):
+            raise ValueError("the request is not a JSON object")
+    except (ValueError, OSError) as exc:
+        sys.stdout.write(json.dumps({"ok": False, "error": f"bad request: {exc}"}))
+        return 0
     try:
         if request.get("op") == "scan":
             from engine.scan import scan_tree
@@ -48,6 +54,13 @@ def main() -> int:
         reply: dict[str, object] = {"ok": False, "error": "timeout"}
     except re.error as exc:
         reply = {"ok": False, "error": str(exc)}
+    except MemoryError:
+        reply = {"ok": False, "error": "the search ran out of memory"}
+    except RecursionError:
+        reply = {"ok": False, "error": "the pattern is nested too deeply to run"}
+    except (OSError, KeyError, TypeError, ValueError) as exc:
+        # One sentence, never a traceback: the reply is parsed as JSON by the engine.
+        reply = {"ok": False, "error": f"{type(exc).__name__}: {exc}"}
     else:
         reply = {"ok": True, "result": result}
     sys.stdout.write(json.dumps(reply))

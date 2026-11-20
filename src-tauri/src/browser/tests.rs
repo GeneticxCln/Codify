@@ -388,14 +388,24 @@ fn handler_commands() -> BTreeSet<String> {
 /// path by consulting the bridge's record of the active tab.
 #[test]
 fn a_seated_background_page_is_hidden_not_shown() {
-    // No tab has been focused: the seat cannot know better than to show,
-    // which is the boot-time case before the UI's first focus lands.
-    crate::webview_bridge::note_active("");
+    // No tab has ever been focused yet (boot-time Unset): the seat cannot know
+    // better than to show, so a restored page does not miss its first paint.
+    crate::webview_bridge::tests::reset_active_for_test();
     assert_eq!(
         seat_visibility("browser-sometab"),
         SeatVisibility::Shown,
         "a page whose tab was never focused must keep the boot-time show, or a \
              restored page could miss its first paint behind a hidden window"
+    );
+
+    // Explicitly focused away from all browser tabs (Settings, Command Palette,
+    // Chat, Terminal): note_active("") records ActivePage::None, so adopting a
+    // browser tab must seat it hidden and never paint over the UI.
+    crate::webview_bridge::note_active("");
+    assert_eq!(
+        seat_visibility("browser-sometab"),
+        SeatVisibility::Hidden,
+        "seating a browser page while no browser tab is focused must keep it hidden"
     );
 
     // A different tab is active: this page is background and must be seated
@@ -417,7 +427,7 @@ fn a_seated_background_page_is_hidden_not_shown() {
 
     // Leave the shared bridge state as it was found: this is a process-wide
     // static, and another test reading it must not inherit this one's write.
-    crate::webview_bridge::note_active("");
+    crate::webview_bridge::tests::reset_active_for_test();
 }
 
 /// The seat must consult the bridge's *recorded* active tab, and the
@@ -2309,5 +2319,85 @@ fn a_page_missing_from_the_layer_is_a_fault() {
         "a page missing from the layer is no longer an error — a smoke \
              would report a placement failure as 'nothing to check here', which \
              is the shape of green that hid the original bug"
+    );
+}
+
+#[test]
+fn popup_rate_limiter_bounds_bursts_per_tab_and_recovers_after_window() {
+    let mut limiter = PopupRateLimiter::default();
+    let t0 = std::time::Instant::now();
+    for i in 0..POPUP_BURST_LIMIT {
+        assert!(
+            limiter.allow(
+                "tab-a",
+                t0 + std::time::Duration::from_millis(i as u64 * 100)
+            ),
+            "popup #{i} within burst limit should be allowed"
+        );
+    }
+    assert!(
+        !limiter.allow("tab-a", t0 + std::time::Duration::from_secs(1)),
+        "excess popup inside the burst window must be dropped"
+    );
+    // Independent source tab still has its own budget.
+    assert!(
+        limiter.allow("tab-b", t0 + std::time::Duration::from_secs(1)),
+        "rate limit must be isolated per source tab"
+    );
+    // Once the first timestamp expires past the window, a new popup is allowed.
+    assert!(
+        limiter.allow("tab-a", t0 + POPUP_BURST_WINDOW),
+        "popup should be allowed again once the sliding window advances"
+    );
+    // Removing a closed tab resets its bucket.
+    limiter.remove_tab("tab-a");
+    for _ in 0..POPUP_BURST_LIMIT {
+        assert!(limiter.allow("tab-a", t0 + POPUP_BURST_WINDOW));
+    }
+}
+
+#[test]
+fn open_resize_and_close_serialise_on_open_lock_and_enforce_tab_cap() {
+    let source = include_str!("mod.rs");
+    let open_body = source
+        .split_once("pub fn open(")
+        .expect("mod.rs defines open")
+        .1
+        .split_once("/// The `User-Agent` a browser page is given.")
+        .expect("open ends before user agent")
+        .0;
+    assert!(
+        open_body.contains("OPEN_LOCK.lock()")
+            && open_body.contains("MAX_OPEN_TABS")
+            && open_body.contains("allow_popup("),
+        "open must hold OPEN_LOCK, enforce MAX_OPEN_TABS, and rate-limit popups"
+    );
+
+    let resize_body = source
+        .split_once("pub fn resize(")
+        .expect("mod.rs defines resize")
+        .1
+        .split_once("pub fn close(")
+        .expect("resize is followed by close")
+        .0;
+    assert!(
+        resize_body.contains("OPEN_LOCK.lock()"),
+        "resize must acquire OPEN_LOCK so it cannot race between add_child and adopt"
+    );
+
+    let close_body = source
+        .split_once("pub fn close(")
+        .expect("mod.rs defines close")
+        .1
+        .split_once("pub const PAGE_LOADING_EVENT")
+        .expect("close is followed by events")
+        .0;
+    assert!(
+        close_body.contains("OPEN_LOCK.lock()"),
+        "close must acquire OPEN_LOCK so it cannot race with resize or open"
+    );
+    assert!(
+        close_body.contains("forget_popup_tab("),
+        "close must clean up per-tab popup rate-limiter state"
     );
 }

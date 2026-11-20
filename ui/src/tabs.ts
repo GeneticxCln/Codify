@@ -459,9 +459,21 @@ export function isLocalTab(tab: Tab): boolean {
   return tab.kind === "terminal" || tab.kind === "editor" || tab.kind === "machine";
 }
 
+const normalizeTabPath = (path: string): string => {
+  const clean: string[] = [];
+  for (const part of path.replace(/\\/g, "/").split("/")) {
+    if (!part || part === ".") continue;
+    clean.push(part);
+  }
+  return clean.join("/");
+};
+
 /** The editor tab showing a file, if one is already open. */
 export function tabForFile(state: TabState, workspaceId: string, path: string): Tab | undefined {
-  return state.tabs.find((t) => t.kind === "editor" && t.workspaceId === workspaceId && t.path === path);
+  const target = normalizeTabPath(path);
+  return state.tabs.find(
+    (t) => t.kind === "editor" && t.workspaceId === workspaceId && t.path !== undefined && normalizeTabPath(t.path) === target,
+  );
 }
 
 /**

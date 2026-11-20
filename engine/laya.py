@@ -227,6 +227,8 @@ class GateCall(Protocol):
         temperature: float,
         max_tokens: int,
         *,
+        num_ctx: int | None = None,
+        keep_alive: str | None = None,
         # The role's own request, forwarded only when it set one. A gate fallback on a provider with
         # no thinking control must still make the call, so this is never required.
         thinking_effort: str | None = None,
@@ -627,12 +629,12 @@ class LayaService:
             and (primary.model_name or "").strip()
         ):
             cfg = primary
-        provider = self._registry.build_provider(cfg)
-
         # No model chosen yet is a normal fresh-install state, not a gate
         # failure: say so, and let the pipeline continue without a gate.
         if not (cfg.model_name or "").strip():
             raise LayaNotConfigured("no model configured for the laya role")
+
+        provider = self._registry.build_provider(cfg)
 
         system = cfg.system_prompt_override or DEFAULT_PROMPTS["laya"]
         user = _fallback_prompt(state)
@@ -640,6 +642,8 @@ class LayaService:
             raw = await on_call(
                 provider, cfg.provider, system, user, cfg.model_name,
                 cfg.temperature, cfg.max_tokens,
+                num_ctx=getattr(cfg, "ollama_num_ctx", None),
+                keep_alive=getattr(cfg, "ollama_keep_alive", None),
                 **({"thinking_effort": cfg.thinking_effort} if cfg.thinking_effort else {}),
             )
         else:
@@ -712,13 +716,21 @@ class LayaService:
             except Exception as exc:  # fall through to the LLM contract
                 self._sdk_error = f"{type(exc).__name__}: {exc}"
 
+        sdk_failed = stalled or bool(self._sdk_error)
+
         if self._registry is not None:
             try:
                 answers, provider, model = await self._decide_with_llm(state, on_call, primary)
             except LayaNotConfigured as exc:
                 # This install has not set the gate's model. Deliberate, and
-                # scored as a skip rather than as a gate that broke.
-                return LayaDecision(engine="skipped", skipped_reason=str(exc))
+                # scored as a skip rather than as a gate that broke — unless
+                # the SDK was supposed to answer and failed/stalled, in which
+                # case the gate is unavailable so `laya_required=1` fails closed.
+                return LayaDecision(
+                    engine="skipped",
+                    unavailable=sdk_failed,
+                    skipped_reason=(this_time or self._sdk_error) if sdk_failed else str(exc),
+                )
             except Exception as exc:
                 return LayaDecision(
                     engine="skipped",
@@ -744,7 +756,7 @@ class LayaService:
 
         return LayaDecision(
             engine="skipped",
-            unavailable=stalled,
+            unavailable=sdk_failed,
             skipped_reason=this_time
             or self._sdk_error
             or "laya SDK not installed and no fallback provider configured",

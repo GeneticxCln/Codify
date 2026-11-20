@@ -123,20 +123,6 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     const readVar = (name: string, fallback: string): string =>
       styles.getPropertyValue(name).trim() || fallback;
 
-    const rainColor = readVar("--cmatrix-rain", "#003300");
-    const textColor = readVar("--cmatrix-text", "#a3ffb8");
-    const bgColor = readVar("--cmatrix-bg", "#000000");
-    // The glyphs are the theme's too, which is the whole reason the monochrome
-    // ASCII theme is four lines of tokens rather than a forked component. The
-    // OLED theme publishes nothing here and keeps the default set; a theme that
-    // publishes hex bytes gets hex bytes. Case survives a custom property, so
-    // `ABCDEF` stays uppercase.
-    const glyphs = readVar("--cmatrix-glyphs", GLYPHS) || GLYPHS;
-
-    // The rain paints on black; when the page is not black the canvas is
-    // transparent so the surface shows through.
-    const paintsBlack = bgColor.toLowerCase() === "#000000";
-
     const CELL = 14; // glyph cell, CSS pixels
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
 
@@ -145,18 +131,27 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     let cell = CELL;
     let columns: Column[] = [];
     let cellRows = 0;
+    let frameMs = Math.max(1, 1000 / Math.max(1, fps));
+
+    const updateFrameBudget = (w: number, h: number): void => {
+      const displayDpr = window.devicePixelRatio || 1;
+      const physicalPixels =
+        Math.max(1, Math.round(w * h)) * displayDpr * displayDpr;
+      const releaseFps = backdropFps(fps, starved, physicalPixels);
+      frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
+    };
 
     const layout = (): void => {
       const rect = canvas.getBoundingClientRect();
       cssW = Math.max(1, rect.width);
       cssH = Math.max(1, rect.height);
-      // Cap the longer edge: fillRect and glyph draws scale with area, and a
-      // full-screen canvas at dpr 2 would quadruple both for no visible gain
-      // at 30 FPS.
+      // Cap the longer edge in device pixels: fillRect and glyph draws scale with area.
       const cap = maxDimension;
-      const scale = Math.min(1, cap / Math.max(cssW, cssH));
-      canvas.width = Math.round(cssW * dpr * scale);
-      canvas.height = Math.round(cssH * dpr * scale);
+      const targetW = cssW * dpr;
+      const targetH = cssH * dpr;
+      const scale = Math.min(1, cap / Math.max(targetW, targetH));
+      canvas.width = Math.max(1, Math.round(targetW * scale));
+      canvas.height = Math.max(1, Math.round(targetH * scale));
       // Cell size in *canvas* pixels, so column count follows the cap, not
       // the CSS box.
       cell = CELL * dpr * scale;
@@ -171,10 +166,17 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
         trail: 4 + Math.floor(Math.random() * 9),
         speed: Math.random() < 0.25 ? 2 : 1,
       }));
+      updateFrameBudget(rect.width, rect.height);
     };
 
     // ── drawing ────────────────────────────────────────────────────────────
     const drawFrame = (): void => {
+      const rainColor = readVar("--cmatrix-rain", "#003300");
+      const textColor = readVar("--cmatrix-text", "#a3ffb8");
+      const bgColor = readVar("--cmatrix-bg", "#000000");
+      const glyphs = readVar("--cmatrix-glyphs", GLYPHS) || GLYPHS;
+      const paintsBlack = bgColor.toLowerCase() === "#000000";
+
       // The classic trick: instead of clearing, paint a translucent black
       // veil — old glyphs fade into the trail over several frames. Full alpha
       // on the first paint so the canvas starts black, not grey-on-white.
@@ -186,15 +188,17 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       ctx.fillRect(0, 0, canvas.width, canvas.height);
       ctx.font = `${Math.round(cell * 0.82)}px monospace`;
       ctx.textBaseline = "top";
+      // Draw heads in one fillStyle pass, then trails in a second pass (2 state
+      // switches per frame instead of 2 per column).
+      ctx.fillStyle = textColor;
+      for (let i = 0; i < columns.length; i++) {
+        const col = columns[i];
+        ctx.fillText(randomGlyph(glyphs), i * cell, col.y * cell);
+      }
+      ctx.fillStyle = rainColor;
       for (let i = 0; i < columns.length; i++) {
         const col = columns[i];
         const x = i * cell;
-        // The head: one glyph in the light green, the only high-contrast
-        // pixel in the column.
-        ctx.fillStyle = textColor;
-        ctx.fillText(randomGlyph(glyphs), x, col.y * cell);
-        // The trail: `trail` cells behind the head, in the deep dark green.
-        ctx.fillStyle = rainColor;
         for (let d = 1; d <= col.trail; d++) {
           const ty = col.y - d * col.speed;
           if (ty >= 0) ctx.fillText(randomGlyph(glyphs), x, ty * cell);
@@ -235,12 +239,8 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     // starved rate is scaled by that area — see `starvedFps`. `dpr` is capped
     // at 2 for the canvas's own pixels; the screen's ratio is uncapped, because
     // that is the area the compositor blends.
-    const displayDpr = window.devicePixelRatio || 1;
     const box = canvas.getBoundingClientRect();
-    const physicalPixels =
-      Math.max(1, Math.round(box.width * box.height)) * displayDpr * displayDpr;
-    const releaseFps = backdropFps(fps, starved, physicalPixels);
-    const frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
+    updateFrameBudget(box.width, box.height);
     let last = 0;
     let raf = 0;
     // As in the shared hook: the frame count is untouched, only how much
@@ -288,7 +288,13 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       // where it was when the context returns.
       if (recovery.isLost()) return;
       if (t - last < frameMs) return;
-      const dt = last === 0 ? 0 : Math.min((t - last) / 1000, frameMs / 1000);
+      const elapsed = last === 0 ? 0 : t - last;
+      const dt =
+        last === 0
+          ? 0
+          : elapsed < frameMs * 1.5
+            ? Math.min(elapsed / 1000, frameMs / 1000)
+            : Math.min(elapsed / 1000, 0.1);
       last = t;
       rate = nextRate(rate, activeRef.current, dt);
       guard.run(() => {

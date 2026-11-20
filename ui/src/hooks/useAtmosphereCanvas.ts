@@ -280,16 +280,28 @@ export function useAtmosphereCanvas(
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const size: AtmosphereSize = { width: 1, height: 1 };
+    let frameMs = Math.max(1, 1000 / Math.max(1, fps));
+
+    const updateFrameBudget = (cssW: number, cssH: number): void => {
+      const displayDpr = window.devicePixelRatio || 1;
+      const physicalPixels =
+        Math.max(1, Math.round(cssW * cssH)) * displayDpr * displayDpr;
+      const releaseFps = backdropFps(fps, starved, physicalPixels);
+      frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
+    };
 
     const layout = (): void => {
       const rect = canvas.getBoundingClientRect();
       const cssW = Math.max(1, rect.width);
       const cssH = Math.max(1, rect.height);
-      const scale = Math.min(1, maxDimension / Math.max(cssW, cssH));
-      size.width = Math.round(cssW * dpr * scale);
-      size.height = Math.round(cssH * dpr * scale);
+      const targetW = cssW * dpr;
+      const targetH = cssH * dpr;
+      const scale = Math.min(1, maxDimension / Math.max(targetW, targetH));
+      size.width = Math.max(1, Math.round(targetW * scale));
+      size.height = Math.max(1, Math.round(targetH * scale));
       canvas.width = size.width;
       canvas.height = size.height;
+      updateFrameBudget(rect.width, rect.height);
     };
 
     const tick: AtmosphereTick = { frame: 0, seconds: 0, size };
@@ -302,17 +314,8 @@ export function useAtmosphereCanvas(
       painter.draw(ctx, size, tick);
       applyEdgeFade(ctx, size.width, size.height);
     };
-    // The compositor pays per physical pixel on screen, which is the canvas's
-    // own CSS area at this display's scale — not the capped painting size and
-    // not the window, so a tile in the Appearance pane is priced as a tile.
-    // `dpr` above is capped at 2 for the canvas's pixels; the screen's own
-    // ratio is what the compositor blends, so the budget uses the uncapped one.
-    const displayDpr = window.devicePixelRatio || 1;
     const box = canvas.getBoundingClientRect();
-    const physicalPixels =
-      Math.max(1, Math.round(box.width * box.height)) * displayDpr * displayDpr;
-    const releaseFps = backdropFps(fps, starved, physicalPixels);
-    const frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
+    updateFrameBudget(box.width, box.height);
 
     // The frame clock. rAF aligns with the compositor; the accumulator is the
     // authority on how many frames are released.
@@ -379,7 +382,15 @@ export function useAtmosphereCanvas(
       // where it was when the context comes back.
       if (recovery.isLost()) return;
       if (t - last < frameMs) return;
-      const dt = last === 0 ? 0 : Math.min((t - last) / 1000, frameMs / 1000);
+      const elapsed = last === 0 ? 0 : t - last;
+      // Keep minor rAF jitter aligned to one ideal frame (`frameMs`), while letting real frame
+      // drops catch up (capped at 100 ms) instead of running animations in slow motion.
+      const dt =
+        last === 0
+          ? 0
+          : elapsed < frameMs * 1.5
+            ? Math.min(elapsed / 1000, frameMs / 1000)
+            : Math.min(elapsed / 1000, 0.1);
       last = t;
       rate = nextRate(rate, latest.current.active === true, dt);
       const scaled = dt * rate;

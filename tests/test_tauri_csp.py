@@ -18,30 +18,53 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def connect_src() -> list[str]:
+def directives(field: str = "csp") -> dict[str, list[str]]:
     config = json.loads((ROOT / "src-tauri" / "tauri.conf.json").read_text(encoding="utf-8"))
-    csp: str = config["app"]["security"]["csp"]
+    csp: str = config["app"]["security"][field]
+    parsed: dict[str, list[str]] = {}
     for directive in csp.split(";"):
         parts = directive.split()
-        if parts and parts[0] == "connect-src":
-            return parts[1:]
-    raise AssertionError("tauri.conf.json has no connect-src directive")
+        if parts:
+            parsed[parts[0]] = parts[1:]
+    return parsed
+
+
+def connect_src(field: str = "csp") -> list[str]:
+    parsed = directives(field)
+    if "connect-src" not in parsed:
+        raise AssertionError(f"tauri.conf.json {field} has no connect-src directive")
+    return parsed["connect-src"]
 
 
 class TestTheWebviewsConnectBounds(unittest.TestCase):
     def test_no_local_host_other_than_the_engines_loopback_has_a_wildcard_port(self) -> None:
-        for source in connect_src():
-            with self.subTest(source=source):
-                if re.search(r"^(https?|wss?)://[^/]*:\*$", source):
-                    self.assertTrue(
-                        source.startswith(("http://127.0.0.1:", "ws://127.0.0.1:")),
-                        f"{source} lets the webview reach any port on a host that is not the engine's loopback",
-                    )
+        for field in ("csp", "devCsp"):
+            for source in connect_src(field):
+                with self.subTest(field=field, source=source):
+                    if re.search(r"^(https?|wss?)://[^/]*:\*$", source):
+                        self.assertTrue(
+                            source.startswith(("http://127.0.0.1:", "ws://127.0.0.1:")),
+                            f"{source} lets the webview reach any port on a host that is not the engine's loopback",
+                        )
 
-    def test_the_engine_and_the_dev_servers_hot_reload_are_still_reachable(self) -> None:
-        sources = connect_src()
-        for needed in ("http://127.0.0.1:*", "ws://127.0.0.1:*", "http://localhost:5173", "ws://localhost:5173"):
-            self.assertIn(needed, sources)
+    def test_production_csp_omits_the_dev_server_and_dev_csp_includes_it(self) -> None:
+        prod = connect_src("csp")
+        dev = connect_src("devCsp")
+        for needed in ("http://127.0.0.1:*", "ws://127.0.0.1:*"):
+            self.assertIn(needed, prod)
+            self.assertIn(needed, dev)
+        for dev_only in ("http://localhost:5173", "ws://localhost:5173"):
+            self.assertNotIn(dev_only, prod)
+            self.assertIn(dev_only, dev)
+
+    def test_hardening_directives_are_present(self) -> None:
+        for field in ("csp", "devCsp"):
+            parsed = directives(field)
+            with self.subTest(field=field):
+                self.assertEqual(parsed.get("form-action"), ["'none'"])
+                self.assertEqual(parsed.get("base-uri"), ["'self'"])
+                self.assertEqual(parsed.get("object-src"), ["'none'"])
+                self.assertEqual(parsed.get("frame-src"), ["'none'"])
 
     def test_the_dev_servers_port_is_the_one_the_csp_names(self) -> None:
         vite = (ROOT / "ui" / "vite.config.ts").read_text(encoding="utf-8")

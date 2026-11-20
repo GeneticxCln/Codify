@@ -229,7 +229,6 @@ pub fn adopt(window: &tauri::Window, page: &tauri::Webview, bounds: &Bounds) -> 
     // widget is found by the label anyway.
     let label = page.label().to_string();
     let size = *bounds;
-    let visibility = seat_visibility(&label);
     on_main(window, move || {
         let (_overlay, fixed) = layer(&here)?;
         let vbox = here
@@ -238,13 +237,20 @@ pub fn adopt(window: &tauri::Window, page: &tauri::Webview, bounds: &Bounds) -> 
         let widget = vbox
             .children()
             .into_iter()
-            .find(|child| child.widget_name().as_str() != LAYER_NAME)
+            .find(|child| {
+                let name = child.widget_name();
+                let name = name.as_str();
+                name != LAYER_NAME && !name.starts_with(LABEL_PREFIX)
+            })
             .ok_or_else(|| "the new browser page has no widget to place".to_string())?;
         widget.set_widget_name(&label);
         vbox.remove(&widget);
         fixed.put(&widget, size.x.round() as i32, size.y.round() as i32);
         widget.set_size_request(size.width.round() as i32, size.height.round() as i32);
-        match visibility {
+        // Evaluate visibility on the GTK main thread right before showing/hiding
+        // so any `codify_browser_focus("")` that arrived while `adopt` was queued
+        // prevents the page from painting over Settings, Command Palette, or Chat.
+        match seat_visibility(&label) {
             SeatVisibility::Shown => widget.show(),
             // `gtk_widget_hide` on an already-hidden child is a no-op, so
             // the call is unconditional: every page reaches the layer

@@ -225,7 +225,12 @@ export function resolveTints(theme: AppearanceTheme, tints: TintMap | undefined)
 export function loadTints(
   storage: Pick<Storage, "getItem"> | undefined = tintStorage(),
 ): TintStore {
-  const raw = storage?.getItem(TINT_STORAGE_KEY);
+  let raw: string | null | undefined;
+  try {
+    raw = storage?.getItem(TINT_STORAGE_KEY);
+  } catch {
+    return {};
+  }
   if (!raw) return {};
   let parsed: unknown;
   try {
@@ -259,12 +264,20 @@ export function saveTints(
   for (const [themeId, map] of Object.entries(store)) {
     if (Object.keys(map).length > 0) pruned[themeId] = { ...map };
   }
-  if (Object.keys(pruned).length === 0) storage.removeItem(TINT_STORAGE_KEY);
-  else storage.setItem(TINT_STORAGE_KEY, JSON.stringify(pruned));
+  try {
+    if (Object.keys(pruned).length === 0) storage.removeItem(TINT_STORAGE_KEY);
+    else storage.setItem(TINT_STORAGE_KEY, JSON.stringify(pruned));
+  } catch {
+    // Storage may be blocked or full; keep the in-memory theme applied without crashing.
+  }
 }
 
 function tintStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | undefined {
-  return typeof localStorage !== "undefined" ? localStorage : undefined;
+  try {
+    return typeof localStorage !== "undefined" ? localStorage : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**

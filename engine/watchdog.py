@@ -84,7 +84,7 @@ GRACEFUL_SHUTDOWN_S = 3
 # which is how the desktop shell knows how long to wait after it asks this process
 # to stop before escalating to SIGKILL. One number, two languages: a copy in the
 # shell would be free to drift, and drift here means a turn killed mid-record.
-HARD_EXIT_GRACE_S = GRACEFUL_SHUTDOWN_S * 2
+HARD_EXIT_GRACE_S = 10
 
 
 def parent_pid_from_env(env: Mapping[str, str] | None = None) -> int | None:
@@ -352,11 +352,14 @@ def start_parent_watchdog(
         parent_pid = parent_pid_from_env()
     if parent_pid is None:
         return None
-    print(
-        f"[engine] parent watchdog armed on pid {parent_pid} (poll {interval_s:g}s)",
-        file=sys.stderr,
-        flush=True,
-    )
+    try:
+        print(
+            f"[engine] parent watchdog armed on pid {parent_pid} (poll {interval_s:g}s)",
+            file=sys.stderr,
+            flush=True,
+        )
+    except OSError:
+        pass
     thread = threading.Thread(
         target=watch,
         args=(parent_pid,),

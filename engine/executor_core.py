@@ -269,6 +269,8 @@ class _ExecutorCore:
         except Exception as exc:
             if not handle._declared:
                 handle.outcome = _stage_failure_outcome(exc)
+                if handle.detail is None and isinstance(exc, CriticRejection):
+                    handle.detail = str(exc)
             raise
         finally:
             if before is not None:
@@ -566,19 +568,25 @@ class _ExecutorCore:
 
     # --- parsing ------------------------------------------------------
 
-    def _accept_plan_reply(self, reply: Any) -> None:
+    def _accept_plan_reply(self, reply: Any, *, allow_consult: bool = True) -> None:
         """The planner's test of its own reply, run inside `run_agent` so a bad plan is asked for again.
 
         Two replies are good: a plan, and a *consult* — no steps and a request for the librarian, which the
-        planning loop serves and then asks again. Anything else that cannot be turned into steps is refused
-        with the parser's own reason, which the model is shown.
+        planning loop serves and then asks again (while follow-ups remain). Once the consult budget is spent,
+        a consult is refused here so repair/fallback runs rather than recording a bogus consult stage success.
         """
         consult = reply.get("consult") if isinstance(reply, dict) else None
-        if (
+        is_consult = (
             isinstance(reply, dict) and not reply.get("steps") and isinstance(consult, dict)
-            and (consult.get("reads") or consult.get("searches") or consult.get("git") or consult.get("run"))
-        ):
-            return
+            and bool(consult.get("reads") or consult.get("searches") or consult.get("git") or consult.get("run"))
+        )
+        if is_consult:
+            if allow_consult:
+                return
+            raise AgentOutputInvalid(
+                "planner consulted the librarian after its last allowed follow-up — return a plan with 1..20 steps now",
+                role="planner",
+            )
         self._parse_steps(reply)
 
     def _parse_steps(self, out: Any) -> list[dict[str, Any]]:

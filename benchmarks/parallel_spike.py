@@ -200,7 +200,16 @@ async def run_scenario(
         conn.close()
 
 
+def _ratio(numerator: float, denominator: float) -> float | None:
+    """A rounded ratio, or `None` when the denominator is zero (an instant run has no speedup to report)."""
+    return round(numerator / denominator, 2) if denominator > 0 else None
+
+
 async def run_spike(steps: int, latency: float) -> dict[str, Any]:
+    if steps < 1:
+        raise ValueError("--steps must be at least 1")
+    if latency < 0:
+        raise ValueError("--latency must not be negative")
     with tempfile.TemporaryDirectory(prefix="codify-parallel-spike-") as tmp:
         root = Path(tmp)
         rows = [
@@ -214,14 +223,17 @@ async def run_spike(steps: int, latency: float) -> dict[str, Any]:
                                driver="conductor", parallel=False, overlapping=False),
         ]
     by = {r["scenario"][0]: r for r in rows}
+    speedup_b = _ratio(by["A"]["wall_s"], by["B"]["wall_s"])
     return {
         "steps": steps, "latency_s": latency,
         "scenarios": rows,
-        "speedup_B_over_A": round(by["A"]["wall_s"] / by["B"]["wall_s"], 2),
-        "speedup_C_over_A": round(by["A"]["wall_s"] / by["C"]["wall_s"], 2),
+        "speedup_B_over_A": speedup_b,
+        "speedup_C_over_A": _ratio(by["A"]["wall_s"], by["C"]["wall_s"]),
         # What conductor-driven parallel steps could at most do for a plan the gate admits: the conductor's
         # sequential time divided by the speedup the recipe already gets from the same gate.
-        "ceiling_conductor_parallel_s": round(by["D"]["wall_s"] / (by["A"]["wall_s"] / by["B"]["wall_s"]), 3),
+        "ceiling_conductor_parallel_s": (
+            round(by["D"]["wall_s"] / speedup_b, 3) if speedup_b else None
+        ),
     }
 
 
@@ -233,10 +245,13 @@ def render(report: dict[str, Any]) -> str:
             f"{r['scenario']:34} {r['wall_s']:>7.2f}s {r['steps_completed']:>3}/{r['steps_planned']:<3} "
             f"{r['model_calls']:>6} {r['max_concurrency']:>5} {r['commits_by_run']:>8}  {r['goal_status']}"
         )
+    def _x(value: float | None) -> str:
+        return "n/a (a run took no measurable time)" if value is None else f"{value}x"
+
     lines += [
         "",
-        f"B over A (best case the gate admits): {report['speedup_B_over_A']}x",
-        f"C over A (the gate refusing):         {report['speedup_C_over_A']}x  (1.0 = degraded to sequential, as it should)",
+        f"B over A (best case the gate admits): {_x(report['speedup_B_over_A'])}",
+        f"C over A (the gate refusing):         {_x(report['speedup_C_over_A'])}  (1.0 = degraded to sequential, as it should)",
         f"D, if it got B's speedup:             {report['ceiling_conductor_parallel_s']}s",
         "",
         "This is scheduling only. It cannot say whether a model plans disjoint steps; see docs/08.",
@@ -250,6 +265,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--latency", type=float, default=0.05, help="seconds each scripted model call takes")
     parser.add_argument("--report", type=Path, default=None, help="write the JSON report here")
     args = parser.parse_args(argv)
+    if args.steps < 1:
+        parser.error("--steps must be at least 1")
+    if args.latency < 0:
+        parser.error("--latency must not be negative")
     report = asyncio.run(run_spike(args.steps, args.latency))
     print(render(report))
     if args.report is not None:

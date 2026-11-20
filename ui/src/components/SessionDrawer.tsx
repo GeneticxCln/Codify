@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { AlertCircle, Archive, RefreshCw, X } from "lucide-react";
 
 import {
@@ -26,29 +26,43 @@ export const SessionDrawer: React.FC<{
   const [loading, setLoading] = useState(false);
   const [saving, setSaving] = useState<"compact" | "undo" | null>(null);
   const [error, setError] = useState<string | null>(null);
+  const reqIdRef = useRef(0);
 
   const load = useCallback(async () => {
+    const reqId = ++reqIdRef.current;
     if (!conversationId) {
       setStatus(null);
+      setError(null);
+      setLoading(false);
       return;
     }
     setLoading(true);
     try {
-      setStatus(await getCompactionStatus(conversationId));
+      const next = await getCompactionStatus(conversationId);
+      if (reqIdRef.current !== reqId) return;
+      setStatus(next);
       setError(null);
     } catch (err) {
+      if (reqIdRef.current !== reqId) return;
       setError(readRejection(err, "Failed to read this session"));
     } finally {
-      setLoading(false);
+      if (reqIdRef.current === reqId) setLoading(false);
     }
   }, [conversationId]);
 
   useEffect(() => {
+    setStatus(null);
+    setError(null);
+    setSaving(null);
     void load();
+    return () => {
+      reqIdRef.current += 1;
+    };
   }, [load]);
 
   const act = async (which: "compact" | "undo") => {
     if (!conversationId) return;
+    const reqId = ++reqIdRef.current;
     setSaving(which);
     setError(null);
     try {
@@ -56,11 +70,13 @@ export const SessionDrawer: React.FC<{
         which === "compact"
           ? await compactConversation(conversationId)
           : await undoCompaction(conversationId);
+      if (reqIdRef.current !== reqId) return;
       setStatus(next);
     } catch (err) {
+      if (reqIdRef.current !== reqId) return;
       setError(readRejection(err, which === "compact" ? "Compaction failed" : "Undo failed"));
     } finally {
-      setSaving(null);
+      if (reqIdRef.current === reqId) setSaving(null);
     }
   };
 

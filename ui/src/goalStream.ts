@@ -65,6 +65,14 @@ export function openGoalStream(opts: {
   // `engine/app.py` `ws_goal`: 4404 after auth for an unknown goal, 4401 for a bad token.
   const CLOSE_NO_SUCH_GOAL = 4404;
 
+  const scheduleReconnect = () => {
+    if (destroyed) return;
+    attempt += 1;
+    const delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
+    onReconnecting?.(attempt);
+    retryTimer = setTimeout(connect, delay);
+  };
+
   const connect = () => {
     if (destroyed) return;
     const engine = getEngineInfo();
@@ -74,7 +82,13 @@ export function openGoalStream(opts: {
       return;
     }
 
-    const sock = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/goals/${goalId}`);
+    let sock: WebSocket;
+    try {
+      sock = new WebSocket(`ws://127.0.0.1:${engine.port}/ws/goals/${encodeURIComponent(goalId)}`);
+    } catch {
+      scheduleReconnect();
+      return;
+    }
     ws = sock;
     // Per socket. A reconnect and `close()` both replace `ws`, so a handler a
     // superseded socket delivers late must not act for the socket that replaced
@@ -90,7 +104,15 @@ export function openGoalStream(opts: {
         stableTimer = null;
         attempt = 0;
       }, STABLE_CONNECTION_MS);
-      sock.send(JSON.stringify({ type: "auth", token: engine.token }));
+      try {
+        sock.send(JSON.stringify({ type: "auth", token: engine.token }));
+      } catch {
+        try {
+          sock.close();
+        } catch {
+          /* noop */
+        }
+      }
     };
 
     sock.onmessage = (e) => {
@@ -129,10 +151,7 @@ export function openGoalStream(opts: {
       }
       // 4401 falls through to the backoff: the token may have rotated with a
       // restarted engine, and the next `connect()` reads the fresh pair.
-      attempt += 1;
-      const delay = Math.min(1000 * 2 ** (attempt - 1), 16000);
-      onReconnecting?.(attempt);
-      retryTimer = setTimeout(connect, delay);
+      scheduleReconnect();
     };
 
     sock.onerror = () => {

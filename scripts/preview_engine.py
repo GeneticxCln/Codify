@@ -43,6 +43,7 @@ import subprocess
 import sys
 import threading
 from types import FrameType
+from typing import Any
 
 HANDSHAKE = re.compile(r"^CODIFY_ENGINE token=(?P<token>[0-9a-f]+) port=(?P<port>\d+)")
 
@@ -77,16 +78,38 @@ def paste_lines(token: str, port: int) -> list[str]:
 def write_env_file(token: str, port: int) -> str:
     """Shell assignments for a second terminal; 0600, because it holds a token."""
     path = env_file_path()
-    body = f"CODIFY_PORT={port}\nCODIFY_TOKEN={token}\n"
-    descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    body = f"CODIFY_PORT={port}\nCODIFY_TOKEN={token}\n".encode()
     try:
-        os.write(descriptor, body.encode())
+        existing = os.lstat(path)
+    except FileNotFoundError:
+        existing = None
+    if existing is not None:
+        if stat.S_ISLNK(existing.st_mode) or not stat.S_ISREG(existing.st_mode):
+            raise RuntimeError(f"refusing to write env file over non-regular path: {path}")
+        if existing.st_uid != os.geteuid():
+            raise RuntimeError(f"refusing to replace env file owned by uid {existing.st_uid}: {path}")
+        os.unlink(path)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        os.fchmod(descriptor, stat.S_IRUSR | stat.S_IWUSR)
+        os.write(descriptor, body)
     finally:
         os.close(descriptor)
-    # os.open's mode is a floor, not a promise, when the file already existed
-    # with wider permissions.
-    os.chmod(path, stat.S_IRUSR | stat.S_IWUSR)
     return path
+
+
+def _remove_env_file(path: str) -> None:
+    """Unlink our own regular env file on exit; ignore if already gone."""
+    try:
+        st = os.lstat(path)
+    except FileNotFoundError:
+        return
+    if stat.S_ISREG(st.st_mode) and st.st_uid == os.geteuid():
+        try:
+            os.unlink(path)
+        except FileNotFoundError:
+            pass
 
 
 def boot_timeout_s() -> float:
@@ -138,10 +161,6 @@ def run(argv: list[str], env: dict[str, str], timeout_s: float | None = None) ->
             state["stopped_by_us"] = True
             engine.kill()
 
-    timer = threading.Timer(bound, boot_deadline)
-    timer.daemon = True
-    timer.start()
-
     def stop(signum: int, _frame: FrameType | None) -> None:
         # Ctrl-C reaches the whole foreground session — the engine gets the
         # signal too — so terminating here as well makes one Ctrl-C one clean
@@ -150,14 +169,27 @@ def run(argv: list[str], env: dict[str, str], timeout_s: float | None = None) ->
         engine.terminate()
         raise KeyboardInterrupt(f"signal {signum}")
 
-    for name in ("SIGINT", "SIGTERM"):
-        number = getattr(signal, name, None)
-        if number is not None:
-            signal.signal(number, stop)
-    atexit.register(engine.terminate)
+    def terminate_if_running() -> None:
+        if engine.poll() is None:
+            engine.terminate()
 
+    timer: threading.Timer | None = None
+    previous_handlers: dict[int, Any] = {}
+    atexit_registered = False
+    written_env: str | None = None
     exit_status = 1
     try:
+        timer = threading.Timer(bound, boot_deadline)
+        timer.daemon = True
+        timer.start()
+
+        for name in ("SIGINT", "SIGTERM"):
+            number = getattr(signal, name, None)
+            if number is not None:
+                previous_handlers[number] = signal.signal(number, stop)
+        atexit.register(terminate_if_running)
+        atexit_registered = True
+
         assert engine.stdout is not None
         for line in engine.stdout:
             sys.stdout.write(line)
@@ -169,17 +201,18 @@ def run(argv: list[str], env: dict[str, str], timeout_s: float | None = None) ->
                 continue
             token, port = handshake
             state["handed_over"] = True
-            written = write_env_file(token, port)
+            written_env = write_env_file(token, port)
             print(
                 "\nEngine ready. For the browser preview on localhost:5173, paste:\n"
                 "  " + "\n  ".join(paste_lines(token, port))
-                + f"\n(also written to {written} — `source` it in another terminal)\n",
+                + f"\n(also written to {written_env} — `source` it in another terminal)\n",
                 flush=True,
             )
     except KeyboardInterrupt:
         pass
     finally:
-        timer.cancel()
+        if timer is not None:
+            timer.cancel()
         if engine.poll() is None:
             state["stopped_by_us"] = True
             engine.terminate()
@@ -190,6 +223,16 @@ def run(argv: list[str], env: dict[str, str], timeout_s: float | None = None) ->
                 engine.wait()
         else:
             engine.wait()
+        for stream in (engine.stdout, engine.stderr, engine.stdin):
+            if stream is not None:
+                stream.close()
+        if atexit_registered:
+            atexit.unregister(terminate_if_running)
+        for number, handler in previous_handlers.items():
+            if handler is not None:
+                signal.signal(number, handler)
+        if written_env is not None and state["stopped_by_us"]:
+            _remove_env_file(written_env)
         exit_status = engine.returncode if engine.returncode is not None else 1
         if state["handed_over"] and state["stopped_by_us"]:
             # A requested stop is the foreground contract working, not a

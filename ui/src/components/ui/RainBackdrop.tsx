@@ -52,7 +52,7 @@ export interface RainBackdropProps {
   active?: boolean;
 }
 
-export const RainBackdrop: React.FC<RainBackdropProps> = ({ active }) => {
+export const RainBackdrop: React.FC<RainBackdropProps> = React.memo(({ active }) => {
   const theme = useTheme();
   const rains = Boolean(theme.tokens["--cmatrix-rain"]);
   if (!rains) return null;
@@ -90,4 +90,4 @@ export const RainBackdrop: React.FC<RainBackdropProps> = ({ active }) => {
       />
     </div>
   );
-};
+});

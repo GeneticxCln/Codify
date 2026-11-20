@@ -51,12 +51,14 @@ export const McpPane: React.FC = () => {
   const [savingTool, setSavingTool] = useState<Record<string, boolean>>({});
   const [saved, setSaved] = useState<string | null>(null);
 
-  const load = async () => {
+  const load = async (preserveError = false) => {
     try {
       setServers(await getMcpServers());
-      setError(null);
+      if (!preserveError) setError(null);
     } catch (err) {
-      setError(readRejection(err, "Could not read the MCP servers."));
+      if (!preserveError) {
+        setError(readRejection(err, "Could not read the MCP servers."));
+      }
     }
   };
 
@@ -92,7 +94,7 @@ export const McpPane: React.FC = () => {
         setAdding(false);
         setDraft(EMPTY);
       }
-      await load();
+      await load(true);
     } finally {
       setSaving(false);
     }
@@ -108,7 +110,7 @@ export const McpPane: React.FC = () => {
       await load();
     } catch (err) {
       setError(readRejection(err, "The MCP server did not answer the probe."));
-      await load();
+      await load(true);
     } finally {
       setProbing((current) => ({ ...current, [server.id]: false }));
     }
@@ -124,7 +126,7 @@ export const McpPane: React.FC = () => {
       await load();
     } catch (err) {
       setError(readRejection(err, "Could not change the MCP server."));
-      await load();
+      await load(true);
     } finally {
       setSavingServer((current) => ({ ...current, [server.id]: false }));
     }
@@ -152,7 +154,7 @@ export const McpPane: React.FC = () => {
       await load();
     } catch (err) {
       setError(readRejection(err, "Could not change the MCP tool."));
-      await load();
+      await load(true);
     } finally {
       setSavingTool((current) => ({ ...current, [key]: false }));
     }
