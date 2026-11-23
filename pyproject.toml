@@ -37,7 +37,7 @@ codify-cli = "engine.cli:main"
 # is the half that matters: a copy in some other Python leaves `sdk_available()` false with no
 # error (docs/05 §3). 0.x, so the minor is capped.
 laya = [
-    "laya>=0.4.19,<0.5",
+    "laya>=0.4.19,<0.6",
 ]
 dev = [
     "pytest>=8.0",
