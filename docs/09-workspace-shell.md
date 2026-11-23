@@ -618,6 +618,16 @@ that never appears, which is worse than a title bar), and an explicit
 launch says which one it did, once, because "the title bar is back" is otherwise
 a bug whose cause cannot be read off the launch.
 
+On that Wayland backend the same function also sets `GDK_GL=always` (`gl_painting`), so GTK3
+paints the window with GL instead of cairo. Measured on 2026-11-23 on Wayland with an NVIDIA GPU:
+WebKit already rendered on the GPU, but GTK3 brought every frame back to the CPU to composite it,
+so an animated theme at 60 FPS held shell plus web process at ~101% of a core until the render
+watchdog stopped it within ~18 s. With GL painting the same build held ~30 FPS on ~13% of a core
+for as long as the window was visible, and the watchdog never fired. It is skipped on X11 (not
+measured), when the dma-buf renderer is disabled (WebKit has no GPU frame to keep), and whenever
+`GDK_GL` is already set: any value, `disable` included, is the person's override and the way back
+without a rebuild. The launch prints which one it did.
+
 ### 5.3.1 The pill, and what it does when the engine moves
 
 The header pill is a poll, not a decoration: `checkEngineHealth` asks `/health`
@@ -2572,12 +2582,16 @@ an unconfigured install silently answers code changes from a chat call — the
 exact failure this section removes, in a new place.
 
 So the routing is: the conductor decides, and it decides everything. When one is
-configured it runs whatever the gate said — a question, a change, or no
-classification at all — and §10.14 is what it may then do. When there is no
-conductor the older rule stands, unchanged: `intent == "question"` **and** the
-gate answered → answer, and anything else — `code_change`, `ops_command`,
-`other`, or no gate at all — runs the pipeline, with a log line saying which and
-why.
+configured it runs on the person's words, before any verdict exists (§10.15),
+and §10.14 is what it may then do. When there is no conductor the gate is the
+only router, so it is asked before routing: `question` or `other` **and** the
+gate answered → answer, and anything else — `code_change`, `ops_command`, a
+label the vocabulary does not name, or no gate at all — runs the pipeline, with
+a log line saying which and why. `other` used to plan too, and it is what the
+gate calls "hi" (§10.14a item 6), so on every install without a conductor a
+greeting ran the librarian, the designer and the planner — the failure this
+section opens with. A plain reply cannot change a file, and one that needs the
+workspace says so (`CHAT_SYSTEM_PROMPT`).
 
 The two are not in tension. The pipeline is a superset of answering, so with no
 conductor, guessing wrong costs a slower answer while the reverse guess costs a
@@ -3102,8 +3116,33 @@ without narrating them is a different machine, not a different design.
 
 ### 10.15 A benign turn is a conversation
 
-The gate runs on every turn — it is what decides the turn's shape — and it never
-stopped running. What it did do was *report*: `run_chat` published the verdict,
+**The gate is asked when a turn first acts, not before it speaks.** It used to run
+at the top of every turn, before the conductor was called. With no Laya SDK the
+gate borrows the turn's own model (§10.20), so "hi" cost a classifier call and
+*then* an answer, back to back on a local model that serves both, and its
+ambiguity and risk warnings could put a card over a greeting. A reply that calls
+no tool reads, runs and sends nothing, so there was nothing there for the gate to
+guard. Now the conductor is called straight away, and `_TurnGate`
+(`engine/executor_conduct.py`) wraps its tool table: the first tool call of any
+kind — a read, a command, a fetch, a browser action, a skill, a sub-agent move —
+waits for the verdict, every call in the same batch waits on the same one, and
+the gate is asked once per turn. A block there fails the turn with the same
+`laya_blocked` code and event before any tool runs; a change label arms the same
+one reminder §10.14a item 3 describes. A conductor that fails before its first
+tool asks the gate then, because how that turn ends depends on whether it was a
+change. With no conductor the gate is asked before routing (§10.4), because it is
+the only router there. `laya_required` keeps the gate in front of the first word:
+a person who asked for every request to be checked gets that literally.
+
+What this gives up, said plainly: a reply that uses no tool is never classified,
+so a change request a weak model answers with prose alone (no tool, no plan) gets
+neither the reminder nor the "no file was changed" warning — it reads as the
+answer it is. The live narration failure the reminder was built for called
+`use_skill` first, so it still gets it. The brief for an ordinary turn carries no
+label at all; the labelled briefs below are what a `laya_required` turn is given.
+`tests/test_gate_at_first_tool.py` holds all of it.
+
+The gate never stopped running on a turn that acts. What it did do was *report*: `run_chat` published the verdict,
 and the transcript drew it as a card over the answer, so typing "hi" produced
 
 ```
@@ -3119,10 +3158,11 @@ The announcement is now conditional, and the parts are separated:
 
 * **The gate still gates.** Same call, same stage: the `laya` row in
   `STAGE_OUTCOMES` records `allow`/`block`/`skipped`/`unavailable` for a turn
-  exactly as it does for a goal, so the stats screen and the silent-role audit
-  count it the same way. `tests/test_turns.py::test_the_gate_ran_before_the_answer`
-  reads that record to prove the gate ran, because the verdict is no longer in the
-  turn's log.
+  that was gated exactly as it does for a goal, so the stats screen and the
+  silent-role audit count it the same way. `tests/test_turns.py::test_the_gate_ran_before_the_answer`
+  reads that record to prove the gate ran on a turn with no conductor, because the
+  verdict is no longer in the turn's log; a conductor turn that used no tool has no
+  `laya` row at all.
 * **A blocked turn is still a blocked goal** — same code, same `laya_blocked`
   error, and the card *is* published, so a refusal has its reason on screen
   (§10.4).

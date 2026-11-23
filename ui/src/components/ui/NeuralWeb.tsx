@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -184,7 +185,7 @@ export function createNeuralWebPainter(
 export const NeuralWeb: React.FC<NeuralWebProps> = ({
   className = "",
   maxDimension = 480,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   animated,
   active = false,
 }) => {

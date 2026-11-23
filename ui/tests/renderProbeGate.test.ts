@@ -18,6 +18,7 @@ registerTsx();
 
 const { withDom } = await import("./dom.ts");
 const { STARVED_BOOT_KEY } = await import("../src/motionPreference.ts");
+const { forgetLaunchProbe } = await import("../src/frameProbe.ts");
 
 /** A 2d context that accepts everything a painter does and records nothing. */
 function quietContext(): CanvasRenderingContext2D {
@@ -54,7 +55,9 @@ interface Outcome {
  * Mount the real backdrop with a shell clock answering from `clock`, and say
  * what happened. `clock` is read in order and its last value repeats.
  */
-async function mounted(component: Backdrop, clock: number[]): Promise<Outcome> {
+async function mounted(component: Backdrop, clock: number[], fresh = true): Promise<Outcome> {
+  // Each call is a launch unless a test says otherwise: the measurement is per page load.
+  if (fresh) forgetLaunchProbe();
   return withDom(async (dom) => {
     let reads = 0;
     let frames = 0;
@@ -201,3 +204,16 @@ for (const component of BACKDROPS) {
     assert.equal(outcome.armed, true, "a browser preview without the shell never animated");
   });
 }
+
+test("a theme swap reuses the launch's measurement instead of measuring its own repaint", async () => {
+  // Live, every swap re-ran the probe during the swap's repaint, read 48–76 ms where the settled
+  // window costs ~26, and froze the backdrop the person had just picked. The second mount here is
+  // the swap: its clock would read a starving frame, and it must not be asked.
+  const launch = await mounted("Nanofluid", [1000, 1100, 1100, 1110]);
+  assert.equal(launch.reads, 4, "the launch did not measure");
+  assert.equal(launch.armed, true);
+  const swap = await mounted("MatrixRain", [1000, 1300, 1300, 1600], false);
+  assert.equal(swap.reads, 0, "the swap re-measured the window during its own repaint");
+  assert.equal(swap.starved, false, "a swap's repaint was recorded as a starving machine");
+  assert.equal(swap.armed, true, "the swapped-in backdrop never started");
+});

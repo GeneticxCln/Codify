@@ -7,7 +7,7 @@ import {
   FRAMES_BEFORE_GIVING_UP,
 } from "../canvasRecovery.ts";
 import { useMotionAllowed, useStarvedThisBoot } from "../motionPreference.ts";
-import { probeAvailable, probeFrameBudget } from "../frameProbe.ts";
+import { BASE_FPS, MAX_FPS, probeAvailable, probeFrameBudget } from "../frameProbe.ts";
 import { applyEdgeFade } from "../canvasEdgeFade.ts";
 
 /**
@@ -58,6 +58,33 @@ export function backdropFps(
   pixels: number = STARVED_REFERENCE_PIXELS,
 ): number {
   return starved ? Math.min(fps, starvedFps(pixels)) : fps;
+}
+
+/**
+ * The rate an atmosphere asks for when its caller names none: one frame per refresh on a 60 Hz
+ * panel. It is a ceiling, not a promise — the boot probe measures what a composited frame costs
+ * this window and releases at the fastest rate that stays inside the decoration budget
+ * (`frameProbe.ts` `governedFps`), so a window that cannot pay for 60 gets 30, 20, 15 or 10.
+ */
+export const ATMOSPHERE_FPS = MAX_FPS;
+
+/** How early a vsync may arrive and still release the frame that is due. */
+export const RELEASE_SLACK_MS = 2;
+
+/**
+ * When to release the next frame: the new due time when a frame is released at `t`, or `null`.
+ *
+ * The due time advances by exactly one interval per release, so the average rate is the one
+ * asked for whatever the display's refresh. The loop used to release when `t - last >= frameMs`
+ * and then set `last = t`: on a 60 Hz panel two vsyncs are 33.3 ms give or take a fraction, so
+ * about half the releases of a 30 FPS theme slipped to the third vsync (~24 FPS), and a 60 FPS
+ * one would have dropped every frame whose vsync came a hair early. `RELEASE_SLACK_MS` absorbs
+ * that jitter. A loop that has fallen more than an interval behind (a hidden window, a long task)
+ * starts over from now instead of releasing a burst to catch up.
+ */
+export function releaseAt(due: number, t: number, frameMs: number): number | null {
+  if (due !== 0 && t < due - Math.min(RELEASE_SLACK_MS, frameMs / 4)) return null;
+  return due === 0 || t - due >= frameMs ? t + frameMs : due + frameMs;
 }
 
 /**
@@ -164,7 +191,10 @@ export interface AtmosphereCanvasProps {
 export interface AtmosphereOptions {
   /** Cap on the longer canvas edge in device pixels. */
   maxDimension: number;
-  /** Frames per second. 30 is the requirement across the project's effects. */
+  /**
+   * The fastest frames per second this effect may release (`ATMOSPHERE_FPS`, 60, unless a caller
+   * says otherwise). The boot probe may lower it to what this window can afford.
+   */
   fps: number;
   /** Play at all. `undefined` means: follow the user's motion preference. */
   animated?: boolean;
@@ -281,12 +311,15 @@ export function useAtmosphereCanvas(
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
     const size: AtmosphereSize = { width: 1, height: 1 };
     let frameMs = Math.max(1, 1000 / Math.max(1, fps));
+    // The fastest this window may release, as the boot probe measured it. Until it has measured
+    // (and wherever it cannot: a preview, a starved window's kept rate) it is what was asked for.
+    let ceiling = fps;
 
     const updateFrameBudget = (cssW: number, cssH: number): void => {
       const displayDpr = window.devicePixelRatio || 1;
       const physicalPixels =
         Math.max(1, Math.round(cssW * cssH)) * displayDpr * displayDpr;
-      const releaseFps = backdropFps(fps, starved, physicalPixels);
+      const releaseFps = backdropFps(Math.min(fps, ceiling), starved, physicalPixels);
       frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
     };
 
@@ -320,6 +353,8 @@ export function useAtmosphereCanvas(
     // The frame clock. rAF aligns with the compositor; the accumulator is the
     // authority on how many frames are released.
     let last = 0;
+    // When the next frame is due (`releaseAt`). `last` stays for `dt`, which is real time.
+    let due = 0;
     let raf = 0;
     // The rate the effect is *currently* running at, and the one it is easing
     // toward. Frame count is untouched by either: the loop still releases at
@@ -352,7 +387,9 @@ export function useAtmosphereCanvas(
     // crash. So the loop stops itself, once, and says why — see `makeFrameBudget`
     // for the numbers and DESIGN.md §7 for the contract.
     const budget = makeFrameBudget({
-      targetMs: frameMs,
+      // Delivery is judged at the base interval, as it was before backdrops could ask for 60: the
+      // compositor failing to present 60 a second is what the governor is for, not a verdict.
+      targetMs: Math.max(frameMs, 1000 / BASE_FPS),
       onTooSlow: (measuredMs) => {
         console.warn(
           `[atmosphere] the compositor is delivering a frame every ` +
@@ -381,7 +418,9 @@ export function useAtmosphereCanvas(
       // being spent painting into a void. The rAF stays armed so the clock is
       // where it was when the context comes back.
       if (recovery.isLost()) return;
-      if (t - last < frameMs) return;
+      const nextDue = releaseAt(due, t, frameMs);
+      if (nextDue === null) return;
+      due = nextDue;
       const elapsed = last === 0 ? 0 : t - last;
       // Keep minor rAF jitter aligned to one ideal frame (`frameMs`), while letting real frame
       // drops catch up (capped at 100 ms) instead of running animations in slow motion.
@@ -413,6 +452,7 @@ export function useAtmosphereCanvas(
         // leap that skips the painter forward.
         layout();
         last = 0;
+        due = 0;
         paint();
       },
     });
@@ -448,8 +488,12 @@ export function useAtmosphereCanvas(
         painter.step?.(frameMs / 1000, tick);
         paint();
       };
-      void probeFrameBudget(probeDraw, frameMs).then((fits) => {
-        if (fits) start();
+      void probeFrameBudget(probeDraw, fps).then((rate) => {
+        if (rate <= 0 || cancelled) return;
+        ceiling = rate;
+        const measured = canvas.getBoundingClientRect();
+        updateFrameBudget(measured.width, measured.height);
+        start();
       });
     }
 

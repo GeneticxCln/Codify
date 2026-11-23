@@ -408,7 +408,9 @@ class TestDecliningIsObeyedAndFailingIsCaught(ConductorTestCase):
         # asked again and again. Two replies are supplied and a third would be
         # "out of things to say", so a second reminder would show up as that
         # text being the answer.
+        # It reached a tool first, which is where a turn's gate is asked and the reminder armed (docs/09 §10.15).
         provider = _ToolProvider([
+            ToolReply(text="", tool_calls=[_call("use_skill", name="ship-a-change")]),
             ToolReply(text="No change needed, here is why."),
             ToolReply(text="Correct, still nothing to do."),
         ])
@@ -437,6 +439,7 @@ class TestDecliningIsObeyedAndFailingIsCaught(ConductorTestCase):
         # with a description of work nobody had done. One reminder is enough,
         # and this pins that it is given.
         provider = _ToolProvider([
+            ToolReply(text="", tool_calls=[_call("use_skill", name="ship-a-change")]),
             ToolReply(text="Understood. Let's start with the recon step."),
             ToolReply(text="", tool_calls=[_call("recon", task="read greeter.py")]),
             ToolReply(text="", tool_calls=[_call("plan", task="add a docstring")]),
@@ -542,8 +545,12 @@ class TestTheGateLabelIsAdviceNotAnOrder(ConductorTestCase):
         self.assertEqual([w for w in warnings if "the gate read this as" in w], [])
 
     async def test_a_change_label_still_points_at_the_recipe_but_says_it_is_a_guess(self) -> None:
+        # A verdict known before the first call is one a person required (`laya_required`); without it the
+        # gate is asked at the first tool call and the brief carries no label at all (docs/09 §10.15).
         provider = _ToolProvider([ToolReply(text="No change is needed."), ToolReply(text="Still none.")])
         executor = self._executor(provider, laya=_ChangeGate())
+        self.settings.set_int("laya_required", 1)
+        executor.settings = self.settings
         await executor.run_chat(self.goal.id)
         sent = self._sent(provider)
         self.assertIn("ship-a-change", sent)

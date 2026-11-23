@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -160,7 +161,7 @@ export function createNebulaFlowPainter(read: (name: string) => string): Atmosph
 export const NebulaFlow: React.FC<NebulaFlowProps> = ({
   className = "",
   maxDimension = 480,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {

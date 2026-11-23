@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -167,7 +168,7 @@ export function createAnonFluidPainter(
 export const AnonFluid: React.FC<AnonFluidProps> = ({
   className = "",
   maxDimension = 1024,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {

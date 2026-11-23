@@ -952,8 +952,8 @@ to survive it deliberately:
   animated theme, and the same bargain as the rain rather than a new exemption.
   Choosing the theme is the act; the grid and the sun are what was chosen. It
   inherits every bound above without restating them: capped canvas (1024 behind
-  the window, 120 in the preview tile), 30 FPS paced by an accumulator rather
-  than by the display, and a full repaint per frame of about forty strokes
+  the window, 120 in the preview tile), at most 60 FPS paced by the shared release
+  clock rather than by the display, and a full repaint per frame of about forty strokes
   instead of the rain's per-glyph trail. Two details are its own. The scroll is
   a modulo over fixed offsets rather than stored per-line state, so a resize
   cannot desynchronise the rungs;  and the CRT veil is **CSS**, not canvas, so
@@ -973,7 +973,7 @@ to survive it deliberately:
   weather, and the reason the rules above are written as a *family* rather than
   repeated per effect. Three decisions carry all of them:
   1. **The clock is one hook.** `hooks/useAtmosphereCanvas.ts` owns the cap, the
-     30 FPS accumulator, the single static frame, the resize handling and the
+     release clock (`releaseAt`, at most `ATMOSPHERE_FPS` = 60), the single static frame, the resize handling and the
      live variable reads. A painter supplies drawing and nothing else, so the
      bounded budget is a thing that can be wrong in one place instead of six.
      The tests assert it there *and* assert that no painter runs its own loop,
@@ -1021,18 +1021,55 @@ to survive it deliberately:
   On every other window both backdrop loops draw their static frame, then ask the shell
   for the window's cumulative rendering CPU time — its own main thread plus the WebKit web
   process it spawned (`codify_render_cpu_ms`), draw five frames twice, and judge the cheaper
-  pass's per-frame cost against 35% of a core at the requested interval — the same line the
-  watchdog uses. A frame over budget records the same starvation verdict the watchdog would
-  have reached, and the loop never arms; a frame under budget starts it at the requested
-  rate. The probe draws ten frames in about 0.4 s, so there are no seconds of full-cost
+  pass's per-frame cost twice. **Starved or not** is judged at the 30 FPS base interval
+  (`BASE_FPS`) against the whole interval (`FRAME_BUDGET_PERCENT`, 100%: the probe runs during
+  boot, and a one-shot false alarm costs the session its backdrop, so it refuses only a frame
+  with no headroom; the watchdog's sustained 35% catches the rest). This paragraph used to say
+  the probe judged against 35%; the code never did. A starved frame records the same verdict the
+  watchdog would have reached, and the loop never arms. **How fast** is the governor
+  (`governedFps`): the fastest of 60, 30, 20, 15 and 10 FPS at which the measured frame holds at
+  most 25% of a core (`DECORATION_BUDGET_PERCENT`), under the watchdog's line so a governed
+  backdrop is never the thing it stops. A window that composites a frame in 2 ms runs at 60; one
+  that needs 12 ms runs at 20; the slowest rung is the floor. Every rung divides 60, so frames
+  land on even vsyncs. The probe draws ten frames in about 0.4 s, so there are no seconds of full-cost
   animation before the measurement, and the watchdog stays as the sustained backstop for a
   machine that gets slower later. On the machine this was measured on, the two passes read
-  56 ms and 26 ms per frame at a 30 FPS interval (the budget is ~11.6 ms); the probe recorded
-  the verdict and the theme started at the starved rate, instead of the ~100% a full-rate
+  56 ms and 26 ms per frame at a 30 FPS interval (a figure from before the governor; 26 ms is
+  78% of the 30 FPS interval, so it fits the 100% verdict and today gets the 10 FPS rung, ~26% of
+  a core, rather than a verdict); the probe recorded the verdict and the theme started at the
+  starved rate, instead of the ~100% a full-rate
   backdrop had held there. The cheaper of two passes is the one judged because the probe runs
   during boot: the first pass can include layout, fonts and the engine handshake, and a
   machine that is fast at rest should not lose its weather to a mount storm. A machine that
   is still too slow after it is still caught by the watchdog.
+
+  **The release clock keeps the rate it was given.** The loops used to release a frame when
+  `t - last >= interval` and then set `last = t`. Vsyncs jitter by a fraction of a millisecond, so
+  on a 60 Hz panel a 30 FPS theme slipped to every third vsync about half the time and ran at ~23
+  FPS, and a 60 FPS one would have run at ~38 (simulated with ±0.4 ms jitter;
+  `ui/tests/atmosphereMotion.test.ts` holds the fix). `releaseAt` advances a due time by exactly
+  one interval per release with 2 ms of slack, and starts over rather than bursting when it falls
+  behind, so every rate lands within a frame a second of what was asked on 60, 120, 144 and 165
+  Hz. The rain keeps a 30 FPS ceiling: it advances one cell per released frame, so 60 would make
+  it fall twice as fast rather than more smoothly.
+
+  **The window is measured once per launch.** Every theme swap used to re-mount the backdrop and
+  re-run the probe *during the swap's own repaint*: measured live, it read 48–76 ms a frame where
+  the settled window cost ~26, recorded a starvation verdict, and froze the animation the person
+  had just picked, and with nobody touching the window it re-measured ten times in forty seconds.
+  `probeFrameBudget` now measures once per page load and every later mount, two canvases at once
+  included, reuses that verdict (`ui/tests/renderProbeGate.test.ts`). Whether the cost holds is the
+  watchdog's job, as it always was.
+
+  **What 60 needs from the shell, measured.** On Wayland with an NVIDIA GPU (2026-11-23) WebKit
+  rendered on the GPU, and the cost was GTK3 compositing each frame on the CPU: at 60 FPS shell
+  plus web process held ~101% of a core and the watchdog stopped the backdrop within ~18 s. With
+  GTK painting through GL (`GDK_GL=always`, which the shell now sets on Wayland: docs/09 §5.3) the
+  same build ran ~30 FPS on ~13% of a core for as long as the window was visible, and the watchdog
+  never fired. ~30 is what that compositor delivered: the page drew every frame it was given (a
+  count of `requestAnimationFrame` callbacks matched the frames drawn), so the ceiling there is the
+  compositor's frame callbacks, not this code. Where WebKitGTK genuinely composites in software, a
+  frame is ~24–30 ms of CPU at ~2 MP and no rung above 10 fits.
 
   Profiled at the starved rate, the shell held ~36% of a core at 15 FPS (web process ~6%),
   ~26% at 10 FPS (web ~2%) and ~15% at 5 FPS (web ~2.5%) — a ~24–30 ms shell cost per

@@ -2133,6 +2133,29 @@ fn display_backend(wayland_display: Option<&str>, requested: Option<&str>) -> Op
     None
 }
 
+/// Whether GTK should paint this window with GL (`GDK_GL=always`), given the backend this launch
+/// ended up on, a `GDK_GL` the person set, and whether WebKit was told to give up its GPU path.
+///
+/// Measured on a Wayland session with an NVIDIA GPU (2026-11-23): WebKit rendered on the GPU, and the
+/// shell still spent most of each animated frame's CPU — GTK3 draws the window with cairo, so every
+/// GPU frame came back to the CPU to be composited. At 60 FPS the shell and web process held ~101% of
+/// a core and the render watchdog stopped the backdrop within ~18 s; the same build and theme with
+/// `GDK_GL=always` ran at 28–32 FPS on ~10–17% of a core and the watchdog never fired.
+///
+/// Scoped to what was measured. Only a Wayland backend; never over a `GDK_GL` the person set (any
+/// value, `disable` included, is the opt-out and the way back without a rebuild); and not when the
+/// dma-buf renderer is disabled, where WebKit has no GPU frame for GTK to keep on the GPU.
+fn gl_painting(
+    backend: Option<&str>,
+    requested: Option<&str>,
+    dmabuf_disabled: bool,
+) -> Option<&'static str> {
+    if requested.map(str::trim).filter(|s| !s.is_empty()).is_some() || dmabuf_disabled {
+        return None;
+    }
+    (backend.map(str::trim) == Some("wayland")).then_some("always")
+}
+
 /// Apply [`display_backend`] to this process, before GTK is initialised.
 ///
 /// Called first thing in [`run`], because GTK reads `GDK_BACKEND` when it
@@ -2163,6 +2186,27 @@ fn apply_display_backend() {
         None => {
             if let Some(backend) = requested.filter(|b| !b.trim().is_empty()) {
                 println!("[Codify] Display backend {backend} (from GDK_BACKEND)");
+            }
+        }
+    }
+    // Read back rather than recomputed: the backend is whatever this function just settled on.
+    let backend = std::env::var("GDK_BACKEND").ok();
+    let requested_gl = std::env::var("GDK_GL").ok();
+    match gl_painting(
+        backend.as_deref(),
+        requested_gl.as_deref(),
+        dmabuf_renderer_disabled(),
+    ) {
+        Some(mode) => {
+            std::env::set_var("GDK_GL", mode);
+            println!(
+                "[Codify] GTK painting: GDK_GL={mode} (chosen here: a Wayland window keeps WebKit's \
+                 GPU frames on the GPU; set GDK_GL yourself to override)"
+            );
+        }
+        None => {
+            if let Some(mode) = requested_gl.filter(|v| !v.trim().is_empty()) {
+                println!("[Codify] GTK painting: GDK_GL={mode} (from the environment)");
             }
         }
     }
@@ -2910,11 +2954,12 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        await_exit, claim_shutdown, display_backend, engine_has_gone, oldest_web_process,
-        shell_boot_id, stat_cpu_ticks, stat_identity, stat_start_time, stop_engine, stop_grace,
-        tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url, AgentConfigPatch,
-        EngineProcess, EngineState, EngineStop, SharedEngineState, DEFAULT_STOP_GRACE,
-        ENGINE_STOP_POLL, STOP_GRACE_SLACK, TABS_SMOKE_ENV, TABS_SMOKE_LINE, TABS_SMOKE_SEED_KEY,
+        await_exit, claim_shutdown, display_backend, engine_has_gone, gl_painting,
+        oldest_web_process, shell_boot_id, stat_cpu_ticks, stat_identity, stat_start_time,
+        stop_engine, stop_grace, tabs_smoke_requested, tabs_smoke_seed_body, tabs_smoke_seed_url,
+        AgentConfigPatch, EngineProcess, EngineState, EngineStop, SharedEngineState,
+        DEFAULT_STOP_GRACE, ENGINE_STOP_POLL, STOP_GRACE_SLACK, TABS_SMOKE_ENV, TABS_SMOKE_LINE,
+        TABS_SMOKE_SEED_KEY,
     };
     use super::{render_watchdog, RENDER_STARVED_EVENT};
     use std::sync::Arc;
@@ -3249,6 +3294,21 @@ mod tests {
         // forcing Wayland onto a machine that has none is a window that never
         // appears, which is worse than the title bar.
         assert_eq!(display_backend(None, None), None);
+    }
+
+    #[test]
+    fn a_wayland_window_is_painted_with_gl() {
+        assert_eq!(gl_painting(Some("wayland"), None, false), Some("always"));
+    }
+
+    #[test]
+    fn gl_painting_leaves_x11_a_person_s_choice_and_the_software_path_alone() {
+        // X11 was not measured; a GDK_GL the person set is their decision and the opt-out; and
+        // with WebKit's dma-buf renderer disabled there is no GPU frame to keep on the GPU.
+        assert_eq!(gl_painting(Some("x11"), None, false), None);
+        assert_eq!(gl_painting(None, None, false), None);
+        assert_eq!(gl_painting(Some("wayland"), Some("disable"), false), None);
+        assert_eq!(gl_painting(Some("wayland"), None, true), None);
     }
 
     #[test]

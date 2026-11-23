@@ -70,7 +70,15 @@ A gate that cannot run is a **skipped** gate, never a broken pipeline: `LayaServ
 catches everything and the pipeline proceeds exactly as it did before Laya existed. Skipping is
 logged (`log` event, level `info`) and surfaced in Settings, so a silent no-op can't hide.
 
-The one exception is the engine-wide `laya_required` setting (0 by default). When it is 1, a gate
+**On a turn the gate is asked at the conductor's first tool call** (`docs/09` §10.15), not
+before the turn's first word: a reply that calls no tool reads, runs and sends nothing, so it is
+not gated, and a greeting is one model call. Every tool call waits for the verdict, it is asked
+once per turn, and a block still fails the turn before any tool runs. A turn with no conductor
+asks it before routing, because it is the only router there. A goal (`POST /goals`) is gated
+before planning, as it always was.
+
+The one exception is the engine-wide `laya_required` setting (0 by default). It also keeps a
+turn's gate in front of the first word, since the person asked for every request to be checked. When it is 1, a gate
 that is `unavailable` — configured, but its call failed or returned nothing usable — refuses the
 turn or goal with the `laya_required` error instead of running unguarded. A gate nobody configured
 is still a deliberate `skipped` gate (`LayaNotConfigured`, `unavailable=False`) and is not refused,

@@ -187,3 +187,48 @@ for (const component of LOOPS) {
     assert.equal(await loopsArmed({ component, setting: "allowed", animated: false }), 0);
   });
 }
+
+const { releaseAt, ATMOSPHERE_FPS } = await import("../src/hooks/useAtmosphereCanvas.ts");
+
+/** Frames released over `seconds` of vsync callbacks at `hz`, each nudged by up to ±`jitterMs`. */
+function released(hz: number, fps: number, jitterMs: number, seconds = 10): number {
+  const frameMs = 1000 / fps;
+  let due = 0;
+  let count = 0;
+  // A fixed pseudo-random jitter, so the test is the same on every run.
+  let seed = 7;
+  const jitter = (): number => {
+    seed = (seed * 16807) % 2147483647;
+    return ((seed / 2147483647) * 2 - 1) * jitterMs;
+  };
+  for (let i = 1; i <= hz * seconds; i += 1) {
+    const t = 1000 + (i * 1000) / hz + jitter();
+    const next = releaseAt(due, t, frameMs);
+    if (next === null) continue;
+    due = next;
+    count += 1;
+  }
+  return count / seconds;
+}
+
+test("the release clock delivers the asked-for rate on real displays, jitter and all", () => {
+  // The loop used to release on `t - last >= frameMs` and then set `last = t`. Vsyncs jitter by a
+  // fraction of a millisecond, so a 30 FPS theme on a 60 Hz panel slipped to every third vsync about
+  // half the time (~24 FPS), and a 60 FPS one would have dropped every early vsync.
+  assert.equal(ATMOSPHERE_FPS, 60, "the shared ceiling is one frame per 60 Hz refresh");
+  const cases: Array<[number, number]> = [[60, 60], [60, 30], [144, 60], [144, 30], [120, 60], [165, 60]];
+  for (const [hz, fps] of cases) {
+    const got = released(hz, fps, 0.4);
+    assert.ok(Math.abs(got - fps) <= 1, `${fps} FPS on a ${hz} Hz display released ${got} a second`);
+  }
+});
+
+test("a loop that fell behind starts over instead of releasing a burst", () => {
+  const frameMs = 1000 / 60;
+  const due = releaseAt(0, 1000, frameMs);
+  assert.ok(due !== null);
+  // A hidden window comes back half a second later: one frame now, the next a whole interval on.
+  const back = releaseAt(due, 1500, frameMs);
+  assert.ok(back !== null && Math.abs(back - (1500 + frameMs)) < 1e-9, "the clock tried to catch up");
+  assert.equal(releaseAt(back, 1500 + 5, frameMs), null, "a second frame was released at once");
+});

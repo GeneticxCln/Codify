@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -243,7 +244,7 @@ export function createSnowFallPainter(read: (name: string) => string): Atmospher
 export const SnowFall: React.FC<SnowFallProps> = ({
   className = "",
   maxDimension = 1024,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {

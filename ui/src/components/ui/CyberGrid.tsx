@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -225,7 +226,7 @@ export function createCyberGridPainter(read: (name: string) => string): Atmosphe
 export const CyberGrid: React.FC<CyberGridProps> = ({
   className = "",
   maxDimension = 480,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {
