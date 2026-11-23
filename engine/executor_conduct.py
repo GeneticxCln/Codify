@@ -7,8 +7,9 @@ and the fallback when no tool-capable model is configured.
 
 from __future__ import annotations
 
+import asyncio
 import json
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
@@ -25,6 +26,7 @@ from engine.conductor import (
     DEFAULT_MAX_MOVES,
     DEFAULT_MAX_TURNS,
     EDITOR_TOOLS,
+    EndTurn,
     FETCH_PAGE,
     MACHINE_TOOLS,
     MCP_TOOLS,
@@ -137,6 +139,64 @@ def _as_prose(raw: str) -> str:
 # conductor or one that could not finish, is a different decision with its own
 # rationale — planning is a superset of answering — and is not this set.
 CHANGE_INTENTS = ("code_change", "ops_command")
+# The labels a turn with no conductor answers with one plain reply instead of planning. Everything else the
+# gate said — a change, an unknown label, no label, or no gate at all — still plans, because with no conductor
+# there is nothing else that could, and a plain reply cannot change a file.
+ANSWERED_INTENTS = ("question", "other")
+
+
+class _TurnGate:
+    """The pre-flight gate for one turn, asked once, at the conductor's first tool call (docs/09 §10.15).
+
+    A turn is a conversation until it reaches for a capability. A reply with no tool reads nothing, runs
+    nothing and sends nothing anywhere, so the gate is not put in front of it: "hi" is one model call, not a
+    classifier call and then an answer. The first tool call of any kind is where the turn starts to act, and
+    every tool call waits here until the gate has answered — once, however many calls a reply batched. A
+    blocked or refused turn ends the run before any handler starts (`EndTurn`), and `refused` tells the
+    caller the goal was already failed for it.
+
+    `decision` is a verdict asked for up front (`laya_required`): the gate is not asked a second time.
+    """
+
+    def __init__(
+        self,
+        check: Callable[[], Awaitable[LayaDecision | None]],
+        decision: LayaDecision | None = None,
+    ) -> None:
+        self._check = check
+        self._lock = asyncio.Lock()
+        self.asked = decision is not None
+        self.decision = decision
+        # Told the verdict the moment it exists, so the run it interrupted can act on it (the reminder a
+        # change request is armed with).
+        self.on_decided: Callable[[LayaDecision], None] | None = None
+
+    @property
+    def refused(self) -> bool:
+        """The gate was asked and the turn may not go on: it was blocked, or a required gate could not answer."""
+        return self.asked and self.decision is None
+
+    async def allows(self) -> bool:
+        async with self._lock:
+            if not self.asked:
+                self.asked = True
+                self.decision = await self._check()
+                if self.decision is not None and self.on_decided is not None:
+                    self.on_decided(self.decision)
+        return self.decision is not None
+
+    def guard(self, dispatch: dict[str, Any]) -> dict[str, Any]:
+        """The same tool table, each handler waiting on the gate first."""
+
+        def wrap(handler: Any) -> Any:
+            async def guarded(arguments: dict[str, Any]) -> Any:
+                if not await self.allows():
+                    raise EndTurn("")
+                return await handler(arguments)
+
+            return guarded
+
+        return {name: wrap(handler) for name, handler in dispatch.items()}
 
 
 
@@ -184,131 +244,44 @@ class _Conduct(_Plan):
 
         The sibling of `run_planning`, spawned by the turns route instead of
         `POST /goals`, and the whole reason a greeting does not start eight
-        agents. The gate has already been asked what kind of request this is —
-        `laya` scores intent, risk, injection and ambiguity on every goal, and
-        until now every answer it produced was used the same way: run the
-        pipeline. So the branch is here, on the one signal that was computed and
-        then thrown away.
+        agents.
 
-        Three outcomes, and the third is the point:
+        A turn is a conversation first. The conductor, when this install has
+        one, is called straight away with the person's words; a reply that needs
+        no tool is the whole turn — one model call, no gate, no sub-agent. The
+        pre-flight gate is asked at its first tool call (`_TurnGate`), because
+        that is where the turn starts to read, run or send anything, and a
+        blocked turn fails there, before any tool runs, with the same code and
+        event as a blocked goal. `laya_required` asks it up front instead.
 
-        * **blocked** — the injection gate fires, exactly as in planning. A
-          blocked turn is a blocked goal, same code, same event, because it is
-          the same gate guarding the same engine.
-        * **question** — the conductor, if this install can run one, and
-          otherwise a single model call. Either way: no plan, no steps, no
-          verifier. The conductor is an upgrade and never a prerequisite
-          (`_conduct` returns None and the turn degrades), because a user must
-          be able to ask a question on any install.
-        * **anything else** — the full pipeline, by delegating to
-          `run_planning` on this same goal. Not a copy of it: the delegation, so
-          there is one implementation of planning and a turn that needs a plan
-          gets the identical one.
+        With no conductor the gate is the only router, so it is asked before
+        routing: a question or `other` gets one plain reply, and a change, an
+        unknown label or no classification runs the pipeline by delegating to
+        `_plan_goal` on this same goal — the delegation, not a copy, so a turn
+        that needs a plan gets the identical one.
 
         The history is what makes a second turn mean anything. A thread's earlier
         prompts and replies are read back from the rows that already hold them
         (`GoalService.turn_history`) and put in front of the model, because the
         common follow-up — "now do the other one" — is unintelligible without
-        them, and an assistant that forgets what it just said is the thing this
-        whole feature exists to stop.
+        them.
 
-        The gate runs on every turn, and on a turn it does not *report* — see
-        the announcement below. A goal's log is a run's audit trail, where the
-        gate's verdict belongs; a turn's log is a conversation, and a verdict
-        card over the top of "hi" says the person was classified before they
-        were answered (docs/09 §10.15).
+        A benign verdict is never *reported* on a turn: a verdict card over the
+        top of "hi" says the person was classified before they were answered
+        (docs/09 §10.15). Blocks and warnings are.
         """
         goal = self.goals.get(goal_id)
         ws = self.workspaces.get(goal.workspace_id)
 
-        # Measured as the `laya` stage, which is what it is: the same gate, on
-        # the same goal, doing the same job as it does in `run_planning`. A
-        # "turn" stage would have to be a ninth entry in STAGE_OUTCOMES, and
-        # that vocabulary is keyed by role (tests/test_metrics.py) — so naming it
-        # after the role would be the truth anyway, and the gate's outcome lands
-        # in the same per-stage table as every other goal's.
-        async with self._stage(goal_id, "laya", "laya") as gate_stage:
-            try:
-                decision = await self.laya.decide(
-                    build_state(goal, ws.root_path),
-                    on_call=self.orchestrator.gate_call(goal_id),
-                    primary=self._picked_config(self.orchestrator.registry.get_config("laya"), goal),
-                )
-                if decision.blocked:
-                    gate_stage.record("block", decision.block_reason or None)
-                elif decision.engine == "skipped":
-                    # The same distinction `run_planning` draws, for the same
-                    # reason: a gate nobody configured and a gate whose call
-                    # failed both report `engine == "skipped"`, and only the
-                    # second is the role not doing its job. Scoring a broken
-                    # gate as a deliberate skip is a measurement lie —
-                    # `skipped` is in STAGE_SUCCESS_OUTCOMES and `unavailable`
-                    # is not.
-                    gate_stage.record(
-                        "unavailable" if decision.unavailable else "skipped",
-                        decision.skipped_reason or None,
-                    )
-                else:
-                    gate_stage.record("allow")
-            except Exception as exc:  # pragma: no cover - decide() already guards
-                decision = LayaDecision(
-                    engine="skipped", skipped_reason=f"gate error: {exc}", unavailable=True
-                )
-                gate_stage.record("unavailable", decision.skipped_reason)
-        if self._gate_required() and decision.unavailable:
-            # The opt-in fail-closed mode. Without it, an unavailable gate is a warning and the turn runs;
-            # with it, a request that was not checked is not answered, because the person asked for the
-            # check to be a condition of running.
-            self._fail(
-                goal_id, None, "laya_required",
-                "The pre-flight gate is required (laya_required) but it could not answer, "
-                "so this turn was refused.",
-                role="laya",
-            )
-            return
-        # A gate that could not answer is something a person has to act on: the turn was not checked,
-        # and staying silent about that is the same trust-me with less evidence. It is a warning, not a
-        # block — the gate has never been allowed to fail a turn it could not judge (docs/05) — and it
-        # rides the same conditional publish as a policy warning, so a benign verdict still says nothing.
-        if decision.engine == "skipped" and decision.unavailable:
-            decision.warnings.append(
-                "The pre-flight gate could not answer, so this turn was not checked. "
-                "The run continued without it."
-            )
-        # Announced only when the gate has something a person has to act on.
-        #
-        # The gate still ran, and it still gated: the stage above recorded the
-        # outcome, `tests/test_turns.py` reads that record to prove it, and the
-        # block below still refuses the turn. What changed is the audience. A
-        # goal's log is an audit trail — a run is eight roles and the reader
-        # wants to see who was dispatched — while a turn's log is a
-        # conversation, and "Laya gate passed (intent: question, risk 0.00)" over
-        # the top of "hi" reads as a pipeline that vetted the user before
-        # answering them. That is the behaviour docs/09 §10 exists to remove, and
-        # publishing the verdict was the part of it still on screen.
-        #
-        # Blocked and warned turns keep both events: a refusal with no reason on
-        # screen is a bug report, and a warning the gate raised is the gate doing
-        # its job loudly rather than a report about nothing. A skipped gate never
-        # carries warnings (`laya.decide`), so this condition also subsumes the
-        # `engine != "skipped"` it replaces.
-        if decision.blocked or decision.warnings:
-            self.goals.publish(self._event(
-                goal_id, None, "agent_assigned",
-                {"role": "laya", "provider": decision.provider or decision.engine,
-                 "model": decision.model},
-            ))
-            self.goals.publish(self._event(
-                goal_id, None, "laya_decision", decision.to_payload(),
-            ))
-        for warning in decision.warnings:
-            self._log(goal_id, None, "warn", warning)
-        if decision.blocked:
-            self._fail(
-                goal_id, None, "laya_blocked",
-                decision.block_reason or "blocked by Laya", role="laya",
-            )
-            return
+        # The gate is asked when the turn first acts, not before it speaks (docs/09 §10.15): a reply that
+        # needs no tool is a conversation, and a classifier call in front of every "hi" was the gate
+        # coming first on a turn it had nothing to guard. `laya_required` is the person asking for every
+        # request to be checked before it is answered, so that one keeps the gate up front.
+        decision: LayaDecision | None = None
+        if self._gate_required():
+            decision = await self._gate_turn(goal_id, goal, ws.root_path)
+            if decision is None:
+                return
 
         # Before the answer, so the model is handed the summary this thread now
         # has rather than the turns it replaces. Auto-compaction is an upgrade
@@ -328,14 +301,21 @@ class _Conduct(_Plan):
         # a plain failure that says nothing was changed. The engine does not run
         # the sequence it would have run before the conductor existed over the
         # top of it; that is the driver only where there is no conductor at all.
-        intent = decision.intent
         root = ws.root_path or ""
+        intent = decision.intent if decision is not None else ""
         # True once a conductor has run and not finished, and the turn is not a change: the plain reply below
         # is then the end of the road, whatever the gate said, because there is no pipeline to hand it to.
         answered_by_conductor_path = False
 
         if root:
-            conducted = await self._conduct(goal_id, goal, root, intent=intent)
+            gate = _TurnGate(lambda: self._gate_turn(goal_id, goal, root), decision)
+            conducted = await self._conduct(goal_id, goal, root, intent=intent, gate=gate)
+            if gate.refused:
+                # Blocked, or a required gate could not answer, at the first tool call: the goal has
+                # already failed with the gate's code, and nothing the run said may be published over it.
+                return
+            decision = gate.decision
+            intent = decision.intent if decision is not None else ""
             if conducted.cancelled:
                 # The user stopped this turn. `run_planning` guards its writes for exactly this;
                 # `run_chat` did not, and ended with an unconditional COMPLETED that overwrote
@@ -394,7 +374,14 @@ class _Conduct(_Plan):
                 # A conductor ran and did not finish. There is no second pipeline behind it on this install:
                 # a model that is bad at this should cost the person a clear message and a retry, not a
                 # different driver quietly taking over, spending twice and planning something the conductor
-                # never chose. What the turn ends in depends on what was asked.
+                # never chose. What the turn ends in depends on what was asked, so a run that failed before
+                # its first tool call asks the gate now: the only turns that pay for it here are ones whose
+                # conductor already failed, never a reply that worked.
+                if not gate.asked:
+                    decision = await self._gate_turn(goal_id, goal, root)
+                    if decision is None:
+                        return
+                    intent = decision.intent
                 if intent in CHANGE_INTENTS:
                     self._end_a_change_the_conductor_could_not_finish(goal_id, conducted)
                     return
@@ -412,9 +399,23 @@ class _Conduct(_Plan):
             )
 
         # Everything below is what this route did before the conductor could
-        # decide: the recipe for anything that is not a plain question, and one
-        # streamed call for anything that is.
-        if (intent != "question" or decision.engine == "skipped") and not answered_by_conductor_path:
+        # decide: the recipe for a request the gate read as a change or could
+        # not classify at all, and one streamed call for a question or anything
+        # else it did label. With no conductor the gate's label is the only
+        # router, so it is asked here if the conductor never reached a tool.
+        # `other` is answered, not planned: it is what the gate calls "hi"
+        # (measured, docs/09 §10.14a), and planning it ran eight agents for a
+        # greeting. A plain reply that needs the workspace says so and stops.
+        if not answered_by_conductor_path and decision is None:
+            decision = await self._gate_turn(goal_id, goal, ws.root_path)
+            if decision is None:
+                return
+            intent = decision.intent
+        if (
+            not answered_by_conductor_path
+            and decision is not None
+            and (intent not in ANSWERED_INTENTS or decision.engine == "skipped")
+        ):
             if decision.engine == "skipped":
                 why = (
                     f"the System-1 gate is not answering ({decision.skipped_reason}), "
@@ -444,6 +445,103 @@ class _Conduct(_Plan):
             goal_id, None, "log", {"level": "info", "message": reply, "turn": True},
         ))
         self._complete_turn(goal_id)
+
+    async def _gate_turn(self, goal_id: str, goal: Goal, root: str | None) -> LayaDecision | None:
+        """Ask the pre-flight gate about a turn: its verdict, or None when the turn was refused and failed.
+
+        Called at most once per turn: up front when `laya_required` is set, otherwise by `_TurnGate` at
+        the conductor's first tool call, or before the no-conductor path routes on the label.
+        """
+        # Measured as the `laya` stage, which is what it is: the same gate, on
+        # the same goal, doing the same job as it does in `run_planning`. A
+        # "turn" stage would have to be a ninth entry in STAGE_OUTCOMES, and
+        # that vocabulary is keyed by role (tests/test_metrics.py) — so naming it
+        # after the role would be the truth anyway, and the gate's outcome lands
+        # in the same per-stage table as every other goal's.
+        async with self._stage(goal_id, "laya", "laya") as gate_stage:
+            try:
+                decision = await self.laya.decide(
+                    build_state(goal, root),
+                    on_call=self.orchestrator.gate_call(goal_id),
+                    primary=self._picked_config(self.orchestrator.registry.get_config("laya"), goal),
+                )
+                if decision.blocked:
+                    gate_stage.record("block", decision.block_reason or None)
+                elif decision.engine == "skipped":
+                    # The same distinction `run_planning` draws, for the same
+                    # reason: a gate nobody configured and a gate whose call
+                    # failed both report `engine == "skipped"`, and only the
+                    # second is the role not doing its job. Scoring a broken
+                    # gate as a deliberate skip is a measurement lie —
+                    # `skipped` is in STAGE_SUCCESS_OUTCOMES and `unavailable`
+                    # is not.
+                    gate_stage.record(
+                        "unavailable" if decision.unavailable else "skipped",
+                        decision.skipped_reason or None,
+                    )
+                else:
+                    gate_stage.record("allow")
+            except Exception as exc:  # pragma: no cover - decide() already guards
+                decision = LayaDecision(
+                    engine="skipped", skipped_reason=f"gate error: {exc}", unavailable=True
+                )
+                gate_stage.record("unavailable", decision.skipped_reason)
+        if self._gate_required() and decision.unavailable:
+            # The opt-in fail-closed mode. Without it, an unavailable gate is a warning and the turn runs;
+            # with it, a request that was not checked is not answered, because the person asked for the
+            # check to be a condition of running.
+            self._fail(
+                goal_id, None, "laya_required",
+                "The pre-flight gate is required (laya_required) but it could not answer, "
+                "so this turn was refused.",
+                role="laya",
+            )
+            return None
+        # A gate that could not answer is something a person has to act on: the turn was not checked,
+        # and staying silent about that is the same trust-me with less evidence. It is a warning, not a
+        # block — the gate has never been allowed to fail a turn it could not judge (docs/05) — and it
+        # rides the same conditional publish as a policy warning, so a benign verdict still says nothing.
+        if decision.engine == "skipped" and decision.unavailable:
+            decision.warnings.append(
+                "The pre-flight gate could not answer, so this turn was not checked. "
+                "The run continued without it."
+            )
+        # Announced only when the gate has something a person has to act on.
+        #
+        # The gate still ran, and it still gated: the stage above recorded the
+        # outcome, `tests/test_turns.py` reads that record to prove it, and the
+        # block below still refuses the turn. What changed is the audience. A
+        # goal's log is an audit trail — a run is eight roles and the reader
+        # wants to see who was dispatched — while a turn's log is a
+        # conversation, and "Laya gate passed (intent: question, risk 0.00)" over
+        # the top of "hi" reads as a pipeline that vetted the user before
+        # answering them. That is the behaviour docs/09 §10 exists to remove, and
+        # publishing the verdict was the part of it still on screen.
+        #
+        # Blocked and warned turns keep both events: a refusal with no reason on
+        # screen is a bug report, and a warning the gate raised is the gate doing
+        # its job loudly rather than a report about nothing. A skipped gate never
+        # carries warnings (`laya.decide`), so this condition also subsumes the
+        # `engine != "skipped"` it replaces.
+        if decision.blocked or decision.warnings:
+            self.goals.publish(self._event(
+                goal_id, None, "agent_assigned",
+                {"role": "laya", "provider": decision.provider or decision.engine,
+                 "model": decision.model},
+            ))
+            self.goals.publish(self._event(
+                goal_id, None, "laya_decision", decision.to_payload(),
+            ))
+        for warning in decision.warnings:
+            self._log(goal_id, None, "warn", warning)
+        if decision.blocked:
+            self._fail(
+                goal_id, None, "laya_blocked",
+                decision.block_reason or "blocked by Laya", role="laya",
+            )
+            return None
+
+        return decision
 
     def _end_a_change_the_conductor_could_not_finish(self, goal_id: str, conducted: _Conducted) -> None:
         """End a turn whose request was a change and whose conductor neither answered nor planned.
@@ -1068,6 +1166,17 @@ class _Conduct(_Plan):
                 "they are a greeting, thanks or a question, just reply in prose. "
                 f"If they do ask for the workspace to be changed, {recipe}"
             )
+        if not intent:
+            # The ordinary turn: the gate is asked at the first tool call, so there is no label yet, and a
+            # brief that mentioned a gate would put a classifier between the person and the answer again.
+            return (
+                "Go by the user's words. A greeting, thanks or a question you can answer is answered "
+                "directly, in prose, with no tools. Use your own tools when the answer depends on something "
+                "you have not been shown; the sub-agent moves are only for changing the workspace or for "
+                "work too broad to read yourself. If they ask for the workspace to be changed, "
+                + ("`ship-a-change` is the skill for that." if ship else
+                   "read the skill that fits from the menu with `use_skill`.")
+            )
         return (
             "The pre-flight gate could not tell what this request asks for "
             f"(it read it as {intent or 'unlabelled'!r}). Go by the user's actual "
@@ -1103,6 +1212,7 @@ class _Conduct(_Plan):
         root: str,
         prompt_override: str | None = None,
         intent: str = "question",
+        gate: _TurnGate | None = None,
     ) -> _Conducted:
         """Run one conductor loop over the whole menu.
 
@@ -1151,9 +1261,13 @@ class _Conduct(_Plan):
             # the model's own notes, which come last so they cannot read as the brief's own advice.
             prompt = f"{prompt}\n\n{notes}"
         nudge = self._intent_nudge(intent)
+        dispatch = self._conductor_dispatch(goal_id, goal, root, skills)
+        if gate is not None:
+            # A turn's tools wait on its gate; its words do not (`_TurnGate`).
+            dispatch = gate.guard(dispatch)
         conductor = Conductor(
             provider, model, root,
-            dispatch=self._conductor_dispatch(goal_id, goal, root, skills),
+            dispatch=dispatch,
             system_prompt=conductor_system_prompt(skills.menu()),
             menu=menu,
             nudge=nudge,
@@ -1172,6 +1286,14 @@ class _Conduct(_Plan):
             keep_alive=cfg.ollama_keep_alive,
             ledger=self.orchestrator.tool_call_ledger(goal_id, None, targets),
         )
+        if gate is not None and not gate.asked:
+            def arm(decided: LayaDecision) -> None:
+                # The verdict arrived mid-run, at the first tool call. A request it reads as a change gets
+                # the same one reminder it would have been armed with up front; anything else gets none.
+                if not conductor.nudged and conductor.nudge is None:
+                    conductor.nudge = self._intent_nudge(decided.intent)
+
+            gate.on_decided = arm
         # Announced before the first call, so a run that spends its whole budget
         # is still legible as "the conductor looked at things" rather than a
         # pause with nothing in it.

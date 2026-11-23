@@ -466,11 +466,25 @@ class TestOnlyQuestionsSkipThePipeline(TurnTestCase):
         await self.executor.run_chat(goal.id)
         self.assertEqual(self.goals.get(goal.id).status, "PENDING")
 
-    async def test_an_unclassifiable_request_runs_the_pipeline(self) -> None:
-        # `other`, and anything the vocabulary does not name. Planning is a
-        # superset of answering, so guessing wrong costs a slower answer; the
-        # reverse guess would cost a code change answered from a chat call.
+    async def test_a_request_labelled_other_is_answered_not_planned(self) -> None:
+        # `other` is what the gate calls "hi" (docs/09 §10.14a). Planning it ran
+        # the librarian, the designer and the planner for a greeting — the bug
+        # docs/09 §10 opens with, alive on every install without a conductor.
         self.executor = self._executor(_Gate(intent="other"))
+        app.state.executor = self.executor
+        goal = self._turn("hi")
+        await self.executor.run_chat(goal.id)
+        self.assertEqual(self.goals.get(goal.id).status, "COMPLETED")
+        self.assertEqual(self.goals.steps(goal.id), [])
+        self.assertEqual(self.planned, [])
+        self.assertEqual(self._reply(goal.id), "Hello! What would you like to work on?")
+
+    async def test_an_unknown_label_still_runs_the_pipeline(self) -> None:
+        # A label the vocabulary does not name is not a classification. With no
+        # conductor, planning is the superset of answering, so guessing wrong
+        # costs a slower answer; the reverse guess would cost a code change
+        # answered from a chat call.
+        self.executor = self._executor(_Gate(intent="something-new"))
         app.state.executor = self.executor
         goal = self._turn("do the thing")
         await self.executor.run_chat(goal.id)

@@ -585,9 +585,10 @@ conductor existed, so a goal that never involved a conductor is unchanged.
 **The two honest gaps.** `verify`, `review` and `summarize` are addressed by
 `step_id` alone: the conductor says *which* step and not *what to check*, which
 costs something most at `review`, where a rejection is a judgement it can
-neither focus nor answer. And the eighth role is out of reach entirely — the
-gate runs at the top of a turn, before the loop is constructed, so a conductor
-can summon seven of the eight roles and never the gate.
+neither focus nor answer. And the eighth role is out of reach entirely — on a
+turn the gate runs at the loop's first tool call, wrapped around the tool table
+rather than offered on it (`_TurnGate`, docs/09 §10.15), so a conductor can
+summon seven of the eight roles and never the gate.
 
 ### 5.1b What a move says back, and what a step remembers
 

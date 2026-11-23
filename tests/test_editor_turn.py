@@ -31,6 +31,7 @@ from engine.toolcall import ToolReply
 from tests.test_conductor import _Factory
 
 EDIT = _call("edit_editor", path="app.py", old_text="return text", new_text="return text.strip()")
+READ = _call("read_file", path="app.py")
 EDIT_RESULT = {"path": "app.py", "replaced": 1, "from_line": 2, "to_line": 2, "opened": False, "dirty": True}
 
 
@@ -62,7 +63,9 @@ class TestAnEditorEditIsAChange(ConductorTestCase):
         ]
 
     async def _turn(self, *, edit: bool, window_ok: bool = True, error: str | None = None) -> list[str]:
-        replies = [ToolReply(text="", tool_calls=[EDIT])] if edit else []
+        # Without the edit it still reads the file first: the gate is asked at a turn's first tool call, and a
+        # reply that touched no tool at all was never classified (docs/09 §10.15).
+        replies = [ToolReply(text="", tool_calls=[EDIT if edit else READ])]
         replies.append(ToolReply(text="I changed app.py in your editor. It is not saved."))
         bridge = SurfaceBridge()
         self._attach(bridge)

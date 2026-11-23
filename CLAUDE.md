@@ -17,7 +17,7 @@ knowing which one you are in tells you what you may touch:
 | UI | React 19 / TypeScript / Vite / Tailwind | Settings screen, goal chat, stats |
 | Engine | Python 3.10+ / FastAPI | Orchestration, sandbox, git, providers, SQLite |
 
-The engine runs 8 fixed roles. `laya` (pre-flight gate) guards every request; the
+The engine runs 8 fixed roles. `laya` (pre-flight gate) guards each request before it acts; the
 **conductor** — a loop, not a ninth role — decides which of the other seven run and in what
 order, through *moves* (`recon`, `design`, `plan`, `write`, `verify`, `review`, `summarize`)
 and *skills* it can load. `fixer` is the only writer and `verifier` the only role that runs a
