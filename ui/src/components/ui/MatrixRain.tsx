@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from "react";
 
-import { backdropFps, nextRate } from "../../hooks/useAtmosphereCanvas";
+import { backdropFps, nextRate, releaseAt } from "../../hooks/useAtmosphereCanvas";
 import { applyEdgeFade } from "../../canvasEdgeFade.ts";
 import {
   bindContextRecovery,
@@ -132,12 +132,14 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     let columns: Column[] = [];
     let cellRows = 0;
     let frameMs = Math.max(1, 1000 / Math.max(1, fps));
+    // The fastest the boot probe found this window can afford; what was asked for until it has.
+    let ceiling = fps;
 
     const updateFrameBudget = (w: number, h: number): void => {
       const displayDpr = window.devicePixelRatio || 1;
       const physicalPixels =
         Math.max(1, Math.round(w * h)) * displayDpr * displayDpr;
-      const releaseFps = backdropFps(fps, starved, physicalPixels);
+      const releaseFps = backdropFps(Math.min(fps, ceiling), starved, physicalPixels);
       frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
     };
 
@@ -242,6 +244,8 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     const box = canvas.getBoundingClientRect();
     updateFrameBudget(box.width, box.height);
     let last = 0;
+    // When the next frame is due (`releaseAt`). `last` stays for `dt`, which is real time.
+    let due = 0;
     let raf = 0;
     // As in the shared hook: the frame count is untouched, only how much
     // simulated time each frame is worth.
@@ -287,7 +291,11 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       // would be spent painting into a void. The rAF stays armed so the clock is
       // where it was when the context returns.
       if (recovery.isLost()) return;
-      if (t - last < frameMs) return;
+      // The shared release clock (`releaseAt`): a 30 FPS rain on a 60 Hz panel used to slip to
+      // every third vsync about half the time, because two vsyncs are 33.3 ms give or take.
+      const nextDue = releaseAt(due, t, frameMs);
+      if (nextDue === null) return;
+      due = nextDue;
       const elapsed = last === 0 ? 0 : t - last;
       const dt =
         last === 0
@@ -312,6 +320,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
         // first frame is a whole one rather than a leap.
         layout();
         last = 0;
+        due = 0;
         drawFrame();
       },
     });
@@ -342,8 +351,12 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
         step(1);
         drawFrame();
       };
-      void probeFrameBudget(probeDraw, frameMs).then((fits) => {
-        if (fits) start();
+      void probeFrameBudget(probeDraw, fps).then((rate) => {
+        if (rate <= 0 || cancelled) return;
+        ceiling = rate;
+        const measured = canvas.getBoundingClientRect();
+        updateFrameBudget(measured.width, measured.height);
+        start();
       });
     }
 

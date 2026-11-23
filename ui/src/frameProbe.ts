@@ -53,6 +53,44 @@ export const PROBE_FRAMES = 5;
  */
 export const FRAME_BUDGET_PERCENT = 100;
 
+/**
+ * The rate a backdrop has to afford at all. The starvation verdict is judged here, at 100% of
+ * the interval, exactly as it was before backdrops could go faster: raising the ceiling to 60
+ * must not make a machine that could run the weather at 30 lose it to a banner.
+ */
+export const BASE_FPS = 30;
+
+/** The fastest a backdrop is released: one frame per refresh on a 60 Hz panel. */
+export const MAX_FPS = 60;
+
+/**
+ * The share of one core a running backdrop may hold. Below the watchdog's sustained 35%
+ * (`render_watchdog::STARVE_NUMERATOR`), so a governed backdrop is never the thing the watchdog
+ * has to stop, and the window keeps the rest of the core for input and the transcript.
+ */
+export const DECORATION_BUDGET_PERCENT = 25;
+
+/** The rates the governor chooses between, fastest first. Each divides 60, so frames stay even. */
+export const RATE_LADDER: readonly number[] = [60, 30, 20, 15, 10];
+
+/**
+ * The fastest rate, at most `maxFps`, whose measured frame cost stays inside the decoration
+ * budget. A frame too dear for even the slowest rung still gets that rung: the starvation verdict,
+ * not this function, is what decides a machine cannot afford the backdrop at all.
+ *
+ * `null` (no measurement: a preview, a shell that cannot read its clock) is `maxFps`, as the loop
+ * always started.
+ */
+export function governedFps(msPerFrame: number | null, maxFps: number): number {
+  const ceiling = Math.max(1, maxFps);
+  if (msPerFrame === null || !Number.isFinite(msPerFrame)) return ceiling;
+  const rungs = RATE_LADDER.filter((fps) => fps <= ceiling);
+  for (const fps of rungs) {
+    if (projectedCorePercent(msPerFrame, 1000 / fps) <= DECORATION_BUDGET_PERCENT) return fps;
+  }
+  return rungs.length > 0 ? rungs[rungs.length - 1] : ceiling;
+}
+
 /** Time before the first pass, so the mount storm is not part of the measurement. */
 export const PROBE_WARMUP_MS = 500;
 
@@ -197,37 +235,71 @@ function shellEnv(draw: () => void): FrameProbeEnv {
 }
 
 /**
- * Measure the theme before its loop starts. Returns `true` when the loop may
- * start at the requested rate.
+ * Measure the theme before its loop starts, and say how fast it may run.
  *
- * When the frame does not fit the core budget, this records the starvation
- * verdict the shell's watchdog would have recorded (the store is the same one;
- * the banner and "Animate anyway" are the existing controls) and returns
- * `false`. The caller
- * must not arm its loop: the store's announcement re-runs the effect, which
- * will either stand still (the person's choice) or start at the starved rate.
+ * Returns the rate to release frames at: the fastest rung of [`RATE_LADDER`], at most `maxFps`,
+ * that keeps the measured frame inside [`DECORATION_BUDGET_PERCENT`] of a core
+ * ([`governedFps`]). So a window that composites cheaply gets 60 frames a second and one that
+ * does not gets fewer, instead of every window getting the same rate and a watchdog stopping the
+ * ones that cannot pay for it.
  *
- * Outside the shell, or when the clock cannot be read, this is `true` without
- * drawing: the page has no measurement to make, and a preview must still
- * animate.
+ * Returns `0` when the frame does not fit at [`BASE_FPS`]: this records the starvation verdict
+ * the shell's watchdog would have recorded (the store is the same one; the banner and "Animate
+ * anyway" are the existing controls). The caller must not arm its loop: the store's announcement
+ * re-runs the effect, which will either stand still (the person's choice) or start at the starved
+ * rate.
+ *
+ * Outside the shell, or when the clock cannot be read, this is `maxFps` without drawing: the page
+ * has no measurement to make, and a preview must still animate.
  */
-export async function probeFrameBudget(draw: () => void, frameMs: number): Promise<boolean> {
-  if (!probeAvailable()) return true;
+export async function probeFrameBudget(draw: () => void, maxFps: number): Promise<number> {
+  const ceiling = Math.max(1, maxFps);
+  if (!probeAvailable()) return ceiling;
   try {
-    const env = shellEnv(draw);
-    await env.sleep(PROBE_WARMUP_MS);
-    const first = await measureFrameCost(env);
-    if (first === null) return true;
-    const second = await measureFrameCost(env);
-    const verdict = probeVerdict(first, second, frameMs);
-    if (!verdict.measured || !verdict.starved) return true;
-    applyShellStarvation({ at: Date.now(), measuredMs: verdict.percent });
-    return false;
+    const first = launchProbe === null;
+    if (first) launchProbe = measureLaunch(draw);
+    const verdict = await (launchProbe as Promise<ProbeVerdict | null>);
+    if (verdict === null || !verdict.measured || verdict.msPerFrame === null) return ceiling;
+    if (verdict.starved) {
+      // Recorded once, by the mount that measured. A later mount reads the store, and takes the
+      // starved path without asking here at all.
+      if (first) applyShellStarvation({ at: Date.now(), measuredMs: verdict.percent });
+      return 0;
+    }
+    return governedFps(verdict.msPerFrame, ceiling);
   } catch {
     // A painter that throws here would throw again in the loop, where the frame
     // guard names it and stops. The probe's job is not to hide that error — but
     // it must not turn it into an unhandled rejection that leaves the theme
     // still with no explanation either. Start the loop and let the guard report.
-    return true;
+    return ceiling;
   }
+}
+
+/**
+ * The one measurement this page load makes, shared by every backdrop that mounts in it.
+ *
+ * Measured live on the machine this was written for: every theme swap re-mounted the backdrop and
+ * re-ran the probe *during the swap's own repaint*, so it read 48–76 ms a frame where the settled
+ * window costs ~26, recorded a starvation verdict, and froze the animation the person had just
+ * chosen. With nobody touching the window the probe ran ten times in forty seconds, each time a
+ * motion or starvation flag re-ran the effect. A frame's cost is a fact about the window and its
+ * compositor, not about which theme is drawing, so it is measured once per launch, and two canvases
+ * that mount together wait on the same measurement. Whether the cost holds up over time is the
+ * shell's watchdog's job (sustained 35%), as it always was.
+ */
+let launchProbe: Promise<ProbeVerdict | null> | null = null;
+
+async function measureLaunch(draw: () => void): Promise<ProbeVerdict | null> {
+  const env = shellEnv(draw);
+  await env.sleep(PROBE_WARMUP_MS);
+  const first = await measureFrameCost(env);
+  if (first === null) return null;
+  const second = await measureFrameCost(env);
+  return probeVerdict(first, second, 1000 / BASE_FPS);
+}
+
+/** Forget this launch's measurement: what a reload does. For tests, which mount many "launches" in one process. */
+export function forgetLaunchProbe(): void {
+  launchProbe = null;
 }

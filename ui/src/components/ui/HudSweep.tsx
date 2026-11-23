@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -188,7 +189,7 @@ export function createHudSweepPainter(read: (name: string) => string): Atmospher
 export const HudSweep: React.FC<HudSweepProps> = ({
   className = "",
   maxDimension = 480,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {

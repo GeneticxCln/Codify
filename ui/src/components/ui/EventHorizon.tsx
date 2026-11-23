@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -248,7 +249,7 @@ export function createEventHorizonPainter(
 export const EventHorizon: React.FC<EventHorizonProps> = ({
   className = "",
   maxDimension = 1024,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {

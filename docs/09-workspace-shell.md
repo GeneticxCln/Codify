@@ -618,6 +618,16 @@ that never appears, which is worse than a title bar), and an explicit
 launch says which one it did, once, because "the title bar is back" is otherwise
 a bug whose cause cannot be read off the launch.
 
+On that Wayland backend the same function also sets `GDK_GL=always` (`gl_painting`), so GTK3
+paints the window with GL instead of cairo. Measured on 2026-11-23 on Wayland with an NVIDIA GPU:
+WebKit already rendered on the GPU, but GTK3 brought every frame back to the CPU to composite it,
+so an animated theme at 60 FPS held shell plus web process at ~101% of a core until the render
+watchdog stopped it within ~18 s. With GL painting the same build held ~30 FPS on ~13% of a core
+for as long as the window was visible, and the watchdog never fired. It is skipped on X11 (not
+measured), when the dma-buf renderer is disabled (WebKit has no GPU frame to keep), and whenever
+`GDK_GL` is already set: any value, `disable` included, is the person's override and the way back
+without a rebuild. The launch prints which one it did.
+
 ### 5.3.1 The pill, and what it does when the engine moves
 
 The header pill is a poll, not a decoration: `checkEngineHealth` asks `/health`

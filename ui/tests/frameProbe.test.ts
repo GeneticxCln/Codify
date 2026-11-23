@@ -23,6 +23,11 @@ const {
   probeFrameBudget,
   probeVerdict,
   projectedCorePercent,
+  governedFps,
+  BASE_FPS,
+  MAX_FPS,
+  DECORATION_BUDGET_PERCENT,
+  RATE_LADDER,
 } = await import("../src/frameProbe.ts");
 
 interface FakeProbe extends Record<string, unknown> {
@@ -111,10 +116,10 @@ test("the cheaper of two passes is the verdict, so a slow boot is not a slow mac
 test("outside the shell the probe is a pass-through and paints nothing", async () => {
   assert.equal(probeAvailable(), false, "a bare node process claimed to be the shell");
   let draws = 0;
-  const fits = await probeFrameBudget(() => {
+  const rate = await probeFrameBudget(() => {
     draws += 1;
-  }, 33);
-  assert.equal(fits, true, "a page with no shell clock refused to animate");
+  }, 60);
+  assert.equal(rate, 60, "a page with no shell clock did not animate at the rate it asked for");
   assert.equal(draws, 0, "the probe drew frames it could not measure");
   assert.equal(RENDER_CPU_COMMAND, "codify_render_cpu_ms");
   assert.ok(PROBE_FRAMES > 0 && PROBE_SETTLE_MS > 0 && PROBE_WARMUP_MS > 0);
@@ -124,3 +129,27 @@ test("outside the shell the probe is a pass-through and paints nothing", async (
 // runs the real hook against a fake shell bridge for both backdrop loops. A
 // source-text version of that claim is the kind of green-but-empty test the
 // source-text budget exists to refuse.
+
+test("a window that composites cheaply runs at 60, and a dearer one at the fastest rate it can afford", () => {
+  // The rate is a measurement, not a constant: 60 a second where a frame is cheap, and fewer where it is
+  // not, so the backdrop holds at most DECORATION_BUDGET_PERCENT of a core and never reaches the
+  // watchdog's 35% line — the window keeps the rest for input and the transcript.
+  assert.equal(MAX_FPS, 60);
+  assert.ok(DECORATION_BUDGET_PERCENT < 35, "the budget must sit under the watchdog's sustained line");
+  assert.equal(governedFps(2, 60), 60, "a 2 ms frame (12% of a core at 60) was not given 60");
+  assert.equal(governedFps(6, 60), 30, "a 6 ms frame is 36% at 60 and 18% at 30");
+  assert.equal(governedFps(12, 60), 20, "a 12 ms frame is 24% at 20");
+  assert.equal(governedFps(16, 60), 15, "a 16 ms frame is 24% at 15");
+  assert.equal(governedFps(30, 60), 10, "a frame too dear for every rung still gets the slowest one");
+  assert.equal(governedFps(2, 30), 30, "a caller's lower ceiling was raised");
+  assert.equal(governedFps(null, 60), 60, "no measurement must start at the requested rate");
+  for (const fps of RATE_LADDER) assert.equal(60 % fps, 0, `${fps} does not divide 60, so its frames are uneven`);
+});
+
+test("raising the ceiling to 60 does not move the starvation line", () => {
+  // The verdict is judged at BASE_FPS exactly as before: a frame that fits at 30 is not starved
+  // because the theme now asks for 60. The governor gives it a slower rung instead.
+  assert.equal(BASE_FPS, 30);
+  assert.equal(probeVerdict(25, 25, 1000 / BASE_FPS).starved, false);
+  assert.equal(probeVerdict(40, 40, 1000 / BASE_FPS).starved, true);
+});

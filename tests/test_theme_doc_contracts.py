@@ -376,16 +376,56 @@ def _effect_fps() -> dict[str, int]:
     raises its own rate to 60 is a legitimate change — and one that invalidates
     "a 30 FPS accumulator" in two documents, which is why the docs are checked
     against this value afterwards.
+
+    The effects default to the shared `ATMOSPHERE_FPS`, which is resolved here through the
+    hook to the number `frameProbe.ts` declares, so a literal default and the constant are
+    compared on the same footing. Only components that *call* the hook count: the rain
+    imports helpers from the hook's module but runs its own loop (the documented outlier),
+    and its ceiling is `_rate_vocabulary`'s business.
     """
+    shared = _shared_atmosphere_fps()
     defaults: dict[str, int] = {}
     for path in sorted((PROJECT_ROOT / "ui" / "src" / "components" / "ui").glob("*.tsx")):
         text = _read(path)
-        if "useAtmosphereCanvas" not in text:
+        if "useAtmosphereCanvas(" not in text:
             continue
-        for match in re.finditer(r"\bfps\s*[:=]\s*(\d+)", text):
-            defaults[path.name] = int(match.group(1))
+        for match in re.finditer(r"\bfps\s*[:=]\s*(\d+|ATMOSPHERE_FPS)\b", text):
+            value = match.group(1)
+            defaults[path.name] = shared if value == "ATMOSPHERE_FPS" else int(value)
             break
     return defaults
+
+
+def _probe_constant(name: str) -> str:
+    """One `export const NAME = …;` from `frameProbe.ts`, as written."""
+    text = _read(PROJECT_ROOT / "ui" / "src" / "frameProbe.ts")
+    match = re.search(rf"export const {name}\b[^=]*=\s*([^;]+);", text)
+    if match is None:
+        raise AssertionError(f"frameProbe.ts no longer declares {name}; this check reads it")
+    return match.group(1).strip()
+
+
+def _shared_atmosphere_fps() -> int:
+    """What `ATMOSPHERE_FPS` is: the hook names `MAX_FPS`, and `frameProbe.ts` gives the number."""
+    hook = _read(PROJECT_ROOT / "ui" / "src" / "hooks" / "useAtmosphereCanvas.ts")
+    if not re.search(r"export const ATMOSPHERE_FPS\s*=\s*MAX_FPS\s*;", hook):
+        raise AssertionError("ATMOSPHERE_FPS is no longer MAX_FPS; teach this parser what it is now")
+    return int(_probe_constant("MAX_FPS"))
+
+
+def _rate_vocabulary() -> set[int]:
+    """Every rate the code can release a backdrop at, and so every rate a document may call a budget.
+
+    The ceiling is a measurement's upper bound now, not the only rate: the probe's governor picks a
+    rung of `RATE_LADDER`, starvation is judged at `BASE_FPS`, and the rain keeps its own ceiling
+    because it advances one cell per frame. A document that states any of those is describing the
+    code; one that states a rate in none of them (a "45 FPS cap") is not.
+    """
+    ladder = {int(n) for n in re.findall(r"\d+", _probe_constant("RATE_LADDER"))}
+    rain = re.search(r"\bfps\s*=\s*(\d+)", _read(PROJECT_ROOT / "ui" / "src" / "components" / "ui" / "MatrixRain.tsx"))
+    if not ladder or rain is None:
+        raise AssertionError("the rate ladder or the rain's ceiling could not be read")
+    return ladder | {int(_probe_constant("BASE_FPS")), _shared_atmosphere_fps(), int(rain.group(1))}
 
 
 def _motionless_theme_ids() -> set[str]:
@@ -733,19 +773,26 @@ class ThemeDocContractsTest(unittest.TestCase):
             "claim; two defaults is two budgets, whichever is slower",
         )
         rate = distinct.pop()
+        vocabulary = _rate_vocabulary()
         claimed_anywhere = False
+        ceiling_stated = False
         for path in THEME_DOCS:
             for claimed in _frame_rate_claims(_read(path)):
                 claimed_anywhere = True
+                ceiling_stated = ceiling_stated or claimed == rate
                 with self.subTest(document=path.name, claimed=claimed):
-                    self.assertEqual(
-                        rate,
+                    self.assertIn(
                         claimed,
-                        f"{path.name} states {claimed} FPS as the budget and the "
-                        f"effects default to {rate} (`{defaults}`). Change the "
-                        "default in ui/src/components/ui/ or the claim in the "
-                        "document, in the same change",
+                        vocabulary,
+                        f"{path.name} states {claimed} FPS as a budget, and no backdrop can run at "
+                        f"it: the ceiling is {rate} (`{defaults}`) and the governed rates are "
+                        f"{sorted(vocabulary)}. Change the code or the claim, in the same change",
                     )
+        self.assertTrue(
+            ceiling_stated,
+            f"no document states the effects' ceiling of {rate} FPS as the budget, so a reader "
+            "cannot learn the fastest a backdrop runs from the documents",
+        )
         self.assertTrue(
             claimed_anywhere,
             "no document states a frame rate as the budget any more, so this check "

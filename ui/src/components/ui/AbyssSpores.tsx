@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -136,7 +137,7 @@ export function createAbyssSporesPainter(read: (name: string) => string): Atmosp
 export const AbyssSpores: React.FC<AbyssSporesProps> = ({
   className = "",
   maxDimension = 480,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {

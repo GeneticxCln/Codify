@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -180,7 +181,7 @@ export function createSolarWindPainter(
 export const SolarWind: React.FC<SolarWindProps> = ({
   className = "",
   maxDimension = 1024,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {

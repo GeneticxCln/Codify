@@ -1,5 +1,6 @@
 import React from "react";
 import {
+  ATMOSPHERE_FPS,
   useAtmosphereCanvas,
   type AtmosphereCanvasProps,
   type AtmospherePainter,
@@ -165,7 +166,7 @@ export function createNanofluidPainter(
 export const Nanofluid: React.FC<NanofluidProps> = ({
   className = "",
   maxDimension = 1024,
-  fps = 30,
+  fps = ATMOSPHERE_FPS,
   active = false,
   animated,
 }) => {
