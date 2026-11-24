@@ -7,7 +7,7 @@ Provider wire formats: `04`.
 
 `BUILTIN_PROVIDERS` (`engine/models.py`) is the one place the *provider* list is
 defined, and it is served verbatim by `GET /settings/providers`: `anthropic`,
-`openai`, `deepseek`, `ollama`, `google`, `openrouter`, `groq`, `nvidia`. That
+`openai`, `deepseek`, `ollama`, `google`, `openrouter`, `groq`, `nvidia`, `opencode`. That
 table holds endpoints and dialects, never models — a provider entry says which
 URL to call and which wire format to speak, and nothing about what is behind it.
 
@@ -30,7 +30,7 @@ Two design consequences follow:
 | Protocol | Endpoint | Credential | Notes |
 |---|---|---|---|
 | `ollama` | `GET {base}/api/tags`, then `POST {base}/api/show` per model for its window (§2.1) | none | reports size/parameter count; **no capability metadata** |
-| `openai_compat` | `GET {base}/models` | `Authorization: Bearer <key>` | OpenAI, DeepSeek, Groq, OpenRouter, any compatible endpoint |
+| `openai_compat` | `GET {base}/models` | `Authorization: Bearer <key>` | OpenAI, DeepSeek, Groq, OpenRouter, OpenCode, any compatible endpoint; a row's `api` map, where it has one, sets `supports_chat` (rule 2) |
 | `anthropic` | `GET {base}/v1/models?limit=…` | `x-api-key` + `anthropic-version` | uses `display_name`; the default page size is small, so `limit` is set explicitly |
 | `google` | `GET {base}/models?key=…` | query key | follows `nextPageToken` (≤5 pages) and **strips the `models/` resource prefix** |
 
@@ -43,7 +43,11 @@ Rules that hold for every provider:
 2. **Never filter by name.** Heuristics like "skip ids containing `embed`" are a hardcoded list wearing
    a disguise — they hide models the user may legitimately want. Capability flags reported by the
    provider (`supportedGenerationMethods`) *are* carried, and the UI marks such entries as
-   "not a chat model" instead of hiding them.
+   "not a chat model" instead of hiding them. The `openai_compat` equivalent is a row's own `api` map
+   (models.dev's shape, which OpenCode serves): a gateway that sells many vendors' models lists them
+   all on one `/models`, yet serves Claude on `messages` and GPT on `responses`, so a row whose `api`
+   lacks `chat-completions`, or whose `type` is not `chat`, has `supports_chat: false`. A row with no
+   `api` map stays `null`.
 3. **Normalise at the boundary.** Google's `models/gemini-…` resource name is stripped to
    `gemini-…`, because passing it through produces `…/models/models/gemini-…:generateContent`.
 4. **Isolate failures.** One provider's 401 or unreachable host must not empty the picker. Each
@@ -59,7 +63,7 @@ The picker shows it as a badge (§6). It is **copied from the provider's own res
 |---|---|---|
 | `anthropic` | `max_input_tokens` | the input window; the output cap (`max_tokens`) is a different number and is not read |
 | `google` | `inputTokenLimit` | |
-| `openai_compat` | the first present of `context_length`, `context_window`, `max_context_length`, `max_model_len` | OpenAI itself reports none; OpenRouter, Groq, Mistral and vLLM each use one of these. A provider that uses another name gives `null`, which is the honest answer |
+| `openai_compat` | the first present of `context_length`, `context_window`, `max_context_length`, `max_model_len`, then `limit.context` | OpenAI itself reports none; OpenRouter, Groq, Mistral and vLLM each use one of the flat names, OpenCode the nested one. A provider that uses another name gives `null`, which is the honest answer |
 | `ollama` | `POST /api/show`, `model_info["<architecture>.context_length"]` | `/api/tags` carries no window, so this is one extra request per model (below) |
 
 A value is accepted only if it is a positive whole number no larger than `MAX_CONTEXT_TOKENS` (100 million):

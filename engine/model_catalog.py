@@ -155,6 +155,32 @@ def _positive_int(value: Any) -> int | None:
 _OPENAI_COMPAT_CONTEXT_KEYS = ("context_length", "context_window", "max_context_length", "max_model_len")
 
 
+def _openai_compat_context(row: dict[str, Any]) -> int | None:
+    """The window a `/models` row reports: a flat key (§2.1), or models.dev's `limit.context` (OpenCode)."""
+    for key in _OPENAI_COMPAT_CONTEXT_KEYS:
+        n = _positive_int(row.get(key))
+        if n is not None:
+            return n
+    limit = row.get("limit")
+    return _positive_int(limit.get("context")) if isinstance(limit, dict) else None
+
+
+def _openai_compat_chat(row: dict[str, Any]) -> bool | None:
+    """Whether a `/models` row says chat/completions serves it, or None when the row does not say.
+
+    A gateway that sells several vendors' models (OpenCode) lists them all but serves only some on
+    chat/completions, and says which: `api` is a map keyed by endpoint (`chat-completions`, `responses`,
+    `messages`, `embeddings`) and `type` is `chat`, `embedding`, `image`. That is the provider's own
+    statement, like Google's `supportedGenerationMethods`, so a model without `chat-completions` is
+    marked as not a chat model here rather than failing on the first turn. A row with no `api` map,
+    which is every plain OpenAI-compatible server, stays unknown: nothing is read from an id.
+    """
+    api = row.get("api")
+    if not isinstance(api, dict) or not api:
+        return None
+    return "chat-completions" in api and row.get("type") in (None, "chat")
+
+
 def _entry(
     *,
     model_id: str,
@@ -315,11 +341,12 @@ async def discover_ollama(target: ProviderTarget, client: httpx.AsyncClient) -> 
 async def discover_openai_compat(
     target: ProviderTarget, client: httpx.AsyncClient
 ) -> list[dict[str, Any]]:
-    """OpenAI, DeepSeek, Groq, OpenRouter and any OpenAI-compatible endpoint.
+    """OpenAI, DeepSeek, Groq, OpenRouter, OpenCode and any OpenAI-compatible endpoint.
 
     The standard `GET /models` response carries no capability metadata, so
-    nothing is filtered or relabelled here — guessing which ids are "chat"
-    models from their names is how a hardcoded list sneaks back in.
+    nothing is filtered or relabelled by name — guessing which ids are "chat"
+    models from their names is how a hardcoded list sneaks back in. A row that
+    states its endpoints is read for them (`_openai_compat_chat`).
     """
     r = await client.get(
         f"{target.base_url.rstrip('/')}/models",
@@ -342,10 +369,8 @@ async def discover_openai_compat(
                 model_id=model_id,
                 description=f"{target.provider} · owned by {owner}" if owner else f"{target.provider} API model",
                 created=_iso_day(m.get("created")),
-                context_tokens=next(
-                    (n for n in (_positive_int(m.get(k)) for k in _OPENAI_COMPAT_CONTEXT_KEYS) if n is not None),
-                    None,
-                ),
+                supports_chat=_openai_compat_chat(m),
+                context_tokens=_openai_compat_context(m),
             )
         )
     return out

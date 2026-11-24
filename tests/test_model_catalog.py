@@ -688,6 +688,36 @@ class TestContextLength(unittest.IsolatedAsyncioTestCase):
             "openai-style": None, "junk": None, "two": 1000,
         })
 
+    async def test_a_gateway_that_states_each_models_endpoints_is_read_for_them(self) -> None:
+        # The shape OpenCode's `/models` served on 2026-11-24: 108 models, of which only 22 chat models are on
+        # chat/completions. Claude is on `messages`, GPT on `responses`; offered through this protocol, each failed
+        # on its first turn. The row says so itself, the way Google's `supportedGenerationMethods` does.
+        rows = [
+            {"id": "glm-5.3", "type": "chat", "api": {"chat-completions": {}}, "limit": {"context": 200000}},
+            {"id": "claude-opus-5-5", "type": "chat", "api": {"messages": {}}, "limit": {"context": 1000000}},
+            {"id": "gpt-6-sol", "type": "chat", "api": {"responses": {}}},
+            {"id": "voyage-4", "type": "embedding", "api": {"embeddings": {}}},
+            {"id": "odd", "type": "image", "api": {"chat-completions": {}}},
+            {"id": "plain"},
+            {"id": "empty-api", "api": {}},
+            {"id": "junk", "api": ["chat-completions"], "limit": {"context": "big"}},
+        ]
+        target = ProviderTarget("opencode", "openai_compat", "https://opencode.ai/inference/openai/v1", "k")
+        async with _client({"/models": (200, {"data": rows})}) as client:
+            result = await discover_provider(target, client=client)
+        got = {m["id"]: (m["supports_chat"], m["context_tokens"]) for m in result.models}
+        self.assertEqual(got, {
+            "glm-5.3": (True, 200000),
+            "claude-opus-5-5": (False, 1000000),
+            "gpt-6-sol": (False, None),
+            "voyage-4": (False, None),
+            "odd": (False, None),
+            # Nothing said, nothing inferred: a plain OpenAI-compatible server is unchanged.
+            "plain": (None, None),
+            "empty-api": (None, None),
+            "junk": (None, None),
+        })
+
     async def test_anthropic_reports_its_max_input_tokens(self) -> None:
         routes = {"/v1/models": (200, {"data": [
             {"id": "claude-x", "display_name": "X", "max_input_tokens": 1000000, "max_tokens": 128000},
