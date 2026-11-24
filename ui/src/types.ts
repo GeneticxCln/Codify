@@ -486,6 +486,8 @@ export interface FailureCause {
 export interface FailureBreakdown {
   window_days: number;
   generated_at: number;
+  /** The project this breakdown is narrowed to, or null when covering all projects. */
+  workspace_id?: string | null;
   total: number;
   by_code: Record<string, number>;
   by_role: Record<string, number>;
@@ -535,6 +537,8 @@ export interface AuditChangesResponse {
 export interface StatsOverview {
   window_days: number;
   generated_at: number;
+  /** The project this overview is narrowed to, or null when covering all projects. */
+  workspace_id?: string | null;
   goals: StatsGoals;
   usage: UsageLane & { failures: number; by_role: Record<string, UsageLane>; by_model: Record<string, UsageLane> };
   /** Per-stage cost and latency. Absent on an engine too old to measure
@@ -756,6 +760,8 @@ export interface EngineSettings {
   session_compact_auto?: EngineSettingValue;
   /** How many recent turns stay verbatim beside the summary. */
   session_compact_keep_turns?: EngineSettingValue;
+  /** 1 = restrict chat and roles to local endpoints and pause web fetch, MCP, update checks, and remote provider pings. */
+  offline_mode?: EngineSettingValue;
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */

@@ -240,7 +240,10 @@ def _is_offline_mode(settings: SettingsService | None) -> bool:
     if env in ("1", "true", "yes", "on"):
         return True
     if settings is not None and "offline_mode" in SettingsService.SPEC:
-        return bool(settings.get_int("offline_mode"))
+        try:
+            return bool(settings.get_int("offline_mode"))
+        except Exception:
+            return False
     return False
 
 
@@ -266,9 +269,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 @asynccontextmanager
 async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> AsyncIterator[None]:
     """Wire the services onto `app.state`, run the engine, and unwire it — with the store already open."""
-    factory = ProviderFactory(keychain)
     app.state.conn = conn
     app.state.keychain = keychain
+    app.state.settings = SettingsService(conn)
+    offline_check = lambda: _is_offline_mode(getattr(app.state, "settings", None))  # noqa: E731
+    factory = ProviderFactory(keychain, is_offline=offline_check)
     app.state.factory = factory
     app.state.registry = AgentRegistryService(conn, factory, keychain)
     app.state.workspaces = WorkspaceService(conn)
@@ -284,16 +289,11 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # reads the same goal rows the transcript does, so a summary can never
     # disagree with the turns it replaces.
     app.state.compactions = CompactionService(conn, app.state.goals)
-    app.state.settings = SettingsService(conn)
     app.state.sandbox = SandboxService(app.state.settings)
     # The MCP admission list, its probe, and the read-only call path a person's
     # per-tool authority unlocks (`engine/mcp.py`, docs/20).
     app.state.mcp = McpService(conn, keychain)
-    app.state.models = ModelCatalogService(
-        app.state.registry,
-        keychain,
-        is_offline=lambda: _is_offline_mode(app.state.settings),
-    )
+    app.state.models = ModelCatalogService(app.state.registry, keychain, is_offline=offline_check)
     # One frozen statistics document per past day, written lazily on the first
     # stats read after a day ends (see engine/stats_history.py).
     app.state.stats_snapshots = StatsSnapshotService(conn)
@@ -1495,6 +1495,7 @@ async def list_available_models(request: Request, refresh: bool = False) -> dict
     catalog: ModelCatalogService = getattr(request.app.state, "models", None) or ModelCatalogService(
         request.app.state.registry,
         getattr(request.app.state, "keychain", None) or Keychain(),
+        is_offline=lambda: _is_offline_mode(getattr(request.app.state, "settings", None)),
     )
     payload = await catalog.get(refresh=refresh)
     # Added here and not to the cached catalog: which model a turn runs on follows Settings, which can change
@@ -1567,6 +1568,9 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     "laya_required": (0, 1),
     # Whether the critic is preceded by two fresh-context review lenses (docs/21 P1). Off by default.
     "review_deep": (0, 1),
+    # Restricts chat/roles to local endpoints and turns off web fetch, MCP, CI suggestions, update checks, and
+    # remote provider-health/catalog pings together (docs/21 item 9). Off by default.
+    "offline_mode": (0, 1),
 }
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
@@ -1574,7 +1578,7 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
     "sandbox_network", "sandbox_unjailed_ok", "laya_required", "review_deep", "suggestions", "suggest_ci",
-    "cross_workspace_notes",
+    "cross_workspace_notes", "offline_mode",
 })
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
@@ -1648,6 +1652,8 @@ async def list_mcp_servers(request: Request) -> list[dict[str, Any]]:
 @app.post("/settings/mcp", status_code=201)
 async def create_mcp_server(body: McpServerCreate, request: Request) -> dict[str, Any]:
     """Store one HTTPS server and probe it. A failed probe leaves the row failed."""
+    if _is_offline_mode(getattr(request.app.state, "settings", None)):
+        raise ApiError(409, "offline_mode", "Offline mode is on — MCP server connections are disabled.")
     return await _mcp_service(request).create(body)
 
 
@@ -1666,6 +1672,8 @@ async def delete_mcp_server(server_id: str, request: Request) -> dict[str, Any]:
 @app.post("/settings/mcp/{server_id}/probe")
 async def probe_mcp_server(server_id: str, request: Request) -> dict[str, Any]:
     """Run `initialize` and `tools/list`; never `tools/call`."""
+    if _is_offline_mode(getattr(request.app.state, "settings", None)):
+        raise ApiError(409, "offline_mode", "Offline mode is on — MCP server probing is disabled.")
     return await _mcp_service(request).probe(server_id)
 
 
@@ -1976,6 +1984,10 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
         laya: LayaService | None = getattr(request.app.state, "laya", None)
         if laya is not None:
             laya.reload()
+    if "offline_mode" in body:
+        catalog: ModelCatalogService | None = getattr(request.app.state, "models", None)
+        if catalog is not None:
+            catalog.invalidate()
     return {"saved": out}
 
 
@@ -3004,22 +3016,43 @@ _STATS_GOAL_LIMIT = 5000
 _STATS_EVENT_LIMIT = 20000
 
 
-def _load_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+def _load_stats(
+    conn: sqlite3.Connection, workspace_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """The synchronous read behind `_sweep_stats`; it runs on a worker thread, never the loop's.
 
     The third value is how much of the history this read covers: the rows it took, the caps, whether a cap
     cut anything off, and the instant from which the numbers are complete (None when nothing was cut).
+
+    `workspace_id` narrows both reads to one project: its goals, and the events those goals wrote. An event
+    carries no project of its own, so the filter goes through its goal, in SQL, before the caps apply — a
+    filter applied after a capped read would count only the share of the newest rows that happened to be
+    this project's.
     """
-    goal_rows = conn.execute(
-        "SELECT id, status, created_at, updated_at FROM goals ORDER BY created_at DESC LIMIT ?",
-        (_STATS_GOAL_LIMIT,),
-    ).fetchall()
-    events = conn.execute(
-        """SELECT type, payload, timestamp FROM events
-           WHERE type IN ('usage', 'agent_call_failed')
-           ORDER BY timestamp DESC LIMIT ?""",
-        (_STATS_EVENT_LIMIT,),
-    ).fetchall()
+    if workspace_id is None:
+        goal_rows = conn.execute(
+            "SELECT id, status, created_at, updated_at FROM goals ORDER BY created_at DESC LIMIT ?",
+            (_STATS_GOAL_LIMIT,),
+        ).fetchall()
+        events = conn.execute(
+            """SELECT type, payload, timestamp FROM events
+               WHERE type IN ('usage', 'agent_call_failed')
+               ORDER BY timestamp DESC LIMIT ?""",
+            (_STATS_EVENT_LIMIT,),
+        ).fetchall()
+    else:
+        goal_rows = conn.execute(
+            """SELECT id, status, created_at, updated_at FROM goals WHERE workspace_id = ?
+               ORDER BY created_at DESC LIMIT ?""",
+            (workspace_id, _STATS_GOAL_LIMIT),
+        ).fetchall()
+        events = conn.execute(
+            """SELECT type, payload, timestamp FROM events
+               WHERE type IN ('usage', 'agent_call_failed')
+                 AND goal_id IN (SELECT id FROM goals WHERE workspace_id = ?)
+               ORDER BY timestamp DESC LIMIT ?""",
+            (workspace_id, _STATS_EVENT_LIMIT),
+        ).fetchall()
     parsed = []
     for row in events:
         try:
@@ -3047,11 +3080,15 @@ def _load_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[di
     return [dict(r) for r in goal_rows], parsed, coverage
 
 
-async def _sweep_stats(conn: sqlite3.Connection) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
+async def _sweep_stats(
+    conn: sqlite3.Connection, workspace_id: str | None = None,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], dict[str, Any]]:
     """The raw material the stats views aggregate: goal rows and parsed call
     events. One loader for both the live overview and the snapshot writer, so
     the two can never read different worlds."""
-    return await _read_off_the_loop(conn, _load_stats)
+    if workspace_id is None:
+        return await _read_off_the_loop(conn, _load_stats)
+    return await _read_off_the_loop(conn, lambda c: _load_stats(c, workspace_id))
 
 
 _T = TypeVar("_T")
@@ -3109,7 +3146,7 @@ _METRIC_EVENT_TYPES = (
 )
 
 
-def _metric_sweep_sql() -> str:
+def _metric_sweep_sql(one_workspace: bool = False) -> str:
     """The query behind `_sweep_metrics`, in one place so a test can plan the real one.
 
     The *newest* `_METRIC_SWEEP_LIMIT` rows, returned oldest-first. The bound has
@@ -3118,18 +3155,25 @@ def _metric_sweep_sql() -> str:
     froze on ancient history and never threw. The outer sort puts them back in
     the chronological order `recovery_counts` depends on. The inner
     `ORDER BY timestamp DESC, sequence DESC` is what `idx_events_time` serves.
+
+    `one_workspace` adds the per-project filter (one more parameter, the workspace id, after the types). The
+    all-projects query is left exactly as it was, so its plan and its index do not change.
     """
     placeholders = ",".join("?" for _ in _METRIC_EVENT_TYPES)
+    project = " AND goal_id IN (SELECT id FROM goals WHERE workspace_id = ?)" if one_workspace else ""
     return f"""SELECT * FROM (
                 SELECT type, payload, timestamp, goal_id, step_id, sequence FROM events
-                WHERE type IN ({placeholders})
+                WHERE type IN ({placeholders}){project}
                 ORDER BY timestamp DESC, sequence DESC LIMIT {_METRIC_SWEEP_LIMIT}
             ) ORDER BY timestamp, sequence"""  # noqa: S608 — placeholders and a module constant only
 
 
-def _load_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+def _load_metrics(conn: sqlite3.Connection, workspace_id: str | None = None) -> list[dict[str, Any]]:
     """The synchronous read behind `_sweep_metrics`; it runs on a worker thread, never the loop's."""
-    rows = conn.execute(_metric_sweep_sql(), _METRIC_EVENT_TYPES).fetchall()
+    if workspace_id is None:
+        rows = conn.execute(_metric_sweep_sql(), _METRIC_EVENT_TYPES).fetchall()
+    else:
+        rows = conn.execute(_metric_sweep_sql(one_workspace=True), (*_METRIC_EVENT_TYPES, workspace_id)).fetchall()
     parsed = []
     for row in rows:
         try:
@@ -3147,7 +3191,7 @@ def _load_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     return parsed
 
 
-async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
+async def _sweep_metrics(conn: sqlite3.Connection, workspace_id: str | None = None) -> list[dict[str, Any]]:
     """Every measurement event, with the ids recovery counting needs.
 
     `goal_id`/`step_id` are included because "did the retry get the step past
@@ -3155,7 +3199,23 @@ async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     aggregation that answers it cannot group on a list that has thrown the ids
     away.
     """
-    return await _read_off_the_loop(conn, _load_metrics)
+    if workspace_id is None:
+        return await _read_off_the_loop(conn, _load_metrics)
+    return await _read_off_the_loop(conn, lambda c: _load_metrics(c, workspace_id))
+
+
+def _stats_workspace(request: Request, workspace_id: str | None) -> str | None:
+    """The project a stats read is narrowed to, or None for every project. Unknown ids are a 404, not zeros.
+
+    A misspelt or deleted project answering with an empty overview would read as "this project did nothing";
+    refusing it is what tells a picker its list is stale.
+    """
+    chosen = (workspace_id or "").strip()
+    if not chosen:
+        return None
+    workspaces: WorkspaceService = request.app.state.workspaces
+    workspaces.get(chosen)  # 404 unknown_workspace
+    return chosen
 
 
 @app.get("/audit/changes")
@@ -3174,7 +3234,9 @@ async def get_audit_changes(
 
 
 @app.get("/stats/overview")
-async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, Any]:
+async def stats_overview(
+    request: Request, window: int = Query(0), workspace_id: str | None = Query(None, max_length=64),
+) -> dict[str, Any]:
     """Cross-goal statistics: outcomes, success rate, spend, and a daily trend.
 
     The per-goal endpoints answer "what happened in this run"; this answers the
@@ -3199,10 +3261,32 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
     `window` is in days: 1, 7, 30, or 0 = all time (the default, and the only
     honest view for a fresh install). An unknown window clamps to 7 rather than
     erroring, because a stats view has no broken state to refuse.
+
+    `workspace_id` narrows every number to one project's goals and the events they wrote (tokens and calls
+    only; there is no price table, docs/21 decision A). The frozen daily snapshots are documents about every
+    project, so a narrowed read neither writes nor prunes them, and its trend is the live sweep alone.
     """
     conn = request.app.state.conn
-    goals, parsed, coverage = await _sweep_stats(conn)
+    project = _stats_workspace(request, workspace_id)
+    goals, parsed, coverage = await _sweep_stats(conn, project)
     now = time.time()
+    if project is not None:
+        window_days = normalize_window(window)
+        overview = await asyncio.to_thread(build_overview, goals, parsed, window_days=window_days, now=now)
+        try:
+            measured = await _sweep_metrics(conn, project)
+            stages = await asyncio.to_thread(stage_costs, measured, window_days, now=now)
+            roles = await asyncio.to_thread(role_success_rate, measured, window_days, now=now)
+        except Exception:
+            stages, roles = [], {}
+        return {
+            **overview,
+            "by_stage": stages,
+            "by_role_outcome": roles,
+            "coverage": coverage,
+            "workspace_id": project,
+            "generated_at": now,
+        }
 
     # Freeze the past days that have no row, then enforce retention. The service owns the day boundary and
     # the "already frozen" check; this only decides that a failure to maintain history is not worth failing
@@ -3254,12 +3338,15 @@ async def stats_overview(request: Request, window: int = Query(0)) -> dict[str, 
         "by_stage": stages,
         "by_role_outcome": roles,
         "coverage": coverage,
+        "workspace_id": None,
         "generated_at": now,
     }
 
 
 @app.get("/stats/failures")
-async def stats_failures(request: Request, window: int = Query(0)) -> dict[str, Any]:
+async def stats_failures(
+    request: Request, window: int = Query(0), workspace_id: str | None = Query(None, max_length=64),
+) -> dict[str, Any]:
     """What went wrong across every goal: by cause, by role, by stage.
 
     The aggregation lives in `engine/metrics.py` as a pure function, for the
@@ -3273,13 +3360,15 @@ async def stats_failures(request: Request, window: int = Query(0)) -> dict[str, 
     retries is not a perfect record, it is no evidence.
     """
     conn = request.app.state.conn
+    project = _stats_workspace(request, workspace_id)
     window_days = normalize_window(window)
     now = time.time()
-    events = await _sweep_metrics(conn)
+    events = await _sweep_metrics(conn, project)
     breakdown = await asyncio.to_thread(failure_breakdown, events, window_days, now=now)
     return {
         **breakdown,
         "window_days": window_days,
+        "workspace_id": project,
         "generated_at": now,
     }
 

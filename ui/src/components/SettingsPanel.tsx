@@ -16,6 +16,7 @@ import { findStaleFallback, findStaleModel, StaleModel } from "../staleModel";
 import { AgentConfigCard } from "./AgentConfigCard";
 import { ConductorSettingsCard } from "./ConductorSettingsCard";
 import { WebAccessCard } from "./WebAccessCard";
+import { OfflineModeCard } from "./OfflineModeCard";
 import { BrowserActionsCard } from "./BrowserActionsCard";
 import { SandboxCard } from "./SandboxCard";
 import { LayaRequiredToggle } from "./LayaRequiredToggle";
@@ -791,6 +792,7 @@ export const SettingsPanel: React.FC<SettingsPanelProps> = ({
         />
       )}
 
+      <OfflineModeCard onChanged={onRefreshModels} />
       <WebAccessCard />
       <BrowserActionsCard />
       <SandboxCard />

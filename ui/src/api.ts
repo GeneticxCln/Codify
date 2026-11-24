@@ -706,6 +706,7 @@ export async function saveEngineSettings(
     event_retention_days?: number;
     session_compact_auto?: boolean;
     session_compact_keep_turns?: number;
+    offline_mode?: boolean;
   }
 ): Promise<{ saved: Record<string, number | string> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
@@ -772,8 +773,13 @@ export async function fetchRoles(): Promise<RoleInfo[]> {
   return res.json();
 }
 
-/** Cross-goal statistics: success rate, spend per role/model, and the daily
- * trend, aggregated by the engine from the goals and events it already stores. */
+/** The query for a stats read: the window, and the one project it is narrowed to (none = every project). */
+function statsQuery(windowDays: number, workspaceId?: string | null): string {
+  const project = workspaceId ? `&workspace_id=${encodeURIComponent(workspaceId)}` : "";
+  return `window=${windowDays}${project}`;
+}
+
+/** Cross-project audit feed of goals that modified files or created git commits. */
 export async function fetchAuditChanges(
   workspaceId?: string | null,
   limit = 50,
@@ -791,9 +797,12 @@ export async function fetchAuditChanges(
   return res.json();
 }
 
-export async function fetchStatsOverview(windowDays: number): Promise<StatsOverview> {
+/** Cross-goal statistics: success rate, spend per role/model, and the daily
+ * trend, aggregated by the engine from the goals and events it already stores.
+ * `workspaceId` narrows every number to one project (tokens and calls; no prices). */
+export async function fetchStatsOverview(windowDays: number, workspaceId?: string | null): Promise<StatsOverview> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/stats/overview?window=${windowDays}`, {
+  const res = await fetch(`${base}/stats/overview?${statsQuery(windowDays, workspaceId)}`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) {
@@ -807,9 +816,9 @@ export async function fetchStatsOverview(windowDays: number): Promise<StatsOverv
  * many of the fix→verify retries the pipeline got back. Read-only and
  * windowed like the overview; the aggregation is the engine's
  * `engine/metrics.py`, tested there. */
-export async function fetchFailureBreakdown(windowDays: number): Promise<FailureBreakdown> {
+export async function fetchFailureBreakdown(windowDays: number, workspaceId?: string | null): Promise<FailureBreakdown> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
-  const res = await fetch(`${base}/stats/failures?window=${windowDays}`, {
+  const res = await fetch(`${base}/stats/failures?${statsQuery(windowDays, workspaceId)}`, {
     headers: { Authorization: `Bearer ${currentEngine.token}` },
   });
   if (!res.ok) {

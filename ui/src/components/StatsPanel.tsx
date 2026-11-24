@@ -13,6 +13,7 @@ import {
   fetchStatsHistory,
   fetchStatsImport,
   fetchStatsOverview,
+  listWorkspaces,
   saveStatsImport,
 } from "../api";
 import {
@@ -45,6 +46,7 @@ import {
   FileDown,
   FileUp,
 } from "lucide-react";
+import { SEARCHABLE_FROM, SelectMenu } from "./SelectMenu";
 
 /**
  * Cross-goal statistics: what the whole history adds up to.
@@ -438,6 +440,10 @@ const FailureView: React.FC<{ breakdown: FailureBreakdown | null }> = ({
 
 export const StatsPanel: React.FC = () => {
   const [windowDays, setWindowDays] = useState(0);
+  // The one project every number is narrowed to, or "" for all of them. Tokens and calls only: there is no
+  // price table (docs/21 decision A), so a project's usage is what it spent, not what it cost.
+  const [project, setProject] = useState("");
+  const [projects, setProjects] = useState<Array<{ id: string; name: string }>>([]);
   const [stats, setStats] = useState<StatsOverview | null>(null);
   const [history, setHistory] = useState<StatsHistoryDay[]>([]);
   const [importedHistory, setImportedHistory] = useState<StatsHistoryDay[]>([]);
@@ -455,7 +461,7 @@ export const StatsPanel: React.FC = () => {
     // The last window's numbers are not this window's. Left on screen they read as its figures, and when this
     // read fails the banner would sit above them.
     setStats(null);
-    fetchStatsOverview(windowDays)
+    fetchStatsOverview(windowDays, project || null)
       .then((s) => {
         if (!cancelled) setStats(s);
       })
@@ -465,14 +471,29 @@ export const StatsPanel: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [windowDays]);
+  }, [windowDays, project]);
+
+  // The projects the picker offers. A failed read leaves only "All projects", which is still a working panel.
+  useEffect(() => {
+    let cancelled = false;
+    listWorkspaces()
+      .then((list) => {
+        if (!cancelled) setProjects(list.map((w) => ({ id: w.id, name: w.name })));
+      })
+      .catch(() => {
+        // No list, no picker entries: the all-projects view is unaffected.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   // The failure view is a separate read from a separate endpoint. It is
   // allowed to be missing: an engine too old to serve it, or one whose metrics
   // read failed, must not take the rest of this panel down with it.
   useEffect(() => {
     let cancelled = false;
-    fetchFailureBreakdown(windowDays)
+    fetchFailureBreakdown(windowDays, project || null)
       .then((f) => {
         if (!cancelled) setFailures(f);
       })
@@ -482,7 +503,7 @@ export const StatsPanel: React.FC = () => {
     return () => {
       cancelled = true;
     };
-  }, [windowDays]);
+  }, [windowDays, project]);
 
   // The frozen days: fetched once per mount (each reading also nudges the
   // engine's freeze-forward, so a refetch on window change is unnecessary —
@@ -525,8 +546,11 @@ export const StatsPanel: React.FC = () => {
   // One continuous series: frozen history under the live tail. Computed once
   // per render of both feeds; the merge rule (snapshot wins a shared day)
   // lives with the data, in mergeDays.
+  //
+  // The frozen and imported days are about every project and cannot be narrowed to one, so a project view
+  // charts its live days alone rather than mixing another project's history into its trend.
   const mergedDays = mergeDays(
-    [...importedHistory, ...history],
+    project ? [] : [...importedHistory, ...history],
     stats?.daily ?? [],
   );
   const notice = stats ? coverageNotice(stats.coverage, windowDays, Date.now()) : null;
@@ -630,12 +654,30 @@ export const StatsPanel: React.FC = () => {
             {w.label}
           </button>
         ))}
+        <SelectMenu
+          label="Project"
+          value={project}
+          onChange={setProject}
+          options={[
+            { value: "", label: "All projects" },
+            ...projects.map((p) => ({ value: p.id, label: p.name })),
+          ]}
+          searchable={projects.length + 1 >= SEARCHABLE_FROM}
+          searchPlaceholder="Search projects…"
+          className="ml-1 flex items-center justify-between gap-2 rounded-lg border border-codify-border bg-codify-bg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent cursor-pointer"
+        />
         {stats && (
           <span className="ml-auto text-2xs text-codify-muted">
             {stats.goals.goals} goal{stats.goals.goals === 1 ? "" : "s"} in view
           </span>
         )}
       </div>
+      {project && (
+        <p className="text-2xs text-codify-muted">
+          This project&apos;s goals and the tokens they used. The trend shows recent days only: the saved daily
+          history covers all projects together.
+        </p>
+      )}
 
       {failed && (
         <p className="text-xs text-codify-danger-ink bg-codify-danger/20 border border-codify-danger/60 rounded-lg p-2.5">
