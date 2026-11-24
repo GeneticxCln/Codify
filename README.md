@@ -353,6 +353,7 @@ missing, `make doctor` says so as a note, not a failure; everything else runs wi
 | **Machine** | A Linux shell in a bubblewrap jail, in a tab of its own, on its **own copy** of your project: **your files are never written**, it has no credentials, and it has no network unless you open it with one. If a jail cannot be built, nothing starts. It is a jail, **not a virtual machine**. The assistant can `read_machine`, `run_in_machine`, `key_in_machine` and `reset_machine`, but cannot open one. [`docs/09`](docs/09-workspace-shell.md) §14, [`docs/03`](docs/03-security-and-roadmap.md) §1.11 |
 | **Split panes** | A chat beside a terminal, an editor or a browser page: right-click a tab, or **Ctrl+.**. A narrow window draws one pane. [`docs/09`](docs/09-workspace-shell.md) §12 |
 | **Clipboard history** | What you copied, cut or pasted *inside Codify*, kept in this window and never sent anywhere. Anything shaped like a key or password is refused (a heuristic, not a guarantee). [`docs/09`](docs/09-workspace-shell.md) §11 |
+| **Backup and restore** | Settings → Sessions writes a consistent online snapshot of `codify.db`, downloads it, or stages one to swap in on the next start. API keys live in the keyring and are never copied. [`docs/04`](docs/04-engine-data-and-runtime.md) §8.3, [`docs/21`](docs/21-improvement-plan.md) §6 |
 
 ---
 

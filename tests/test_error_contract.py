@@ -490,6 +490,10 @@ class RealRefusalsMatchTheSchema(unittest.IsolatedAsyncioTestCase):
             "POST", "/settings/keys",
             lambda ws: {"provider": "openai", "api_key": "two words"},
         ),
+        "StateRestoreRequest._one_source": (
+            "POST", "/state/restore",
+            lambda ws: {},
+        ),
         "TurnCreate._a_pair_or_nothing": (
             "POST", "/conversations/c-none/turns",
             lambda ws: {"prompt": "hi", "provider": "openai"},

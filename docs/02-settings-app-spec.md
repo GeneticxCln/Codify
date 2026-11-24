@@ -29,7 +29,8 @@ ui/src/
     SandboxCard.tsx            # Workspace command jail: mode, network, unjailed-run acknowledgement, host bwrap availability
     LayaRequiredToggle.tsx     # Fail closed when the pre-flight gate cannot answer
     AgentSkillsPane.tsx        # Agent skills: one on/off switch per skill in this workspace's menu
-    SessionSettingsPane.tsx    # Sessions: auto-compaction and how many recent turns stay verbatim
+    SessionSettingsPane.tsx    # Sessions: auto-compaction, recent-turn budget, backup and restore
+    StateBackupCard.tsx        # Sessions: online codify.db snapshots and next-start restore
     McpPane.tsx                # MCP: remote HTTPS servers admitted and probed; no call path
     AudioPane.tsx              # microphone, dictation, read-aloud — engine settings only
     UiScalePanel.tsx           # Appearance → UI scale: how big the whole window is
@@ -289,7 +290,7 @@ When no workspace is selected, the pane asks for one instead of offering switche
 ### 3.2a The Sessions tab
 
 Settings → Sessions (`SessionSettingsPane.tsx`) holds the two engine-wide defaults for thread
-compaction (`engine/compaction.py`, docs/09 §10.21):
+compaction (`engine/compaction.py`, docs/09 §10.21) and the **Backup and restore** card:
 
 * **Compact automatically** (`session_compact_auto`, on by default). A turn summarises the older
   part of its thread before answering once four turns have accumulated past the kept ones. Off
@@ -301,6 +302,14 @@ compaction (`engine/compaction.py`, docs/09 §10.21):
 Both are `engine_settings` keys written through `PUT /settings/engine` and nothing else. They are
 not a role and not per thread: a thread's own summary and its manual Compact/Undo buttons live in
 the Session drawer beside the transcript, where the person can see what they act on.
+
+The tab also holds **Backup and restore** (`StateBackupCard.tsx`, `engine/backup.py`, docs/04 §8.3).
+*Back up* writes a consistent online snapshot of `codify.db` into `<state_dir>/backups/` with SQLite's
+own backup API; a saved snapshot can be downloaded or staged for restore, and an uploaded `.db` can be
+staged instead. A restore is validated (SQLite header, integrity, required Codify tables, schema
+version) and swapped in at the start of the next engine launch, never under live connections;
+*Cancel restore* removes the staged file. API keys are not in the database and are neither copied nor
+replaced. Snapshots are kept until a person removes them, and *Delete all history* does not delete them.
 
 ### 3.2b The MCP tab
 

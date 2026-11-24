@@ -24,12 +24,12 @@ from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisco
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.encoders import jsonable_encoder
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from engine import capabilities, history, home, speech, watchdog
+from engine import backup, capabilities, history, home, speech, watchdog
 from engine import github_remote
-from engine.db import connect
+from engine.db import SCHEMA_VERSION, connect
 from engine.compaction import CompactionService
 from engine.conductor_tools import ConductorTools
 from engine.executor import ExecutorService
@@ -56,6 +56,7 @@ from engine.catalog_watch import CatalogWatch
 from engine.suggestions import SuggestionWatch
 from engine.notes import MAX_NOTES, NotesService
 from engine.profile import ProfileImport, ProfileTools
+from engine.models import StateRestoreRequest
 from engine.models import (
     ThinkingEffort,
     BUILTIN_PROVIDERS,
@@ -2533,6 +2534,56 @@ async def clear_all_history(body: HistoryClear, request: Request) -> dict[str, A
     result = history.clear_history(conn, executor.is_driving if executor is not None else None)
     result["scrubbed"] = await asyncio.to_thread(history.scrub_file, conn)
     return result
+
+
+@app.get("/state/backup")
+async def get_state_backup(request: Request) -> dict[str, Any]:
+    """List saved `codify.db` snapshots and any pending next-start restore (`engine/backup.py`)."""
+    db_path = backup.resolve_db_path(getattr(request.app.state, "conn", None))
+    return await asyncio.to_thread(backup.status, db_path)
+
+
+@app.post("/state/backup")
+async def post_state_backup(request: Request) -> dict[str, Any]:
+    """Write a consistent online copy of `codify.db` using SQLite's backup API (`engine/backup.py`)."""
+    db_path = backup.resolve_db_path(getattr(request.app.state, "conn", None))
+    return await asyncio.to_thread(backup.create_backup, db_path)
+
+
+@app.get("/state/backup/{filename}")
+async def download_state_backup(filename: str, request: Request) -> FileResponse:
+    """Download one saved `codify.db` snapshot file (`404 unknown_backup`, `422 invalid_backup`)."""
+    db_path = backup.resolve_db_path(getattr(request.app.state, "conn", None))
+    path = await asyncio.to_thread(backup.backup_file_path, db_path, filename)
+    return FileResponse(path, media_type="application/x-sqlite3", filename=path.name)
+
+
+@app.post("/state/restore")
+async def post_state_restore(body: StateRestoreRequest, request: Request) -> dict[str, Any]:
+    """Validate and stage a backup to swap into `codify.db` on the next engine start (`engine/backup.py`)."""
+    db_path = backup.resolve_db_path(getattr(request.app.state, "conn", None))
+    if body.filename and body.filename.strip():
+        return await asyncio.to_thread(
+            lambda: backup.stage_restore_from_backup(
+                db_path, body.filename.strip(), max_schema_version=SCHEMA_VERSION  # type: ignore[union-attr]
+            )
+        )
+    return await asyncio.to_thread(
+        lambda: backup.stage_restore_from_base64(
+            db_path,
+            body.data_base64 or "",
+            body.source_name,
+            max_schema_version=SCHEMA_VERSION,
+        )
+    )
+
+
+@app.delete("/state/restore")
+async def delete_state_restore(request: Request) -> dict[str, Any]:
+    """Cancel a staged next-start restore before the engine restarts."""
+    db_path = backup.resolve_db_path(getattr(request.app.state, "conn", None))
+    cancelled = await asyncio.to_thread(backup.cancel_pending_restore, db_path)
+    return {"cancelled": cancelled}
 
 
 @app.get("/shell/tabs", response_model=list[ShellTab])

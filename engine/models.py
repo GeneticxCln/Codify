@@ -983,6 +983,23 @@ class HistoryClear(BaseModel):
     confirm: str = Field(..., max_length=64)
 
 
+class StateRestoreRequest(BaseModel):
+    """`POST /state/restore`: stage either a saved backup by filename or an uploaded `.db` file (`engine/backup.py`)."""
+
+    model_config = {"extra": "forbid"}
+    filename: str | None = Field(None, max_length=200)
+    data_base64: str | None = Field(None, max_length=90_000_000)
+    source_name: str | None = Field(None, max_length=200)
+
+    @model_validator(mode="after")
+    def _one_source(self) -> StateRestoreRequest:
+        has_file = bool((self.filename or "").strip())
+        has_data = bool((self.data_base64 or "").strip())
+        if has_file == has_data:
+            raise ValueError("provide either `filename` or `data_base64` (not both)")
+        return self
+
+
 class TurnCreate(BaseModel):
     """One turn in a thread: what the user said, and nothing else.
 
