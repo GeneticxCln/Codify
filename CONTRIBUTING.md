@@ -120,6 +120,17 @@ living in one person's `.git/hooks`. `git commit --no-verify` and `git push
 convenient, and a linter that cannot be found is a refusal with install instructions,
 never a pass.
 
+## Change workflow
+
+Every bug fix or feature follows the same sequence:
+
+- **Audit first.** Establish existing behaviour from the code, tests and runtime instead of assuming how the application works.
+- **One issue at a time.** Keep each branch and pull request scoped to a single issue so unrelated changes do not mix together or create avoidable merge conflicts across open PRs.
+- **Targeted regression tests.** Prove the specific bug is fixed, and preserve the original failure as a reproducible regression test whenever possible.
+- **Integration tests.** Check that neighbouring components and contracts still work (`make ci` and `make check-history`).
+- **Runtime smoke test.** Verify the actual application end to end (see [Manual verification](#manual-verification) below), not just that the code compiles.
+- **Merge last.** Keep unverified changes out of `master`; verify on a branch and pull request before merging.
+
 ## Rules of thumb
 
 **Engine changes need a test that fails without them.** The suite exists to

@@ -48,7 +48,9 @@ _SECTION_REF = re.compile(r"(?:docs/)?`?\b(\d\d)\b`?\s*§\s*([0-9]+(?:\.[0-9A-Za
 
 
 def _documents() -> list[Path]:
-    return sorted((ROOT / "docs").glob("*.md")) + [ROOT / n for n in ("README.md", "CONTRIBUTING.md", "DESIGN.md", "CLAUDE.md")]
+    return sorted((ROOT / "docs").glob("*.md")) + [
+        ROOT / n for n in ("README.md", "CONTRIBUTING.md", "DESIGN.md", "CLAUDE.md", "AGENTS.md")
+    ]
 
 
 def _gitignored(path: str) -> bool:
