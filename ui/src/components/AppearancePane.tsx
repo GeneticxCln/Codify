@@ -109,11 +109,15 @@ export const AppearancePane: React.FC = () => {
   // `applyTintedTheme` rather than `applyTheme`: a theme is stored *with* its
   // custom colours, so switching to a theme you have tinted has to bring them
   // along or the switch is a silent reset.
+  //
+  // Stored *before* it is applied. Applying announces the change, and every `useTheme` reads its answer from the
+  // stored id; applied first, the backdrop heard the news, read the old id, and kept the previous theme's animation
+  // under the new colours until a second click (`ui/tests/themeSwitchBackdrop.test.ts`).
   const select = (theme: AppearanceTheme): void => {
     setSelected(theme.id);
     setHovered(null);
-    applyTintedTheme(theme.id);
     storeThemeId(theme.id);
+    applyTintedTheme(theme.id);
   };
 
   /**
