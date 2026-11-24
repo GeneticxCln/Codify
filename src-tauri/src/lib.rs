@@ -438,6 +438,32 @@ impl EngineProcess {
 /// The shell event the watchdog announces, and the payload it carries.
 pub const RENDER_STARVED_EVENT: &str = "codify:engine-render-starved";
 
+/// The shell event sent once the watchdog has finished judging this boot, with a verdict or without.
+///
+/// The page holds its decorative one-off animations (the wordmark's shimmer) until this arrives. They used to
+/// wait a fixed ten seconds, which put a nine-second sweep inside the watchdog's thirty: measured on a Wayland
+/// window that GTK composites on the CPU, the sweep cost 60–94% of a core, the theme's backdrop alone ~20%, and
+/// the watchdog read the sweep as starvation and stopped the backdrop for the session. A decoration that starts
+/// after the measurement cannot be the measurement.
+pub const RENDER_CHECK_SETTLED_EVENT: &str = "codify:render-check-settled";
+
+/// Whether the watchdog has settled, for a page that loads (or reloads) after the event was sent.
+static RENDER_CHECK_SETTLED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Record that the watchdog is done with this boot, and tell a page that is already listening.
+fn settle_render_check(app: &tauri::AppHandle) {
+    RENDER_CHECK_SETTLED.store(true, std::sync::atomic::Ordering::SeqCst);
+    use tauri::Emitter;
+    let _ = app.emit(RENDER_CHECK_SETTLED_EVENT, ());
+}
+
+/// Has the render watchdog finished judging this boot? Read-only and argument-free.
+#[tauri::command]
+fn codify_render_check_settled() -> bool {
+    RENDER_CHECK_SETTLED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
 /** The thresholds, named once so a reader (and the freeze test) can judge them. */
 pub mod render_watchdog {
     /// A sample is CPU ticks between two readings; the kernel counts 100 ticks
@@ -580,9 +606,12 @@ fn watch_render_starvation(app: tauri::AppHandle) {
                 );
                 use tauri::Emitter;
                 let _ = app.emit(RENDER_STARVED_EVENT, read.fraction_x100);
+                settle_render_check(&app);
                 return; // once per boot
             }
         }
+        // The window closed with no verdict: whatever the page held back can start now.
+        settle_render_check(&app);
     });
 }
 
@@ -2907,6 +2936,7 @@ pub fn run() {
             codify_repair_agent_configs,
             codify_test_agent_connection,
             codify_render_cpu_ms,
+            codify_render_check_settled,
             codify_software_rendering,
             codify_boot_id,
             codify_terminal_open,
@@ -2961,7 +2991,10 @@ mod tests {
         DEFAULT_STOP_GRACE, ENGINE_STOP_POLL, STOP_GRACE_SLACK, TABS_SMOKE_ENV, TABS_SMOKE_LINE,
         TABS_SMOKE_SEED_KEY,
     };
-    use super::{render_watchdog, RENDER_STARVED_EVENT};
+    use super::{
+        codify_render_check_settled, render_watchdog, RENDER_CHECK_SETTLED,
+        RENDER_CHECK_SETTLED_EVENT, RENDER_STARVED_EVENT,
+    };
     use std::sync::Arc;
     use std::time::Duration;
     use tokio::sync::Mutex;
@@ -3146,6 +3179,49 @@ mod tests {
             oldest_web_process(&[(30, 900), (20, 100), (40, 500)])
         );
         assert_eq!(None, oldest_web_process(&[]));
+    }
+
+    #[test]
+    fn the_watchdog_settles_on_both_exits_and_the_page_can_hear_it() {
+        // The page holds the wordmark's shimmer until this settles. A fixed ten-second delay put that sweep inside
+        // the watchdog's thirty seconds, where it measured 60-94% of a core on a CPU-composited window and was read
+        // as starvation. If either exit forgot to settle, the shimmer would wait for ever on that path.
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn watch_render_starvation(")
+            .expect("the watchdog moved");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the watchdog has no end")];
+        assert_eq!(
+            body.matches("settle_render_check(&app);").count(),
+            2,
+            "the watchdog must settle after announcing a verdict and after a window with none"
+        );
+        assert!(
+            body.find("settle_render_check(&app);").unwrap() > body.find("RENDER_STARVED_EVENT").unwrap(),
+            "settling before the verdict is sent would start the shimmer on the window about to be judged starved"
+        );
+        assert_eq!(RENDER_CHECK_SETTLED_EVENT, "codify:render-check-settled");
+        let ui = include_str!("../../ui/src/renderCheck.ts");
+        assert!(
+            ui.contains("\"codify:render-check-settled\""),
+            "the page no longer listens for the settled event"
+        );
+        assert!(
+            ui.contains("\"codify_render_check_settled\""),
+            "the page no longer asks the settled command"
+        );
+        assert!(
+            source.contains("            codify_render_check_settled,\n"),
+            "the command is not registered"
+        );
+        assert!(
+            !codify_render_check_settled()
+                || RENDER_CHECK_SETTLED.load(std::sync::atomic::Ordering::SeqCst)
+        );
     }
 
     #[test]

@@ -95,21 +95,30 @@ test("a starved window stops the sweep even when its person kept the backdrop", 
 });
 
 test("the first sweep waits for the shell's verdict", () => {
-  // The watchdog arms after 5s and needs ten one-second samples. A sweep that
-  // starts before that is a sweep the verdict can only discover after paying
-  // for it; ten seconds of stillness is the empty-state hero loading, and a
-  // window that is healthy gets its shimmer after it.
+  // It used to wait a fixed ten seconds, which put this nine-second sweep inside the render watchdog's thirty. On
+  // a Wayland window that GTK composites on the CPU the sweep measured 60-94% of a core against ~20% for the
+  // theme's backdrop, and the watchdog read the sweep as starvation and stopped the backdrop for the session. So
+  // it is held (paused, no fixed delay) until the shell says the watchdog is done (`data-render-checked`).
   const sweep = rule("codify-wordmark-sweep");
   assert.match(
     sweep,
     /animation:\s*codify-wordmark-sweep\s+9s\s+linear\s+1\b/,
     "the sweep does not rest after one pass",
   );
-  assert.match(
-    sweep,
-    /animation-delay:\s*10s/,
-    "the sweep can start before the shell has had its ten samples",
+  assert.match(sweep, /animation-play-state:\s*paused/, "the sweep plays before the watchdog has finished");
+  assert.doesNotMatch(sweep, /animation-delay/, "a fixed delay is back: it can land inside the watchdog's window");
+  assert.ok(
+    hasRule(
+      (s) => s.includes('[data-render-checked="true"]') && s.includes(".codify-wordmark-sweep"),
+      /animation-play-state:\s*running/,
+    ),
+    "nothing ever starts the held sweep",
   );
+  // The reduced and starved rules share that rule's specificity, so they stop the sweep only by coming after it.
+  const starts = CSS.indexOf('html[data-render-checked="true"] .codify-wordmark-sweep');
+  for (const stop of ['html[data-starved="true"] .codify-wordmark-sweep', 'html[data-motion="reduced"] .codify-wordmark-sweep']) {
+    assert.ok(CSS.indexOf(stop) > starts, `${stop} comes before the rule that starts the sweep, so it no longer wins`);
+  }
 });
 
 test("the band moves by transform, not by a background-position repaint", () => {

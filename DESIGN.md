@@ -871,9 +871,13 @@ to survive it deliberately:
   ~45% of a core in the shell on a software-composited window. The transform removes the
   glyph work, but on that window this WebKitGTK still charged a full-window blend for any
   animated layer — the band alone pinned the shell at 100% — so the verdict still stops
-  it, and the first sweep waits for one, with ten seconds as the ceiling; the software
-  path's pre-paint answer or the boot probe usually has it in under a second. On a GPU-composited window the band runs, with no glyph
-  repainted. It matches every
+  it, and the first sweep is held (paused) until the shell says its render watchdog has
+  finished judging the launch (`codify:render-check-settled`, `ui/src/renderCheck.ts`).
+  It used to wait a fixed ten seconds, which put the nine-second sweep inside the
+  watchdog's thirty: measured on a Wayland window GTK composites on the CPU, the sweep
+  cost 60–94% of a core against ~20% for the theme's backdrop, and the watchdog read it
+  as starvation and stopped the backdrop for the session. On a GPU-composited window the
+  band runs, with no glyph repainted. It matches every
   theme by *reading* one — every colour is `rgb(var(--codify-*-rgb) / …)` and there is
   no `switch` on the theme id — so the same rules give phosphor green, magenta, or flat
   white depending on what is active, and no new rule is needed for the seventeenth theme.

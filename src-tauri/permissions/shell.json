@@ -47,6 +47,11 @@
       "commands": { "allow": ["codify_render_cpu_ms"] }
     },
     {
+      "identifier": "allow-codify-render-check-settled",
+      "description": "Reports whether the shell's render watchdog has finished judging this launch, with or without a verdict. Read-only, takes no argument and changes nothing: the page holds its one-off decorative animations until it is true, so they cannot be what the watchdog measures.",
+      "commands": { "allow": ["codify_render_check_settled"] }
+    },
+    {
       "identifier": "allow-codify-software-rendering",
       "description": "Reports whether this shell was launched with WebKit's dma-buf path disabled, which is the one signal the page can act on before the first animation frame. Read-only, takes no argument and describes the shell's own environment — no file, no process and no other app.",
       "commands": { "allow": ["codify_software_rendering"] }
@@ -171,6 +176,7 @@
         "allow-codify-repair-agent-configs",
         "allow-codify-test-agent-connection",
         "allow-codify-render-cpu-ms",
+        "allow-codify-render-check-settled",
         "allow-codify-software-rendering",
         "allow-codify-boot-id",
         "allow-codify-terminal-open",
