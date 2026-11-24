@@ -1254,3 +1254,27 @@ export interface ClearedHistory {
   files_touched: false;
   scrubbed: boolean;
 }
+
+/** One consistent SQLite snapshot written by `POST /state/backup`. */
+export interface StateBackupEntry {
+  filename: string;
+  path: string;
+  size_bytes: number;
+  created_at: number;
+}
+
+/** A validated backup staged at `<db_path>.restore` to swap in on the next start. */
+export interface PendingStateRestore {
+  source: string;
+  size_bytes: number;
+  staged_at: number;
+}
+
+/** `GET /state/backup`: live store size, saved snapshots, and any staged next-start restore. */
+export interface StateBackupStatus {
+  db_path: string;
+  db_bytes: number;
+  backups_dir: string;
+  backups: StateBackupEntry[];
+  pending_restore: PendingStateRestore | null;
+}

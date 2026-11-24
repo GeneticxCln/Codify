@@ -58,6 +58,9 @@ async function withSessionsPane(
       const parsed = typeof init?.body === "string" ? JSON.parse(init.body) : null;
       calls.push({ method, path: url.pathname, body: parsed });
       if (method === "GET" && url.pathname === "/settings/engine") return json(SESSION_SETTINGS);
+      if (method === "GET" && url.pathname === "/state/backup") {
+        return json({ db_path: "/tmp/codify.db", db_bytes: 0, backups_dir: "/tmp/backups", backups: [], pending_restore: null });
+      }
       if (method === "POST" && url.pathname === "/history/clear") return postClear(parsed);
       throw new Error(`unexpected ${method} ${url.pathname}`);
     }) as typeof fetch;

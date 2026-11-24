@@ -2456,3 +2456,43 @@ export async function clearAllHistory(confirm: string): Promise<ClearedHistory> 
   if (!res.ok) throw await engineError(res, "Could not delete history");
   return res.json();
 }
+
+// ── state backup and next-start restore (engine/backup.py) ──────────────────────────────────────────────────────────
+
+export async function fetchStateBackupStatus(): Promise<import("./types").StateBackupStatus> {
+  const res = await engineFetch("/state/backup");
+  if (!res.ok) throw await engineError(res, "Could not read backup status");
+  return res.json();
+}
+
+export async function createStateBackup(): Promise<import("./types").StateBackupEntry> {
+  const res = await engineFetch("/state/backup", { method: "POST" });
+  if (!res.ok) throw await engineError(res, "Could not back up Codify state");
+  return res.json();
+}
+
+export async function downloadStateBackup(filename: string): Promise<Blob> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/state/backup/${encodeURIComponent(filename)}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Could not download backup");
+  return res.blob();
+}
+
+export async function stageStateRestore(
+  request: { filename: string } | { data_base64: string; source_name?: string },
+): Promise<import("./types").PendingStateRestore> {
+  const res = await engineFetch("/state/restore", {
+    method: "POST",
+    body: JSON.stringify(request),
+  });
+  if (!res.ok) throw await engineError(res, "Could not stage backup for restore");
+  return res.json();
+}
+
+export async function cancelStateRestore(): Promise<{ cancelled: boolean }> {
+  const res = await engineFetch("/state/restore", { method: "DELETE" });
+  if (!res.ok) throw await engineError(res, "Could not cancel staged restore");
+  return res.json();
+}

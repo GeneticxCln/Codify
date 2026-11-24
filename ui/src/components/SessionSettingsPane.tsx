@@ -6,6 +6,7 @@ import type { ClearedHistory, EngineSettings } from "../types.ts";
 import { readRejection } from "../rejection.ts";
 import { Checkbox } from "./ui/Checkbox";
 import { ClearHistoryCard } from "./ClearHistoryCard.tsx";
+import { StateBackupCard } from "./StateBackupCard.tsx";
 
 export interface SessionSettingsPaneProps {
   onHistoryCleared?: (result: ClearedHistory) => void;
@@ -165,6 +166,8 @@ export const SessionSettingsPane: React.FC<SessionSettingsPaneProps> = ({ onHist
           </div>
         )}
       </div>
+
+      <StateBackupCard />
 
       <ClearHistoryCard onCleared={onHistoryCleared} />
     </div>

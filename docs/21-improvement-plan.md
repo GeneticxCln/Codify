@@ -135,9 +135,23 @@ Tracked in execution order (`0 → 10`), one change per PR, under three standing
 | 2 | OpenCode Console provider | **Built** (`opencode` built-in provider + live model discovery) |
 | 3 | "Delete all history" in Settings | **In review** (`POST /history/clear` with typed confirmation + `VACUUM` scrub, PR #137) |
 | 4 | Context inspector + record-next-turn toggle | **Built in this change** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
-| 5 | Backup and restore of Codify's state | Planned (consistent SQLite backup copy + staged restore on next start; keyring secrets excluded) |
+| 5 | Backup and restore of Codify's state | **Built in this change** (`/state/backup` and `/state/restore`, `StateBackupCard.tsx`; §6) |
 | 6 | Per-project usage | Planned (`workspace_id` filter on `/stats/overview` + project picker on Stats, tokens only) |
 | 7 | Provider health | Planned (background reachability/auth/latency check per configured provider, status dot in Settings, down notification, respects offline mode) |
 | 8 | Replay from the app | Planned (`Replay` action on recorded goals running `ReplayProvider` in a scratch tree and reporting match vs divergence) |
 | 9 | Offline switch | Planned (single setting restricting chat/roles to local endpoints and disabling web fetch, MCP, update checks and provider-health pings) |
 | 10 | App-wide audit view | Planned (cross-project list of agent commits, touched files and goals built from persisted per-goal audit events) |
+
+## 6. State backup and restore
+
+- **Status: built in this change** (`engine/backup.py`, `/state/backup` and `/state/restore` routes in `engine/app.py`,
+  `apply_pending_restore` in `engine/db.py`, `ui/src/components/StateBackupCard.tsx` in Settings → Sessions).
+- Online backups use `sqlite3.Connection.backup` so a snapshot taken while the engine is serving WAL writes is
+  point-in-time consistent and stored mode `0600` under `<state_dir>/backups/`.
+- Restores validate SQLite header, integrity (`PRAGMA quick_check`), required Codify tables and `SCHEMA_VERSION`, stage
+  `<db_path>.restore`, and swap in at the start of the next `db.connect` after clearing stale `-wal`/`-shm` sidecars.
+  Keyring / `secrets.json` credentials are never included or overwritten.
+- Snapshots are manual and retained until a person removes them; the engine does not prune them, and `POST /history/clear`
+  does not touch `<state_dir>/backups/`.
+- A scheduled rolling-copy design is not part of this change; it would need to be reconciled with this module before it is
+  built.

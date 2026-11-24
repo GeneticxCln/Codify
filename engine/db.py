@@ -641,6 +641,8 @@ def connect(
         db_path.parent.mkdir(parents=True, exist_ok=True)
     if db_path.is_dir():
         raise RuntimeError(f"database path is a directory: {db_path}")
+    from engine.backup import apply_pending_restore
+    apply_pending_restore(db_path, max_schema_version=SCHEMA_VERSION)
     home.ensure_private_file(db_path)
     conn = sqlite3.connect(
         db_path, check_same_thread=False, factory=_PerThreadConnection,

@@ -482,6 +482,15 @@ export async function withApp(
         policy: { injection_block_threshold: 0.8, risk_warn_level: 3, clarify_warn_threshold: 0.6 },
       });
     }
+    if (path === "/state/backup" && method === "GET") {
+      return respond({
+        db_path: "/home/me/.codify/codify.db",
+        db_bytes: 65536,
+        backups_dir: "/home/me/.codify/backups",
+        backups: [],
+        pending_restore: null,
+      });
+    }
     if (path === "/settings/runtime") {
       return respond({
         interpreter: {
