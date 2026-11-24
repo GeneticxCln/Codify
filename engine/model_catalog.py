@@ -24,6 +24,7 @@ from __future__ import annotations
 import asyncio
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -33,6 +34,7 @@ import httpx
 from engine.models import BUILTIN_PROVIDERS
 from engine.providers import (
     ProviderError,
+    is_local_endpoint,
     trusts_proxy_env,
     key_destination_problem,
     redact_secrets,
@@ -74,6 +76,11 @@ class DiscoveryResult:
     ok: bool
     models: list[dict[str, Any]] = field(default_factory=list)
     error: str | None = None
+    reachable: bool = False
+    auth_ok: bool | None = None
+    latency_ms: int | None = None
+    checked_at: float = field(default_factory=time.time)
+    offline_skipped: bool = False
 
     def to_payload(self) -> dict[str, Any]:
         return {
@@ -82,6 +89,11 @@ class DiscoveryResult:
             "ok": self.ok,
             "count": len(self.models),
             "error": self.error,
+            "reachable": self.reachable,
+            "auth_ok": self.auth_ok,
+            "latency_ms": self.latency_ms,
+            "checked_at": self.checked_at,
+            "offline_skipped": self.offline_skipped,
         }
 
 
@@ -468,25 +480,41 @@ DISCOVERERS = {
 
 
 async def discover_provider(
-    target: ProviderTarget, *, client: httpx.AsyncClient | None = None
+    target: ProviderTarget,
+    *,
+    client: httpx.AsyncClient | None = None,
+    offline: bool = False,
 ) -> DiscoveryResult:
     """Query one provider. Never raises: an unusable provider is a reported one."""
+    if offline and target.base_url and not is_local_endpoint(target.base_url):
+        return DiscoveryResult(
+            target.provider,
+            target.protocol,
+            ok=False,
+            error="offline mode — remote check paused",
+            reachable=False,
+            auth_ok=None,
+            latency_ms=None,
+            offline_skipped=True,
+        )
     if target.needs_key and not target.api_key:
         return DiscoveryResult(
             target.provider,
             target.protocol,
             ok=False,
             error="no API key configured for this provider",
+            reachable=False,
+            auth_ok=False,
         )
     # Discovery attaches the key to `/models` the same way a generation call does, so it is
     # held to the same rule; the refusal is reported, and nothing is requested.
     if target.api_key:
         problem = key_destination_problem(target.base_url)
         if problem is not None:
-            return DiscoveryResult(target.provider, target.protocol, ok=False, error=problem)
+            return DiscoveryResult(target.provider, target.protocol, ok=False, error=problem, reachable=False)
     if not target.base_url:
         return DiscoveryResult(
-            target.provider, target.protocol, ok=False, error="no base_url configured"
+            target.provider, target.protocol, ok=False, error="no base_url configured", reachable=False
         )
     if target.protocol == "ollama":
         # Invariant 5 (docs/00 §6.5): a local provider's base_url passes `validate_local_base_url` before every
@@ -494,11 +522,11 @@ async def discover_provider(
         try:
             validate_local_base_url(target.base_url)
         except ProviderError as exc:
-            return DiscoveryResult(target.provider, target.protocol, ok=False, error=exc.message)
+            return DiscoveryResult(target.provider, target.protocol, ok=False, error=exc.message, reachable=False)
     discoverer = DISCOVERERS.get(target.protocol)
     if discoverer is None:
         return DiscoveryResult(
-            target.provider, target.protocol, ok=False, error=f"unknown protocol {target.protocol!r}"
+            target.provider, target.protocol, ok=False, error=f"unknown protocol {target.protocol!r}", reachable=False
         )
 
     owns_client = client is None
@@ -506,21 +534,38 @@ async def discover_provider(
         client = httpx.AsyncClient(
             timeout=DISCOVERY_TIMEOUT_S, trust_env=trusts_proxy_env(target.base_url)
         )
+    started = time.monotonic()
     try:
         models = await asyncio.wait_for(
             discoverer(target, client), timeout=DISCOVERY_TIMEOUT_S
         )
     except asyncio.TimeoutError:
+        elapsed = int(round((time.monotonic() - started) * 1000))
         return DiscoveryResult(
-            target.provider, target.protocol, ok=False, error=f"timed out after {DISCOVERY_TIMEOUT_S:.0f}s"
+            target.provider,
+            target.protocol,
+            ok=False,
+            error=f"timed out after {DISCOVERY_TIMEOUT_S:.0f}s",
+            reachable=False,
+            auth_ok=None,
+            latency_ms=elapsed,
         )
     except httpx.HTTPStatusError as exc:
+        elapsed = int(round((time.monotonic() - started) * 1000))
         status = exc.response.status_code
-        hint = " (check the API key)" if status in (401, 403) else ""
+        is_auth = status in (401, 403)
+        hint = " (check the API key)" if is_auth else ""
         return DiscoveryResult(
-            target.provider, target.protocol, ok=False, error=f"HTTP {status}{hint}"
+            target.provider,
+            target.protocol,
+            ok=False,
+            error=f"HTTP {status}{hint}",
+            reachable=True,
+            auth_ok=False if is_auth else None,
+            latency_ms=elapsed,
         )
     except Exception as exc:
+        elapsed = int(round((time.monotonic() - started) * 1000))
         # An exception's text can carry the request it died on: httpx names the whole header value
         # when it refuses one, and a key saved with a trailing newline is exactly that. The key is
         # redacted as written and as a repr would spell it (`\n` for a newline), then by shape.
@@ -531,15 +576,27 @@ async def discover_provider(
             target.protocol,
             ok=False,
             error=redact_secrets(f"{type(exc).__name__}: {exc}", known),
+            reachable=False,
+            auth_ok=None,
+            latency_ms=elapsed,
         )
     finally:
         if owns_client:
             await client.aclose()
 
+    elapsed = int(round((time.monotonic() - started) * 1000))
     for m in models:
         m["provider"] = target.provider
         m["protocol"] = target.protocol
-    return DiscoveryResult(target.provider, target.protocol, ok=True, models=models)
+    return DiscoveryResult(
+        target.provider,
+        target.protocol,
+        ok=True,
+        models=models,
+        reachable=True,
+        auth_ok=True,
+        latency_ms=elapsed,
+    )
 
 
 # ── target selection ────────────────────────────────────────────────────────
@@ -670,11 +727,13 @@ class ModelCatalogService:
         keychain: Any,
         ttl_s: float = DEFAULT_TTL_S,
         transport: httpx.AsyncBaseTransport | None = None,
+        is_offline: Callable[[], bool] | None = None,
     ):
         self._registry = registry
         self._keychain = keychain
         self._ttl_s = ttl_s
         self._transport = transport
+        self._is_offline = is_offline
         self._cache: dict[str, Any] | None = None
         self._cached_at = 0.0
         self._generation = 0
@@ -688,6 +747,7 @@ class ModelCatalogService:
 
             gen = self._generation
             targets = _targets(self._registry, self._keychain)
+            offline = bool(self._is_offline and self._is_offline())
             try:
                 if self._transport is not None:
                     # A test's transport answers for everyone, so one client serves all the targets.
@@ -695,12 +755,14 @@ class ModelCatalogService:
                         timeout=DISCOVERY_TIMEOUT_S, transport=self._transport
                     ) as client:
                         results = await asyncio.gather(
-                            *(discover_provider(t, client=client) for t in targets)
+                            *(discover_provider(t, client=client, offline=offline) for t in targets)
                         )
                 else:
                     # Each target builds its own client, because whether the environment's proxy may be
                     # used depends on where that target is (`trusts_proxy_env`).
-                    results = await asyncio.gather(*(discover_provider(t) for t in targets))
+                    results = await asyncio.gather(
+                        *(discover_provider(t, offline=offline) for t in targets)
+                    )
             except asyncio.CancelledError:
                 raise
             except Exception:

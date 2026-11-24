@@ -1,7 +1,7 @@
 import { PAUSE_HEADINGS, isPauseCode } from "./pauseReason.ts";
 import { providerLabel } from "./providerLabels.ts";
 import type { EngineState } from "./statusTone.ts";
-import type { Event, Goal, ModelCatalogChanged, SettingsTab } from "./types.ts";
+import type { Event, Goal, ModelCatalogChanged, ProviderHealthChanged, SettingsTab } from "./types.ts";
 
 /**
  * Notifications: what happened while you were looking at something else.
@@ -404,6 +404,64 @@ export function catalogNotification(payload: unknown, now: number): AppNotificat
     tone: "info",
     title: "Model list changed",
     detail: clip(more > 0 ? `${shown.join(" · ")} · and ${more} more` : shown.join(" · "), MAX_DETAIL),
+    at: now,
+    read: false,
+    target: { kind: "settings", tab: "keys" },
+  };
+}
+
+/**
+ * A configured provider went down (or came back up) between two background health sweeps.
+ * Returns `null` when nothing transitioned or the payload is malformed.
+ */
+export function providerHealthNotification(payload: unknown, now: number): AppNotification | null {
+  if (!payload || typeof payload !== "object") return null;
+  const body = payload as Partial<ProviderHealthChanged>;
+  const down = Array.isArray(body.down)
+    ? body.down.filter((d): d is { provider: string; error?: string | null; auth_ok?: boolean | null } => Boolean(d && typeof d.provider === "string" && d.provider.trim()))
+    : [];
+  const recovered = Array.isArray(body.recovered)
+    ? body.recovered.filter((r): r is { provider: string; latency_ms?: number | null } => Boolean(r && typeof r.provider === "string" && r.provider.trim()))
+    : [];
+  if (down.length === 0 && recovered.length === 0) return null;
+  const fetched =
+    typeof body.fetched_at === "number" && Number.isFinite(body.fetched_at)
+      ? body.fetched_at
+      : Math.floor(now / 1000);
+  if (down.length > 0) {
+    const names = down.map((d) => providerLabel(d.provider) || d.provider);
+    const title =
+      down.length === 1
+        ? `${names[0]} is unreachable`
+        : `${down.length} providers went down`;
+    const first = down[0];
+    const reason =
+      down.length === 1
+        ? first.error || (first.auth_ok === false ? "Authentication failed (check API key)" : "Provider did not answer")
+        : down
+            .slice(0, 3)
+            .map((d) => `${providerLabel(d.provider) || d.provider}: ${d.error || "unreachable"}`)
+            .join(" · ");
+    return {
+      id: `provider-down:${fetched}:${down.map((d) => d.provider).sort().join(",")}`,
+      kind: "engine",
+      tone: "danger",
+      title: clip(title, MAX_TITLE),
+      detail: clip(reason, MAX_DETAIL),
+      at: now,
+      read: false,
+      target: { kind: "settings", tab: "keys" },
+    };
+  }
+  const names = recovered.map((r) => providerLabel(r.provider) || r.provider);
+  const title =
+    recovered.length === 1 ? `${names[0]} is back` : `${recovered.length} providers recovered`;
+  return {
+    id: `provider-up:${fetched}:${recovered.map((r) => r.provider).sort().join(",")}`,
+    kind: "engine",
+    tone: "success",
+    title: clip(title, MAX_TITLE),
+    detail: clip(names.join(", "), MAX_DETAIL),
     at: now,
     read: false,
     target: { kind: "settings", tab: "keys" },
