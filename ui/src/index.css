@@ -412,11 +412,18 @@ body {
 }
 .cyber-veil {
   bottom: -3px;
-  background-image: repeating-linear-gradient(
+  /* A tiled 2-stop gradient, not `repeating-linear-gradient`. A 3px repeating
+     gradient across a 2x HiDPI window expands to ~938 stops in Cairo-backed
+     WebKitGTK (AppImage), pinning `WebKitWebProcess` at 100% CPU even under
+     `motion=reduced` and adding +23% CPU on Skia WebKitGTK. Tiling one 3px
+     tile renders identically in O(1) stops. */
+  background-image: linear-gradient(
     to bottom,
     rgb(var(--cyber-scan-rgb) / 0.55) 0 1px,
     transparent 1px 3px
   );
+  background-size: 100% 3px;
+  background-repeat: repeat;
   animation: cyber-roll 9s steps(3, end) infinite;
 }
 @media (prefers-reduced-motion: reduce) {

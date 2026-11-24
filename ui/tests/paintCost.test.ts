@@ -70,3 +70,17 @@ test("the wordmark sweeps a counted number of times and then rests", () => {
   assert.match(rule[1], /^codify-wordmark-sweep\s+\S+\s+\S+\s+\d+$/, rule[1]);
   assert.doesNotMatch(rule[1], /infinite/);
 });
+
+test("no stylesheet rule uses repeating-linear-gradient over a full-window layer", () => {
+  // Measured on 2026-11-24: a 3px repeating-linear-gradient on `.cyber-veil` expanded to ~938
+  // color stops at 2x HiDPI, pinning Ubuntu 22.04 Cairo WebKitGTK (AppImage) at 100% CPU even
+  // under `motion=reduced` and adding +23% CPU on Skia WebKitGTK 2.54.3. A 2-stop
+  // `linear-gradient` tiled with `background-size: 100% 3px` renders identically in O(1) stops.
+  assert.doesNotMatch(
+    CSS,
+    /repeating-linear-gradient\s*\(/,
+    "repeating-linear-gradient expands to hundreds of stops in Cairo WebKitGTK; tile a plain linear-gradient with background-size instead",
+  );
+  assert.match(CSS, /\.cyber-veil\s*\{[^}]*background-image:\s*linear-gradient\(/);
+  assert.match(CSS, /\.cyber-veil\s*\{[^}]*background-size:\s*100%\s+3px/);
+});
