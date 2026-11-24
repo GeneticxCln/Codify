@@ -80,7 +80,7 @@ export const BOOT_ID_COMMAND = "codify_boot_id";
  * mounts. A shell that does not answer by then leaves the per-page id in place,
  * which only means a stored verdict is not trusted for this launch.
  */
-export const BOOT_ID_TIMEOUT_MS = 1_500;
+export const BOOT_ID_TIMEOUT_MS = 300;
 
 /** `promise`, or `fallback` after `ms` — whichever comes first; the timer is cleared either way. */
 export async function within<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {

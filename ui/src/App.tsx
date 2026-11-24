@@ -52,6 +52,7 @@ import {
   patchStep,
   getEngineInfo,
   setEngineInfo,
+  underShell,
   resyncEngineInfoFromStorage,
   tauriInvoke,
   browseWorkspace,
@@ -911,10 +912,11 @@ export const App: React.FC = () => {
         if (cancelled) return;
         if (fromShell) {
           // A different engine is a different set of configured providers, so
-          // the two loads the recovery path below already makes are made here
+          // the loads the recovery path below already makes are made here
           // too — once, because this only answers when the pair *changed*.
           loadWorkspacesRef.current?.();
           loadModelsRef.current?.(true);
+          loadModelSignalsRef.current?.();
         }
         let health = await checkEngineHealth();
         if (cancelled) return;
@@ -940,6 +942,7 @@ export const App: React.FC = () => {
             // A fresh token may point at a different engine (and therefore a
             // different set of configured providers) — re-discover its models.
             loadModelsRef.current?.(true);
+            loadModelSignalsRef.current?.();
             // Connection info changed — re-probe right away with the new token.
             health = await checkEngineHealth();
             if (cancelled) return;
@@ -989,11 +992,18 @@ export const App: React.FC = () => {
       tauriInvoke<EngineInfo>("codify_get_engine_info")
         .then((info) => {
           if (cancelled) return;
+          const prev = getEngineInfo();
+          const changed = info.token !== prev.token || info.port !== prev.port;
           setEngineInfo(info);
-          // Engine just became reachable — re-read workspaces now that the
-          // real token/port are set (clears the startup failure banner).
-          loadWorkspacesRef.current?.();
-          loadModelsRef.current?.(true);
+          // Only trigger boot reads when this call actually adopted a new engine
+          // handshake — `probe()` above also calls `refreshEngineInfoFromIpc()` on
+          // mount, and firing both caused duplicate `/workspaces` + `/models?refresh=true`
+          // discovery storms on every launch.
+          if (changed) {
+            loadWorkspacesRef.current?.();
+            loadModelsRef.current?.(true);
+            loadModelSignalsRef.current?.();
+          }
         })
         .catch(async () => {
           if (cancelled) return;
@@ -1161,6 +1171,11 @@ export const App: React.FC = () => {
   }, [loadModelSignals]);
 
   useEffect(() => {
+    // Under the desktop shell before the engine handshake arrives, `token` is
+    // empty; issuing unauthenticated requests immediately only produces a boot
+    // error flash and duplicates the reads triggered as soon as `codify_get_engine_info`
+    // resolves above. Standalone browser previews have no shell IPC and load right away.
+    if (underShell() && !getEngineInfo().token) return;
     loadWorkspacesRef.current?.();
     // refresh=true on open: "what does each provider serve right now" is not a
     // question worth caching across app launches.

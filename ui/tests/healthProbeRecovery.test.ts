@@ -274,3 +274,25 @@ test("a dead port makes the probe ask the shell, apply the moved pair, and go li
     delete (globalThis as unknown as Record<string, unknown>).__TAURI_EVENT_PLUGIN_INTERNALS__;
   }
 });
+
+test("booting under the shell does not double-fire /models?refresh=true or /workspaces", async () => {
+  const { withApp } = await import("./appHarness.ts");
+  const { setEngineInfo } = await import("../src/api.ts");
+  // Simulate a fresh desktop shell boot before the handshake token has arrived.
+  setEngineInfo({ port: 7430, token: "" });
+  await withApp({}, async ({ engine, settle }) => {
+    await settle();
+    const modelRefreshCalls = engine.filter((c) => c.path === "/models" && c.url.includes("refresh=true"));
+    const workspaceCalls = engine.filter((c) => c.path === "/workspaces" && c.method === "GET");
+    assert.equal(
+      modelRefreshCalls.length,
+      1,
+      `expected 1 boot /models?refresh=true call, got ${modelRefreshCalls.length}`,
+    );
+    assert.equal(
+      workspaceCalls.length,
+      1,
+      `expected 1 boot GET /workspaces call, got ${workspaceCalls.length}`,
+    );
+  });
+});
