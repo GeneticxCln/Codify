@@ -657,7 +657,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/state/backup` | — | `{db_path, db_bytes, backups_dir, backups[], pending_restore}` (`engine/backup.py`, §8.3) |
 | `POST` | `/state/backup` | — | writes a consistent single-file snapshot into `<state_dir>/backups/` via `sqlite3.Connection.backup` (`{filename, path, size_bytes, created_at}`); 422 `invalid_backup` |
 | `GET` | `/state/backup/{filename}` | — | downloads a saved snapshot (`application/x-sqlite3`); 404 `unknown_backup`, 422 `invalid_backup` |
-| `POST` | `/state/restore` | `{filename}` or `{data_base64, source_name?}` extra=forbid | validates SQLite header, integrity, required Codify tables and schema version, then stages `<db_path>.restore` for swap-in on the next engine start (`{source, size_bytes, staged_at}`); 404 `unknown_backup`, 409 `newer_schema`, 422 `invalid_backup` |
+| `POST` | `/state/restore` | `{filename}` or `{data_base64, source_name?}` extra=forbid | validates SQLite header, integrity, required Codify tables, schema version and that it holds no trigger or view, then stages `<db_path>.restore` for swap-in on the next engine start (`{source, size_bytes, staged_at}`); 404 `unknown_backup`, 409 `newer_schema`, 422 `invalid_backup` |
 | `DELETE` | `/state/restore` | — | cancels any staged `<db_path>.restore` (`{cancelled}`); idempotent |
 | `PUT` | `/workspaces/{id}/design-contract` | `{path}` extra=forbid (`""` unpins) | `Workspace`. 400 `design_contract_escape` (outside the root), `design_contract_missing` (no such file / a directory), `design_contract_binary`, `design_contract_unreadable`. Refused means untouched |
 | `GET` | `/workspaces/{id}/files?limit=` | `limit` 1–10 000, default 5 000 | `{files, truncated, limit}`, plus `non_utf8_names` only when it is not zero (names that are not valid UTF-8 text, left out and counted; the route is sent with `response_model_exclude_defaults=True`, so an ordinary workspace's body is byte-identical) — every file path under the root, sorted, skipping `SKIP_DIRS` and links out of the workspace. See §3.0.3 and §4.0 |
@@ -2561,6 +2561,14 @@ consistent online snapshot of `codify.db` into `<state_dir>/backups/` via `sqlit
 single rollback-journal file) and stage a validated snapshot at `<db_path>.restore` to swap in at the start of
 `db.connect` on the next launch (unlinking stale `-wal`/`-shm` files before opening). API keys live in the OS keyring
 (or `secrets.json`) and are excluded from both backup and restore.
+
+**A restore brings back data, never behaviour.** Codify's store holds tables and indexes and nothing else, so a file that
+carries a trigger or a view is refused (`422 invalid_backup`, naming it), on upload and again at the next start for a
+file placed at `<db_path>.restore` directly. A trigger is SQL that runs inside the engine on every matching write:
+reproduced, a backup that passed every other check here carried one that re-pointed every role at another endpoint on
+each new turn, and again after the person fixed it in Settings. That is agent configuration written by something other
+than the settings routes (docs/00 §6.2), and the endpoint would be handed the role's stored key.
+`tests/test_state_backup.py` holds both doors.
 
 Snapshots are explicit restore points, not a rolling schedule: the engine does not prune them, and `POST /history/clear`
 scrubs only the live database, not `<state_dir>/backups/`. A person who needs a cleared prompt gone from an older snapshot
