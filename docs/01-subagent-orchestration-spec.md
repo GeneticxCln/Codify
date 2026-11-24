@@ -201,8 +201,9 @@ The setting is a request, not a guarantee: a model with no such control still an
 `complete_with_tools`, which until 2026-11-24 took no thinking setting at all, so no chat turn ever thought.
 `complete_with_tools` now takes the same `thinking_effort` and sends the same control per protocol. The level is
 the engine setting `conductor_thinking_effort` (empty is off), written by `PUT /settings/engine` like every
-conductor setting, read fresh for each run, and stepped from the composer's **Think** control (off, low, medium,
-high). Two things differ from a role call:
+conductor setting, read fresh for each run, and chosen from the composer's **Think** menu, which lists every level
+(Off, Low, Medium, High) with what it costs and ticks the current one (`THINKING_CHOICES`). Two things differ from a
+role call:
 
 - **Room for the budget.** Each conductor call is capped at 2048 tokens, which would clamp every level to the
   same 1024-token budget, so a thinking call adds `thinking_headroom(level)` (twice the level's budget) to its

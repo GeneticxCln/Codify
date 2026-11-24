@@ -176,14 +176,20 @@ export function conductorFallback(
 /** How hard the conductor's model thinks; "" is off (the engine sends no thinking control at all). */
 export type ThinkingLevel = "" | "low" | "medium" | "high";
 
-/** The order the composer's Think control steps through, off first. */
+/** The levels the composer's Think menu offers, off first. */
 export const THINKING_LEVELS: readonly ThinkingLevel[] = ["", "low", "medium", "high"];
 
-/** The level after `level`, wrapping back to off. Anything the engine sent that is not a level counts as off. */
-export function nextThinking(level: string): ThinkingLevel {
-  const at = THINKING_LEVELS.indexOf(level as ThinkingLevel);
-  return THINKING_LEVELS[(at + 1) % THINKING_LEVELS.length];
-}
+/**
+ * One row of the Think menu: the level, its name, and what it costs. The hints describe the trade a person makes,
+ * not a number: the token budget behind each level is the provider's (Anthropic and Gemini take one, the others a
+ * named effort), and a figure true for one would mislead for the rest.
+ */
+export const THINKING_CHOICES: ReadonlyArray<{ level: ThinkingLevel; label: string; hint: string }> = [
+  { level: "", label: "Off", hint: "No thinking control is sent; the model does what it does by default." },
+  { level: "low", label: "Low", hint: "A short think before answering. Fastest and cheapest." },
+  { level: "medium", label: "Medium", hint: "More reasoning for multi-step questions." },
+  { level: "high", label: "High", hint: "The most reasoning. Slowest, and uses the most tokens." },
+];
 
 /** What the control says: "Think" when off, "Think: high" when on. */
 export function thinkingLabel(level: string): string {
