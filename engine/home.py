@@ -35,16 +35,35 @@ import os
 import secrets
 import stat
 from pathlib import Path
+from typing import Any
 
 ENV_HOME = "CODIFY_HOME"
 ENV_DB = "CODIFY_DB"
 ENV_SECRETS = "CODIFY_SECRETS"
 ENV_BOOT_TOKEN = "CODIFY_BOOT_TOKEN"  # noqa: S105 — a variable name, not a credential
+ENV_OFFLINE = "CODIFY_OFFLINE"
 DEFAULT_DIR = ".codify"
 
 
 def _env(name: str) -> str:
     return (os.environ.get(name) or "").strip()
+
+
+def offline_env_enabled() -> bool:
+    """True when `CODIFY_OFFLINE` forces offline mode in this process."""
+    return _env(ENV_OFFLINE).lower() in ("1", "true", "yes", "on")
+
+
+def is_offline_mode(settings: Any | None = None) -> bool:
+    """Single source of truth for offline mode: `CODIFY_OFFLINE` env or the `offline_mode` engine setting."""
+    if offline_env_enabled():
+        return True
+    if settings is not None:
+        try:
+            return bool(settings.get_int("offline_mode"))
+        except Exception:
+            return False
+    return False
 
 
 def codify_home() -> Path:

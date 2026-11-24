@@ -509,7 +509,7 @@ fn checked(current: &str, package: Package) -> UpdateCheck {
 }
 
 /// An answer with nothing to download and a sentence saying why.
-fn unavailable(current: &str, package: Package, message: String) -> UpdateCheck {
+pub(crate) fn unavailable(current: &str, package: Package, message: String) -> UpdateCheck {
     let mut check = checked(current, package);
     check.message = Some(message);
     check

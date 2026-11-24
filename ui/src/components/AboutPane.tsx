@@ -199,11 +199,12 @@ const UpdatePanel: React.FC = () => {
 
   const fetch = useCallback(
     async (known: UpdateCheck) => {
+      if (offline) return;
       const entry = startOrJoinDownload(known);
       setState({ kind: "downloading", check: entry.check, progress: entry.progress });
       await follow(entry);
     },
-    [follow],
+    [follow, offline],
   );
 
   const busy = state.kind === "checking" || state.kind === "downloading";

@@ -33,7 +33,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from typing import Any
 
-from engine import github_remote
+from engine import github_remote, home
 from engine.db import row_to_dict
 from engine.models import PAUSE_REASONS, Suggestion, SuggestionKind, SuggestionList
 from engine.services import ApiError, SettingsService, WorkspaceService
@@ -489,7 +489,7 @@ class SuggestionWatch:
                 return 0
             moment = self._clock() if now is None else now
             made = await asyncio.to_thread(self._sweep_database, moment)
-            if self._settings.get_int("suggest_ci") and not self._settings.get_int("offline_mode"):
+            if self._settings.get_int("suggest_ci") and not home.is_offline_mode(self._settings):
                 made += await self._sweep_ci(moment)
             return made
 

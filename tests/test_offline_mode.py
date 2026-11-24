@@ -14,10 +14,12 @@ from __future__ import annotations
 
 from tests import hermetic  # noqa: F401 — isolated CODIFY_HOME
 
+import os
 import tempfile
 import unittest
 from pathlib import Path
 from typing import Any
+from unittest.mock import AsyncMock, patch
 
 import httpx
 from httpx import ASGITransport
@@ -230,6 +232,108 @@ class TestOfflineMode(unittest.IsolatedAsyncioTestCase):
         )
         await worker.sweep(now=1_700_000_000.0)
         self.assertEqual([], ci_calls, "CI suggestions must not contact GitHub in offline mode")
+
+    async def test_codify_offline_env_enforces_all_engine_paths_and_settings_view(self) -> None:
+        # Preserve the v1.9.0 bug: CODIFY_OFFLINE=1 was ignored by _web_policy, MCP conductor tools,
+        # read_ci, SuggestionWatch, SandboxService, and GET /settings/engine.
+        self.settings.set_int("web_fetch", MODE_ANY)
+        self.settings.set_int("suggestions", 1)
+        self.settings.set_int("suggest_ci", 1)
+        self.settings.set_int("sandbox_network", 1)
+
+        ci_calls: list[str] = []
+
+        async def fake_ci(root: str) -> dict[str, Any]:
+            ci_calls.append(root)
+            return {}
+
+        with patch.dict(os.environ, {"CODIFY_OFFLINE": "1"}):
+            r_settings = await self.client.get("/settings/engine", headers=self.headers)
+            self.assertEqual(200, r_settings.status_code, r_settings.text)
+            self.assertEqual(1, r_settings.json()["offline_mode"]["value"])
+
+            executor = ExecutorService(
+                self.goals,
+                self.workspaces,
+                self.registry,
+                SandboxService(self.settings),
+            )
+            executor.settings = self.settings
+            executor.mcp = _FakeMcp()  # type: ignore[assignment]
+            goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="env offline", description=""))
+
+            self.assertEqual(MODE_OFF, executor._web_policy().mode)
+            offered_names = {t.name for t in executor.conductor_menu(goal.id)()}
+            self.assertNotIn("fetch_page", offered_names)
+            self.assertNotIn("list_mcp_tools", offered_names)
+            self.assertNotIn("call_mcp", offered_names)
+            self.assertNotIn("read_ci", offered_names)
+
+            tools = ConductorTools(executor, goal.id, goal, str(self.ws_dir), SkillSet(skills=(), problems=(), shadows=()))
+            self.assertIn("Offline mode is on", await tools.list_mcp_tools({"server": "docs"}))
+            self.assertIn("Offline mode is on", await tools.call_mcp({"server": "docs", "tool": "search", "arguments": {}}))
+            self.assertIn("Offline mode is on", await tools.read_ci({}))
+
+            sandbox = SandboxService(self.settings)
+            self.assertFalse(sandbox._network_allowed(True))
+            self.assertFalse(sandbox._network_allowed(None))
+
+            worker = SuggestionWatch(self.conn, self.settings, self.workspaces, ci_checker=fake_ci)
+            await worker.sweep(now=1_700_000_000.0)
+            self.assertEqual([], ci_calls)
+
+    async def test_offline_mode_blocks_read_ci_workspace_ci_sandbox_and_mcp_url_change(self) -> None:
+        self.settings.set_int("sandbox_network", 1)
+        self.settings.set_int("offline_mode", 1)
+
+        # 1. Sandbox network is forced off even when goal allow_network=True or sandbox_network=1.
+        sandbox = SandboxService(self.settings)
+        self.assertFalse(sandbox._network_allowed(True))
+        self.assertFalse(sandbox._network_allowed(None))
+
+        # 2. Conductor read_ci tool is omitted from menu and refuses if called directly.
+        executor = ExecutorService(self.goals, self.workspaces, self.registry, sandbox)
+        executor.settings = self.settings
+        goal = self.goals.create(GoalCreate(workspace_id=self.ws.id, title="ci offline", description=""))
+        offered_names = {t.name for t in executor.conductor_menu(goal.id)()}
+        self.assertNotIn("read_ci", offered_names)
+        tools = ConductorTools(executor, goal.id, goal, str(self.ws_dir), SkillSet(skills=(), problems=(), shadows=()))
+        with patch("engine.github_remote.read_checks", new_callable=AsyncMock) as mock_checks:
+            msg = await tools.read_ci({})
+            self.assertIn("Offline mode is on", msg)
+            mock_checks.assert_not_awaited()
+
+            # 3. GET /workspaces/{id}/ci must not contact GitHub when offline.
+            r_ci = await self.client.get(f"/workspaces/{self.ws.id}/ci", headers=self.headers)
+            self.assertEqual(200, r_ci.status_code, r_ci.text)
+            self.assertEqual("unknown", r_ci.json()["state"])
+            self.assertIn("offline", str(r_ci.json().get("reason") or "").lower())
+            mock_checks.assert_not_awaited()
+
+        # 4. PUT /settings/mcp/{id} changing URL must be refused offline (no DNS lookup),
+        #    while toggling enabled=False locally stays allowed.
+        self.conn.execute(
+            "INSERT INTO mcp_servers "
+            "(id, name, url, auth_kind, auth_header, api_key_ref, protocol_version, server_name, "
+            " enabled, last_probe_at, last_probe_error, created_at, updated_at) "
+            "VALUES ('srv-1', 'Docs', 'https://mcp.example.com/mcp', 'none', '', '', '', '', 1, NULL, NULL, 1.0, 1.0)"
+        )
+        self.conn.commit()
+        r_url = await self.client.put(
+            "/settings/mcp/srv-1",
+            headers=self.headers,
+            json={"url": "https://other.example.com/mcp"},
+        )
+        self.assertEqual(409, r_url.status_code, r_url.text)
+        self.assertEqual("offline_mode", r_url.json()["code"])
+
+        r_disable = await self.client.put(
+            "/settings/mcp/srv-1",
+            headers=self.headers,
+            json={"enabled": False},
+        )
+        self.assertEqual(200, r_disable.status_code, r_disable.text)
+        self.assertFalse(r_disable.json()["enabled"])
 
 
 if __name__ == "__main__":

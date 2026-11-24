@@ -236,15 +236,7 @@ def _claim_state_lock() -> tuple[int | None, bool]:
 
 def _is_offline_mode(settings: SettingsService | None) -> bool:
     """True when offline mode is active (CODIFY_OFFLINE env or the offline_mode engine setting)."""
-    env = (os.environ.get("CODIFY_OFFLINE") or "").strip().lower()
-    if env in ("1", "true", "yes", "on"):
-        return True
-    if settings is not None and "offline_mode" in SettingsService.SPEC:
-        try:
-            return bool(settings.get_int("offline_mode"))
-        except Exception:
-            return False
-    return False
+    return home.is_offline_mode(settings)
 
 
 @asynccontextmanager
@@ -1661,6 +1653,16 @@ async def create_mcp_server(body: McpServerCreate, request: Request) -> dict[str
 async def update_mcp_server(
     server_id: str, body: McpServerUpdate, request: Request
 ) -> dict[str, Any]:
+    if _is_offline_mode(getattr(request.app.state, "settings", None)):
+        svc = _mcp_service(request)
+        if body.url is not None:
+            current = svc.get(server_id)
+            if body.url.strip() != str(current.get("url") or "").strip():
+                raise ApiError(
+                    409,
+                    "offline_mode",
+                    "Offline mode is on — changing an MCP server URL requires DNS resolution and is disabled.",
+                )
     return await _mcp_service(request).update(server_id, body)
 
 
@@ -1836,6 +1838,8 @@ async def get_engine_settings(request: Request) -> dict[str, Any]:
         key: {"value": settings.get_int(key), "min": low, "max": high}
         for key, (low, high) in ENGINE_INT_SETTINGS.items()
     }
+    if "offline_mode" in out and home.offline_env_enabled():
+        out["offline_mode"]["value"] = 1
     out.update({
         # A string setting has no band to clamp into, so it carries the length it
         # accepts instead — the one bound a free-text field can be wrong about.
@@ -2153,6 +2157,11 @@ async def get_workspace_ci(workspace_id: str, request: Request) -> WorkspaceChec
     """
     workspaces: WorkspaceService = request.app.state.workspaces
     workspace = workspaces.get(workspace_id)
+    if _is_offline_mode(getattr(request.app.state, "settings", None)):
+        return WorkspaceChecks(
+            state="unknown",
+            reason="Offline mode is on — GitHub CI checks are paused.",
+        )
     return WorkspaceChecks(**await github_remote.read_checks(workspace.root_path))
 
 

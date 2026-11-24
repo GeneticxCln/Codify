@@ -12,6 +12,7 @@ import json
 from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any, cast
 
+from engine import home
 from engine.chat_prompts import CHAT_SYSTEM_PROMPT, CONDUCTOR_SYSTEM_PROMPT
 from engine.compaction import (
     COMPACTION_SYSTEM_PROMPT,
@@ -599,6 +600,10 @@ class _Conduct(_Plan):
         """Read the person's browser-action permission fresh; any missing/broken setting means off."""
         return self._settings_int("browser_actions", 0) == 1
 
+    def _offline_mode(self) -> bool:
+        """True when offline mode is active via either `CODIFY_OFFLINE` or `offline_mode`."""
+        return home.is_offline_mode(getattr(self, "settings", None))
+
     def _web_policy(self) -> FetchPolicy:
         """What the person allowed `fetch_page` to do, read fresh each time and never wider than stored.
 
@@ -607,7 +612,7 @@ class _Conduct(_Plan):
         failed" must not mean "yes". A row that cannot be parsed is unset, which is the default (any public
         site), and so is no row at all: that is what a fresh install has.
         """
-        if self._settings_int("offline_mode", 0) == 1:
+        if self._offline_mode():
             return FetchPolicy(mode=MODE_OFF, hosts=())
         mode = self._settings_int("web_fetch", MODE_OFF)
         settings = getattr(self, "settings", None)
@@ -867,6 +872,8 @@ class _Conduct(_Plan):
             # A tool that can only say "turned off" is a slot a small model spends a call finding that out.
             if not self._web_policy().offered:
                 offered = [t for t in offered if t.name != FETCH_PAGE.name]
+            if self._offline_mode():
+                offered = [t for t in offered if t.name != "read_ci"]
             # Remote MCP tools are offered only when Settings admits a tool this
             # run may call: a read tool on any turn, an act tool only while the
             # goal's stored status is RUNNING. A tool the stored rows do not admit
@@ -874,7 +881,7 @@ class _Conduct(_Plan):
             mcp = getattr(self, "mcp", None)
             if (
                 mcp is not None
-                and self._settings_int("offline_mode", 0) != 1
+                and not self._offline_mode()
                 and mcp.has_admitted_tools(
                     goal.status == "RUNNING" and not goal.dry_run and not goal.plan_only
                 )

@@ -1482,6 +1482,48 @@ async fn codify_browser_devtools_available() -> Result<bool, String> {
     Ok(browser::devtools_available())
 }
 
+/// Whether a `CODIFY_OFFLINE` value enables offline mode (mirrors `engine.home.offline_env_enabled`).
+fn parse_offline_env(raw: Option<&str>) -> bool {
+    matches!(
+        raw.unwrap_or("").trim().to_ascii_lowercase().as_str(),
+        "1" | "true" | "yes" | "on"
+    )
+}
+
+/// Read `offline_mode.value == 1` from an engine `/settings/engine` JSON document.
+fn parse_offline_setting(doc: &serde_json::Value) -> bool {
+    doc.get("offline_mode")
+        .and_then(|entry| entry.get("value"))
+        .and_then(|v| v.as_i64())
+        .is_some_and(|v| v == 1)
+}
+
+/// Whether offline mode is active in this shell: `CODIFY_OFFLINE` env or the running engine's `offline_mode` setting.
+async fn is_offline_mode(state: &SharedEngineState, http: &reqwest::Client) -> bool {
+    if parse_offline_env(std::env::var("CODIFY_OFFLINE").ok().as_deref()) {
+        return true;
+    }
+    let Ok((base, token)) = engine_url(state).await else {
+        return false;
+    };
+    let Ok(resp) = http
+        .get(format!("{base}/settings/engine"))
+        .bearer_auth(&token)
+        .timeout(std::time::Duration::from_secs(2))
+        .send()
+        .await
+    else {
+        return false;
+    };
+    if !resp.status().is_success() {
+        return false;
+    }
+    resp.json::<serde_json::Value>()
+        .await
+        .map(|doc| parse_offline_setting(&doc))
+        .unwrap_or(false)
+}
+
 /// Is there a newer release of Codify, and is there a package this install can use?
 ///
 /// The deciding lives in `update.rs`, which is pure enough to be tested; this is the
@@ -1489,9 +1531,21 @@ async fn codify_browser_devtools_available() -> Result<bool, String> {
 /// because "I could not reach GitHub" and "you are up to date" are answers the pane
 /// shows the same way, and only one of them is a bug in this app (docs/18 §4).
 #[tauri::command]
-async fn codify_update_check(app: tauri::AppHandle) -> Result<update::UpdateCheck, String> {
+async fn codify_update_check(
+    app: tauri::AppHandle,
+    state: State<'_, SharedEngineState>,
+    http: State<'_, reqwest::Client>,
+) -> Result<update::UpdateCheck, String> {
     let current = app.package_info().version.to_string();
-    Ok(update::check(&current, update::package_for_this_install()).await)
+    let package = update::package_for_this_install();
+    if is_offline_mode(&state, &http).await {
+        return Ok(update::unavailable(
+            &current,
+            package,
+            "Offline mode is on — update checks are paused.".to_string(),
+        ));
+    }
+    Ok(update::check(&current, package).await)
 }
 
 /// Download the release package for this install, into the person's downloads folder.
@@ -1506,7 +1560,14 @@ async fn codify_update_check(app: tauri::AppHandle) -> Result<update::UpdateChec
 /// GitHub announced, so the pane can draw a bar without a second request; it is emitted to every
 /// window, which is this one, and the pane's listener stops with the call that started it.
 #[tauri::command]
-async fn codify_update_download(app: tauri::AppHandle) -> Result<update::UpdateDownload, String> {
+async fn codify_update_download(
+    app: tauri::AppHandle,
+    state: State<'_, SharedEngineState>,
+    http: State<'_, reqwest::Client>,
+) -> Result<update::UpdateDownload, String> {
+    if is_offline_mode(&state, &http).await {
+        return Err("Offline mode is on — update downloads are paused.".to_string());
+    }
     let current = app.package_info().version.to_string();
     let resolved = app.path().download_dir().ok();
     let into = update::download_dir_for(resolved, std::env::var("HOME").ok())?;
@@ -4050,5 +4111,35 @@ mod tests {
                 "the stopped engine must be reaped, not left as a zombie"
             );
         });
+    }
+
+    #[test]
+    fn offline_mode_env_and_engine_setting_parsers() {
+        for truthy in ["1", "true", "TRUE", " yes ", "On"] {
+            assert!(
+                super::parse_offline_env(Some(truthy)),
+                "expected {truthy:?} to enable offline mode"
+            );
+        }
+        for falsy in [
+            None,
+            Some(""),
+            Some("0"),
+            Some("false"),
+            Some("off"),
+            Some("no"),
+        ] {
+            assert!(
+                !super::parse_offline_env(falsy),
+                "expected {falsy:?} not to enable offline mode"
+            );
+        }
+        assert!(super::parse_offline_setting(&serde_json::json!({
+            "offline_mode": {"value": 1, "min": 0, "max": 1}
+        })));
+        assert!(!super::parse_offline_setting(&serde_json::json!({
+            "offline_mode": {"value": 0, "min": 0, "max": 1}
+        })));
+        assert!(!super::parse_offline_setting(&serde_json::json!({})));
     }
 }

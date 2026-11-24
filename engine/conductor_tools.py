@@ -443,7 +443,7 @@ class ConductorTools:
         This reads the settings rows and returns text. It calls no server, so a
         listing cannot become a request the person did not admit.
         """
-        if self.service._settings_int("offline_mode", 0) == 1:
+        if self.service._offline_mode():
             return "Refused: Offline mode is on, so remote MCP servers are disabled."
         mcp = getattr(self.service, "mcp", None)
         if mcp is None:
@@ -480,7 +480,7 @@ class ConductorTools:
         while the goal's stored status is `RUNNING`, and it is announced before it
         is sent (docs/20 §5).
         """
-        if self.service._settings_int("offline_mode", 0) == 1:
+        if self.service._offline_mode():
             return "Refused: Offline mode is on, so remote MCP servers are disabled."
         if self.mcp_calls >= MAX_CALLS_PER_RUN:
             return (
@@ -668,6 +668,8 @@ class ConductorTools:
         and a private repository's 404 is reported as `unknown` rather than read as a pass. A check's name is
         repository text; `format_checks` frames it as data.
         """
+        if self.service._offline_mode():
+            return "Refused: Offline mode is on, so GitHub CI checks are disabled."
         answer = await github_remote.read_checks(self.root)
         self.service._log(
             self.goal_id, None, "info",

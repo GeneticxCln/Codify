@@ -579,7 +579,9 @@ class SandboxService:
         return mode if mode in ISOLATION_MODES else "auto"
 
     def _network_allowed(self, network: bool | None) -> bool:
-        """The command's network authority: the goal's opt-in, else the engine setting, else off."""
+        """The command's network authority: always off in offline mode, else the goal's opt-in, else the engine setting."""
+        if home.is_offline_mode(self.settings):
+            return False
         if network is not None:
             return network
         if self.settings is None:
