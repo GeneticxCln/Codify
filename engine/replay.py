@@ -10,8 +10,11 @@ Three rules:
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
+import os
 import shutil
+import stat
 import tempfile
 from pathlib import Path
 from typing import Any
@@ -57,13 +60,45 @@ class _ReplayedGate(LayaService):
 class _ReplayFactory(ProviderFactory):
     """Hands every role the one provider that answers from the recording."""
 
-    def __init__(self, provider: ReplayProvider) -> None:
-        super().__init__(Keychain())
+    def __init__(self, provider: ReplayProvider, keychain: Keychain | None = None) -> None:
+        super().__init__(keychain if keychain is not None else Keychain())
         self.provider = provider
 
     def build(self, config: AgentConfig) -> BaseProvider:
         self.provider.current_role = config.role
         return self.provider
+
+
+def _ignore_special_files(directory: str, names: list[str]) -> set[str]:
+    """Skip sockets, FIFOs, and device nodes when copying a workspace tree into scratch."""
+    ignored: set[str] = set()
+    for name in names:
+        try:
+            mode = os.lstat(os.path.join(directory, name)).st_mode
+        except OSError:
+            continue
+        if not (stat.S_ISREG(mode) or stat.S_ISDIR(mode) or stat.S_ISLNK(mode)):
+            ignored.add(name)
+    return ignored
+
+
+def _copy_workspace_tree(source: Path, into: Path) -> None:
+    """Copy `source` into `into` without dereferencing symlinks or crashing on dangling links."""
+    try:
+        shutil.copytree(
+            source,
+            into,
+            symlinks=True,
+            ignore_dangling_symlinks=True,
+            ignore=_ignore_special_files,
+            dirs_exist_ok=True,
+        )
+    except (shutil.Error, OSError) as exc:
+        raise ApiError(
+            422,
+            "replay_copy_failed",
+            f"could not copy workspace tree for replay: {exc}",
+        ) from exc
 
 
 def _gate_verdict(events: list[Any]) -> LayaDecision:
@@ -130,7 +165,7 @@ async def replay(
         into = scratch_parent / (source.name or "workspace")
     try:
         if source.is_dir():
-            shutil.copytree(source, into, dirs_exist_ok=True)
+            await asyncio.to_thread(_copy_workspace_tree, source, into)
         else:
             raise ApiError(
                 409,
@@ -171,7 +206,10 @@ async def replay(
                     )
 
                 provider = ReplayProvider(calls)
-                registry = AgentRegistryService(replay_conn, _ReplayFactory(provider), Keychain())
+                scratch_keychain = Keychain(secrets_path=Path(scratch_db_dir) / "secrets.json")
+                registry = AgentRegistryService(
+                    replay_conn, _ReplayFactory(provider, scratch_keychain), scratch_keychain
+                )
                 for role in ROLES:
                     registry.set_config(role, AgentConfigUpdate(provider="ollama", model_name="replay"))
 
@@ -252,4 +290,4 @@ async def replay(
     finally:
         if cleanup_scratch and owns_scratch:
             with contextlib.suppress(OSError):
-                shutil.rmtree(scratch_parent or into, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, scratch_parent or into, True)

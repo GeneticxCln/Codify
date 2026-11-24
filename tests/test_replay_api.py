@@ -4,9 +4,13 @@ from __future__ import annotations
 
 from tests import hermetic  # noqa: F401 — isolated CODIFY_HOME
 
+import os
+import shutil
 import tempfile
+import threading
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 import httpx
 from httpx import ASGITransport
@@ -91,6 +95,82 @@ class TestReplayApi(unittest.IsolatedAsyncioTestCase):
         r2 = await self.client.post("/goals/no-such-goal/trace/replay", headers=self.headers)
         self.assertEqual(404, r2.status_code, r2.text)
         self.assertEqual("unknown_goal", r2.json()["code"])
+
+    async def test_replay_handles_dangling_and_external_symlinks_without_dereferencing(self) -> None:
+        # Preserve the original v1.9.0 failure: a workspace with a dangling symlink caused
+        # `POST /goals/{id}/trace/replay` to crash with 500 (`shutil.Error`), and an external
+        # symlink had its target copied verbatim into the scratch directory.
+        secret_outside = self.root / "outside-secret.txt"
+        secret_outside.write_text("TOP_SECRET_DO_NOT_COPY\n")
+        os.symlink("/nonexistent/codify-dangling-target", self.ws_dir / "dangling_link")
+        os.symlink(secret_outside, self.ws_dir / "external_link")
+
+        goal = self.goals.create(
+            GoalCreate(workspace_id=self.ws.id, title="plan symlink repo", description="", plan_only=True, trace=True)
+        )
+        await self._executor().run_planning(goal.id)
+
+        r = await self.client.post(f"/goals/{goal.id}/trace/replay", headers=self.headers)
+        self.assertEqual(200, r.status_code, r.text)
+        body = r.json()
+        self.assertTrue(body["matched"], body)
+
+        # Also verify directly that scratch copy preserves symlinks rather than materializing external targets.
+        from engine.replay import replay
+
+        scratch_into = self.root / "kept-scratch"
+        report = await replay(self.conn, goal.id, source=self.ws_dir, into=scratch_into, cleanup_scratch=False)
+        self.assertTrue(report["matched"], report)
+        copied_external = scratch_into / "external_link"
+        self.assertTrue(copied_external.is_symlink(), "external symlink must not be dereferenced into a copied file")
+        copied_dangling = scratch_into / "dangling_link"
+        self.assertTrue(copied_dangling.is_symlink(), "dangling symlink must be preserved without failing copytree")
+
+    async def test_replay_copies_off_event_loop_and_uses_scratch_keychain(self) -> None:
+        goal = self.goals.create(
+            GoalCreate(workspace_id=self.ws.id, title="plan isolation", description="", plan_only=True, trace=True)
+        )
+        await self._executor().run_planning(goal.id)
+
+        seen_secrets_paths: list[Path | None] = []
+        copy_threads: list[int] = []
+        loop_thread = threading.get_ident()
+        orig_keychain = Keychain
+        from engine import replay as replay_mod
+        orig_copy = replay_mod._copy_workspace_tree
+
+        def spy_keychain(secrets_path: Path | None = None) -> Keychain:
+            seen_secrets_paths.append(secrets_path)
+            return orig_keychain(secrets_path=secrets_path)
+
+        def spy_copy(src: Path, dst: Path) -> None:
+            copy_threads.append(threading.get_ident())
+            orig_copy(src, dst)
+
+        with (
+            patch("engine.replay.Keychain", side_effect=spy_keychain),
+            patch("engine.replay._copy_workspace_tree", side_effect=spy_copy),
+        ):
+            r = await self.client.post(f"/goals/{goal.id}/trace/replay", headers=self.headers)
+        self.assertEqual(200, r.status_code, r.text)
+        self.assertTrue(seen_secrets_paths, "expected replay to construct a Keychain")
+        self.assertTrue(
+            all(p is not None for p in seen_secrets_paths),
+            f"replay must pass an explicit scratch secrets_path instead of touching host keyring: {seen_secrets_paths}",
+        )
+        self.assertEqual(1, len(copy_threads))
+        self.assertNotEqual(loop_thread, copy_threads[0], "workspace tree copy must run off the event loop")
+
+    async def test_replay_copy_failure_returns_structured_422_instead_of_500(self) -> None:
+        goal = self.goals.create(
+            GoalCreate(workspace_id=self.ws.id, title="plan copy err", description="", plan_only=True, trace=True)
+        )
+        await self._executor().run_planning(goal.id)
+
+        with patch("engine.replay.shutil.copytree", side_effect=shutil.Error([("a", "b", "permission denied")])):
+            r = await self.client.post(f"/goals/{goal.id}/trace/replay", headers=self.headers)
+        self.assertEqual(422, r.status_code, r.text)
+        self.assertEqual("replay_copy_failed", r.json()["code"])
 
 
 if __name__ == "__main__":
