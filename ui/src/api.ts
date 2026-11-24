@@ -1772,6 +1772,25 @@ export async function fetchGoalTrace(goal_id: string): Promise<TraceSummary> {
 }
 
 /**
+ * Fetch one recorded model call's full prompts, reply and parameters on demand
+ * for the context inspector (`GET /goals/{id}/trace/{seq}`).
+ */
+export async function fetchGoalTraceCall(
+  goal_id: string,
+  seq: number,
+): Promise<import("./types").TraceCallDetail> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(
+    `${base}/goals/${encodeURIComponent(goal_id)}/trace/${encodeURIComponent(String(seq))}`,
+    {
+      headers: { Authorization: `Bearer ${currentEngine.token}` },
+    },
+  );
+  if (!res.ok) throw await engineError(res, "Failed to read the recorded call");
+  return res.json();
+}
+
+/**
  * Forget a goal's recording. The user's call, and the only way to remove one:
  * a recording is a copy of the model's output about their code, so it is
  * always deletable and never deleted on their behalf.

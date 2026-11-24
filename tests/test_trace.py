@@ -194,13 +194,15 @@ class DigestCase(unittest.TestCase):
         self.assertEqual(len(digest), 32)
         self.assertNotIn("system", digest)
 
-    def test_prompts_are_kept_only_when_asked(self) -> None:
+    def test_prompts_are_kept_by_default_and_omitted_when_opted_out(self) -> None:
         original = os.environ.get("CODIFY_TRACE_PROMPTS")
         try:
             os.environ.pop("CODIFY_TRACE_PROMPTS", None)
-            self.assertFalse(keep_prompts())
+            self.assertTrue(keep_prompts(), "armed recordings keep full context by default")
             os.environ["CODIFY_TRACE_PROMPTS"] = "0"
-            self.assertFalse(keep_prompts(), "an explicit 0 is not a yes")
+            self.assertFalse(keep_prompts(), "an explicit 0 opts down to digests only")
+            os.environ["CODIFY_TRACE_PROMPTS"] = "false"
+            self.assertFalse(keep_prompts())
             os.environ["CODIFY_TRACE_PROMPTS"] = "1"
             self.assertTrue(keep_prompts())
         finally:
@@ -242,12 +244,24 @@ class RecordingCase(TraceHarness):
         self.assertTrue(first["response"])
         self.assertIsNotNone(first["duration_ms"])
 
-    async def test_the_prompt_is_kept_as_a_digest_not_as_text(self) -> None:
-        """The prompt holds the goal, the evidence pack and the user's own
-        source. The digest is what a replay needs; the text is opt-in."""
+    async def test_the_prompt_is_kept_by_default_and_dropped_when_opted_out(self) -> None:
+        """Recording is opt-in per run (`trace=True`), so full prompts and replies are
+        kept by default for the context inspector, and `CODIFY_TRACE_PROMPTS=0` drops
+        prompt text down to digests + replies."""
         original = os.environ.get("CODIFY_TRACE_PROMPTS")
-        os.environ.pop("CODIFY_TRACE_PROMPTS", None)
         try:
+            os.environ.pop("CODIFY_TRACE_PROMPTS", None)
+            kept_goal = self.goals.create(
+                GoalCreate(workspace_id=self.ws.id, title="inspectable title", description="",
+                           trace=True)
+            )
+            await self._run(self._engine(ScriptedProvider(dict(RESPONSES))), kept_goal.id)
+            kept_calls = self.traces.calls(kept_goal.id)
+            self.assertTrue(kept_calls)
+            self.assertTrue(self.traces.summary(kept_goal.id)["prompts_kept"])
+            self.assertTrue(any("inspectable title" in str(c["user_prompt"] or "") for c in kept_calls))
+
+            os.environ["CODIFY_TRACE_PROMPTS"] = "0"
             goal = self.goals.create(
                 GoalCreate(workspace_id=self.ws.id, title="secret title", description="",
                            trace=True)
@@ -259,14 +273,15 @@ class RecordingCase(TraceHarness):
                 self.assertIsNone(call["user_prompt"])
                 self.assertIsNone(call["system_prompt"])
                 self.assertEqual(len(call["prompt_hash"]), 32)
-            # Nothing anywhere in the row leaks the prompt it was built from.
             self.assertNotIn(
                 "secret title", " ".join(str(c["response"] or "") for c in calls)
             )
             summary = self.traces.summary(goal.id)
             self.assertFalse(summary["prompts_kept"], "the UI must be able to say so")
         finally:
-            if original is not None:
+            if original is None:
+                os.environ.pop("CODIFY_TRACE_PROMPTS", None)
+            else:
                 os.environ["CODIFY_TRACE_PROMPTS"] = original
 
     async def test_an_engine_without_a_tracer_records_nothing(self) -> None:
@@ -612,7 +627,21 @@ class TraceApiCase(TraceHarness):
             body = got.json()
             self.assertGreater(body["calls"], 0)
             self.assertIn("planner", body["by_role"])
-            self.assertFalse(body["prompts_kept"])
+            self.assertTrue(body["prompts_kept"])
+
+            first_seq = body["recorded"][0]["seq"]
+            detail = await client.get(f"/goals/{goal.id}/trace/{first_seq}")
+            self.assertEqual(detail.status_code, 200, detail.text)
+            detail_body = detail.json()
+            self.assertEqual(detail_body["seq"], first_seq)
+            self.assertEqual(detail_body["goal_id"], goal.id)
+            self.assertTrue(detail_body["system_prompt"])
+            self.assertTrue(detail_body["user_prompt"])
+            self.assertTrue(detail_body["response"])
+
+            missing = await client.get(f"/goals/{goal.id}/trace/9999")
+            self.assertEqual(missing.status_code, 404, missing.text)
+            self.assertEqual(missing.json()["code"], "unknown_trace_call")
 
             gone = await client.delete(f"/goals/{goal.id}/trace")
             self.assertEqual(gone.status_code, 200, gone.text)
@@ -736,6 +765,7 @@ class TraceApiCase(TraceHarness):
         async with self._client() as client:
             for call in (
                 client.get("/goals/no-such-goal/trace"),
+                client.get("/goals/no-such-goal/trace/1"),
                 client.delete("/goals/no-such-goal/trace"),
                 client.put("/goals/no-such-goal/trace", json={"enabled": True}),
             ):

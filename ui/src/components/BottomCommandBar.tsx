@@ -1087,17 +1087,20 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
 
             <Divider title="What this run keeps" />
 
-            {/* Recording: keep a copy of every model call this run makes, so the
-                run can be replayed later with no provider in the loop. Off by
-                default and never automatic — a recording is a copy of the
-                model's output about the user's code, so it is something they
-                ask for while chasing a bad run and can delete at any time. */}
+            {/* Record next turn: keep a copy of every model call (full prompts and
+                replies) the next submitted turn makes, then disarm automatically so
+                recording is never left running across subsequent prompts. */}
             <Toggle
               armed={record}
               tone="warning"
               onClick={() => onToggleRecord?.(!record)}
               disabled={!onToggleRecord}
-              title="Record every model call this run makes, so it can be replayed later without a provider"
+              aria-label="Record next turn"
+              title={
+                record
+                  ? "Record next turn (armed) — full prompts and replies will be kept for your next message, then this switch resets"
+                  : "Record next turn — keep full prompts and replies for your next message so you can inspect context or replay without a provider"
+              }
             >
               <Radio className="w-3.5 h-3.5" />
               <span>Record</span>

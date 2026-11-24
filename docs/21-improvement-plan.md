@@ -115,3 +115,29 @@ trust boundary; only with the `benchmarks/vendor.py` pattern). Subscription OAut
 - P2's table and tab are built when someone uses the skill and asks for a record.
 - The 10% tolerance in P4 is revisited when a deliberate dependency upgrade moves the baseline; the reason goes in the
   baseline file.
+
+## 5. Runtime and product audit roadmap
+
+Tracked in execution order (`0 → 10`), one change per PR, under three standing decisions:
+
+- **Decision A — Tokens only in cost accounting.** Usage and statistics report tokens and call counts only; dollar price
+  tables are omitted because provider pricing changes silently and stale numbers mislead.
+- **Decision B — Keyring primary, `0600` fallback file unchanged.** Provider secrets live in the OS keyring first and a
+  mode-`0600` fallback file when no keyring service is present; no master-password wrapper is added.
+- **Decision C — Local stand-in verification when live cloud keys are absent.** Provider wire formats and runtime flows
+  are proven against local HTTP stand-ins (`scripts/fake_ollama.py` and protocol test servers) whenever live cloud keys
+  are not supplied, with the proof scope stated plainly.
+
+| # | Item | Status |
+|---|---|---|
+| 0 | Real delete for threads and messages | **Built** (`DELETE /conversations/{id}`, `DELETE /goals/{id}` from chat turns) |
+| 1 | Thinking in chat for cloud models | **Built** (`conductor_thinking` across provider tool calls + composer thinking control) |
+| 2 | OpenCode Console provider | **Built** (`opencode` built-in provider + live model discovery) |
+| 3 | "Delete all history" in Settings | **In review** (`POST /history/clear` with typed confirmation + `VACUUM` scrub, PR #137) |
+| 4 | Context inspector + record-next-turn toggle | **Built in this change** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
+| 5 | Backup and restore of Codify's state | Planned (consistent SQLite backup copy + staged restore on next start; keyring secrets excluded) |
+| 6 | Per-project usage | Planned (`workspace_id` filter on `/stats/overview` + project picker on Stats, tokens only) |
+| 7 | Provider health | Planned (background reachability/auth/latency check per configured provider, status dot in Settings, down notification, respects offline mode) |
+| 8 | Replay from the app | Planned (`Replay` action on recorded goals running `ReplayProvider` in a scratch tree and reporting match vs divergence) |
+| 9 | Offline switch | Planned (single setting restricting chat/roles to local endpoints and disabling web fetch, MCP, update checks and provider-health pings) |
+| 10 | App-wide audit view | Planned (cross-project list of agent commits, touched files and goals built from persisted per-goal audit events) |

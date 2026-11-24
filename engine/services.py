@@ -1839,6 +1839,8 @@ class GoalService:
             data["dry_run"] = bool(row["dry_run"])
             data["plan_only"] = bool(row["plan_only"])
             data["parallel"] = bool(row["parallel"])
+            data["allow_network"] = bool(row["allow_network"])
+            data["trace"] = bool(row["trace"])
             out.append(Goal.model_validate(data))
         return out
 

@@ -1,8 +1,14 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { deleteGoalTrace, fetchGoalTrace } from "../api";
-import type { Goal, TraceSummary } from "../types";
-import { canArmTrace, promptStorageNote, traceHeadline, traceRoles } from "../traceSummary";
-import { CircleDot, Loader2, Radio, Trash2, X } from "lucide-react";
+import { deleteGoalTrace, fetchGoalTrace, fetchGoalTraceCall } from "../api";
+import type { Goal, TraceCallDetail, TraceSummary } from "../types";
+import {
+  canArmTrace,
+  formatTracePayload,
+  promptStorageNote,
+  traceHeadline,
+  traceRoles,
+} from "../traceSummary";
+import { ChevronDown, ChevronRight, CircleDot, Loader2, Radio, Trash2, X } from "lucide-react";
 import { readRejection } from "../rejection.ts";
 
 /**
@@ -31,6 +37,10 @@ export const TracePanel: React.FC<{
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [armed, setArmed] = useState<boolean>(Boolean(goal.trace));
+  const [selectedSeq, setSelectedSeq] = useState<number | null>(null);
+  const [detail, setDetail] = useState<TraceCallDetail | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   // The parent owns the goal, so an arming done here has to show up even if the
   // panel is reopened from a stale copy of it.
@@ -54,6 +64,9 @@ export const TracePanel: React.FC<{
     // A different goal: the last one's count must not be what Delete confirms against.
     setSummary(null);
     setError(null);
+    setSelectedSeq(null);
+    setDetail(null);
+    setDetailError(null);
     fetchGoalTrace(goalId)
       .then((s) => {
         if (live) setSummary(s);
@@ -66,6 +79,27 @@ export const TracePanel: React.FC<{
     };
   }, [goalId, load]);
 
+  const handleSelectCall = async (seq: number) => {
+    if (selectedSeq === seq) {
+      setSelectedSeq(null);
+      setDetail(null);
+      setDetailError(null);
+      return;
+    }
+    setSelectedSeq(seq);
+    setDetail(null);
+    setDetailError(null);
+    setDetailLoading(true);
+    try {
+      const loaded = await fetchGoalTraceCall(goalId, seq);
+      setDetail(loaded);
+    } catch (err: any) {
+      setDetailError(readRejection(err, `Could not read call #${seq}.`));
+    } finally {
+      setDetailLoading(false);
+    }
+  };
+
   const handleDelete = async () => {
     if (!summary) return;
     const sure = window.confirm(
@@ -77,6 +111,9 @@ export const TracePanel: React.FC<{
     setBusy(true);
     try {
       await deleteGoalTrace(goalId);
+      setSelectedSeq(null);
+      setDetail(null);
+      setDetailError(null);
       await load();
     } catch (err: any) {
       setError(readRejection(err, "Could not delete the recording."));
@@ -209,30 +246,150 @@ export const TracePanel: React.FC<{
                 </tr>
               </thead>
               <tbody className="text-codify-secondary">
-                {summary.recorded.map((call) => (
-                  <tr key={call.seq} className="border-t border-codify-surface">
-                    <td className="pr-2 py-0.5 text-codify-muted">{call.seq}</td>
-                    <td className="pr-2 py-0.5">{call.role}</td>
-                    <td className="pr-2 py-0.5 text-codify-muted">{call.model}</td>
-                    <td
-                      className="pr-2 py-0.5 text-codify-muted"
-                      title={`Digest of the prompt this call was sent — the identity a replay matches on.${
-                        summary.prompts_kept ? " The text itself is stored." : ""
-                      }`}
+                {summary.recorded.map((call) => {
+                  const expanded = selectedSeq === call.seq;
+                  return (
+                    <tr
+                      key={call.seq}
+                      onClick={() => void handleSelectCall(call.seq)}
+                      className={
+                        "border-t border-codify-surface cursor-pointer transition-colors " +
+                        (expanded ? "bg-codify-raised" : "hover:bg-codify-raised")
+                      }
                     >
-                      {call.prompt_hash.slice(0, 8)}…
-                    </td>
-                    <td className="pr-2 py-0.5 text-right text-codify-muted">
-                      {(call.input_tokens ?? 0) + (call.output_tokens ?? 0)}
-                    </td>
-                    <td className="py-0.5 text-right text-codify-muted">
-                      {call.duration_ms ?? "—"}
-                    </td>
-                  </tr>
-                ))}
+                      <td className="pr-2 py-0.5 text-codify-muted">
+                        <button
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            void handleSelectCall(call.seq);
+                          }}
+                          aria-expanded={expanded}
+                          aria-label={`Inspect call ${call.seq}`}
+                          className="inline-flex items-center gap-0.5 text-left text-codify-muted hover:text-codify-primary"
+                        >
+                          {expanded ? (
+                            <ChevronDown className="w-3 h-3 shrink-0" />
+                          ) : (
+                            <ChevronRight className="w-3 h-3 shrink-0" />
+                          )}
+                          <span>{call.seq}</span>
+                        </button>
+                      </td>
+                      <td className="pr-2 py-0.5">{call.role}</td>
+                      <td className="pr-2 py-0.5 text-codify-muted">{call.model}</td>
+                      <td
+                        className="pr-2 py-0.5 text-codify-muted"
+                        title={`Digest of the prompt this call was sent — the identity a replay matches on.${
+                          summary.prompts_kept ? " Click to inspect full prompt and reply." : ""
+                        }`}
+                      >
+                        {call.prompt_hash.slice(0, 8)}…
+                      </td>
+                      <td className="pr-2 py-0.5 text-right text-codify-muted">
+                        {(call.input_tokens ?? 0) + (call.output_tokens ?? 0)}
+                      </td>
+                      <td className="py-0.5 text-right text-codify-muted">
+                        {call.duration_ms ?? "—"}
+                      </td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
+
+          {selectedSeq !== null && (
+            <div
+              data-trace-inspector="true"
+              className="mt-3 rounded-lg border border-codify-border bg-codify-surface p-2.5 space-y-2.5"
+            >
+              <div className="flex items-center justify-between gap-2 text-2xs font-mono text-codify-muted">
+                <span>
+                  Call #{selectedSeq}
+                  {detail
+                    ? ` · ${detail.role} · ${detail.provider ? `${detail.provider}/` : ""}${detail.model} · hash ${detail.prompt_hash.slice(0, 12)}…`
+                    : ""}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSelectedSeq(null);
+                    setDetail(null);
+                    setDetailError(null);
+                  }}
+                  aria-label="Close call inspector"
+                  className="text-codify-muted hover:text-codify-secondary"
+                >
+                  Close
+                </button>
+              </div>
+
+              {detailLoading && (
+                <div className="flex items-center gap-2 text-xs text-codify-muted">
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" /> Loading call #{selectedSeq}…
+                </div>
+              )}
+
+              {detailError && <div className="text-xs text-codify-danger">{detailError}</div>}
+
+              {detail && !detailLoading && (
+                <div className="space-y-2">
+                  <div>
+                    <div className="text-2xs font-semibold uppercase tracking-wider text-codify-muted">
+                      System prompt
+                    </div>
+                    {detail.system_prompt !== null && detail.system_prompt !== "" ? (
+                      <pre
+                        data-trace-section="system"
+                        className="mt-1 max-h-40 overflow-auto rounded-md border border-codify-border bg-codify-bg p-2 font-mono text-2xs leading-relaxed whitespace-pre-wrap break-words text-codify-secondary"
+                      >
+                        {detail.system_prompt}
+                      </pre>
+                    ) : (
+                      <p className="mt-1 text-2xs text-codify-muted italic">
+                        System prompt text was not stored for this call.
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="text-2xs font-semibold uppercase tracking-wider text-codify-muted">
+                      Prompt / newly shown context
+                    </div>
+                    {detail.user_prompt !== null && detail.user_prompt !== "" ? (
+                      <pre
+                        data-trace-section="user"
+                        className="mt-1 max-h-48 overflow-auto rounded-md border border-codify-border bg-codify-bg p-2 font-mono text-2xs leading-relaxed whitespace-pre-wrap break-words text-codify-primary"
+                      >
+                        {formatTracePayload(detail.user_prompt)}
+                      </pre>
+                    ) : (
+                      <p className="mt-1 text-2xs text-codify-muted italic">
+                        Prompt text was not stored for this call (digest {detail.prompt_hash}).
+                      </p>
+                    )}
+                  </div>
+
+                  <div>
+                    <div className="text-2xs font-semibold uppercase tracking-wider text-codify-muted">
+                      Model reply
+                    </div>
+                    {detail.response !== null && detail.response !== "" ? (
+                      <pre
+                        data-trace-section="response"
+                        className="mt-1 max-h-48 overflow-auto rounded-md border border-codify-border bg-codify-bg p-2 font-mono text-2xs leading-relaxed whitespace-pre-wrap break-words text-codify-primary"
+                      >
+                        {formatTracePayload(detail.response)}
+                      </pre>
+                    ) : (
+                      <p className="mt-1 text-2xs text-codify-muted italic">(empty reply)</p>
+                    )}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
     </div>

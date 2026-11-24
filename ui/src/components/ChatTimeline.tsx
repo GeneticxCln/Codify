@@ -464,6 +464,7 @@ const TurnExchange: React.FC<{
           type="button"
           onClick={onToggleTrace}
           aria-expanded={traceOpen}
+          aria-label="Show recording"
           className="flex items-center gap-1.5 pl-2 text-2xs text-codify-muted hover:text-codify-info transition-colors"
           title={traceOpen ? "Hide the recording" : "Show this turn's recording"}
         >

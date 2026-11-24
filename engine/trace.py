@@ -10,11 +10,11 @@ The rules, each one a decision about somebody's data:
 - **Opt-in per goal, off by default.** A recording is a copy of model output
   about the user's code. It is switched on for a run someone is debugging, and
   it is deletable at any time (`DELETE /goals/{id}/trace`).
-- **The request is stored as a digest.** `prompt_hash` is what a replay has to
-  match on, and the prompt is the most sensitive thing in a run: the goal, the
-  evidence pack, and the user's own source. `CODIFY_TRACE_PROMPTS=1` opts into
-  keeping the text too, for when "exactly what was the model handed" is the
-  question being asked.
+- **Full prompts and replies are kept when recording is on.** `prompt_hash` is
+  what a replay matches on, and `system_prompt`, `user_prompt` and `response`
+  are stored alongside it so the context inspector can show what the model was
+  actually handed. `CODIFY_TRACE_PROMPTS=0` opts a process down to digests and
+  replies only when replay identity is wanted without prompt text.
 - **A replay that does not match refuses.** Serving the wrong recorded reply
   would produce a green run that proves nothing, which is worse than no replay
   at all: it looks like evidence. A mismatch names the call that was expected
@@ -32,15 +32,17 @@ from typing import Any, Protocol
 
 from engine.providers import BaseProvider, ProviderError
 
-# Whether to keep the prompt text beside its digest. An environment variable
-# rather than a setting: it is a debugging switch for a single process, and a
-# per-goal "store the whole prompt" checkbox in a settings screen would be an
-# invitation rather than a deliberate act.
+# Whether an armed recording keeps prompt text beside its digest. On by default
+# because recording itself is opt-in per turn/goal (`trace=True`, disarmed after
+# one send in the composer) and bounded by `trace_retention_days`, and the
+# context inspector exists to read what the model was handed. Setting
+# `CODIFY_TRACE_PROMPTS=0` opts a process down to digests + replies only.
 _TRACE_PROMPTS_ENV = "CODIFY_TRACE_PROMPTS"
 
 
 def keep_prompts() -> bool:
-    return (os.environ.get(_TRACE_PROMPTS_ENV) or "").strip() not in ("", "0", "false")
+    raw = (os.environ.get(_TRACE_PROMPTS_ENV) or "1").strip().lower()
+    return raw not in ("0", "false", "no", "off")
 
 
 # The engine setting that bounds how long a recording lives (`SettingsService.SPEC`), in days; 0 keeps everything.
@@ -163,6 +165,38 @@ class TraceService:
             "SELECT * FROM trace_calls WHERE goal_id = ? ORDER BY seq", (goal_id,)
         ).fetchall()
         return [dict(r) for r in rows]
+
+    def call(self, goal_id: str, seq: int) -> dict[str, Any] | None:
+        """One recorded call in full — prompts, reply and metadata — for on-demand inspection."""
+        row = self._db.execute(
+            """SELECT seq, step_id, role, provider, model, temperature, max_tokens,
+                      prompt_hash, system_hash, system_prompt, user_prompt, response,
+                      input_tokens, output_tokens, duration_ms, created_at
+               FROM trace_calls
+               WHERE goal_id = ? AND seq = ?""",
+            (goal_id, int(seq)),
+        ).fetchone()
+        if row is None:
+            return None
+        return {
+            "goal_id": goal_id,
+            "seq": row["seq"],
+            "step_id": row["step_id"],
+            "role": row["role"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "temperature": row["temperature"],
+            "max_tokens": row["max_tokens"],
+            "prompt_hash": row["prompt_hash"],
+            "system_hash": row["system_hash"],
+            "system_prompt": row["system_prompt"],
+            "user_prompt": row["user_prompt"],
+            "response": row["response"],
+            "input_tokens": row["input_tokens"],
+            "output_tokens": row["output_tokens"],
+            "duration_ms": row["duration_ms"],
+            "at": row["created_at"],
+        }
 
     def count(self, goal_id: str) -> int:
         row = self._db.execute(
