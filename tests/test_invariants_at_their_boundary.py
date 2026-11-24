@@ -574,6 +574,7 @@ MAY_WRITE = {
     "home.py": "the state directory and its permissions",
     "db.py": "creating the state directory the database lives in",
     "backup.py": "the person's backup and next-start restore of the state database: writes under the engine's private state directory and the database path, never a workspace",
+    "replay.py": "copies a workspace tree into a private temporary scratch directory to replay recorded calls and removes that scratch directory afterwards; never writes to the user's workspace (pinned by tests/test_replay_cli.py)",
     "providers.py": "the keychain's file backend",
     "speech.py": "deletes its own dictation recordings, in the engine's private state directory; never a workspace",
     "binary_analysis.py": "its run directories, copy of the analysed file and cache, all under the engine's private state directory (`CODIFY_HOME/binary-analysis`); never a workspace, which tests/test_binary_analysis.py shows is left byte-for-byte as it was",

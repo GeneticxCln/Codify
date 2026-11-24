@@ -948,7 +948,7 @@ class GateOverrideContract(unittest.TestCase):
         # that actually run.
         names = {where for where, _ in found}
         self.assertIn("engine/laya.py", names)
-        self.assertIn("scripts/replay_trace.py", names)
+        self.assertIn("engine/replay.py", names)
 
 
 def _event(type_: str, payload: dict[str, Any]) -> Any:
