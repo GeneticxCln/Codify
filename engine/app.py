@@ -3328,6 +3328,22 @@ async def get_goal_trace(goal_id: str, request: Request) -> dict[str, Any]:
     return await asyncio.to_thread(traces.summary, goal_id)
 
 
+@app.get("/goals/{goal_id}/trace/{seq}")
+async def get_goal_trace_call(goal_id: str, seq: int, request: Request) -> dict[str, Any]:
+    """One recorded model call in full: prompts, reply and parameters (docs/04 §8).
+
+    Separate from `GET /goals/{id}/trace` on purpose: opening the panel reads
+    only the lightweight summary, and fetching a call's prompt and reply body
+    happens only when a person selects that row in the context inspector.
+    """
+    await asyncio.to_thread(request.app.state.goals.get, goal_id)  # 404 unknown_goal
+    traces: TraceService = request.app.state.traces
+    detail = await asyncio.to_thread(traces.call, goal_id, seq)
+    if detail is None:
+        raise ApiError(404, "unknown_trace_call", f"recorded call #{seq} not found")
+    return detail
+
+
 @app.delete("/goals/{goal_id}/trace")
 async def delete_goal_trace(goal_id: str, request: Request) -> dict[str, Any]:
     """Forget a goal's recording. Idempotent, and always allowed.

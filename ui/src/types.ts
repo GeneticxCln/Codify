@@ -350,13 +350,26 @@ export interface TraceCall {
   at: number;
 }
 
+/** One recorded call in full — GET /goals/{id}/trace/{seq} — loaded on demand
+ * when a person selects a row in the context inspector. */
+export interface TraceCallDetail extends TraceCall {
+  goal_id: string;
+  step_id: string | null;
+  provider: string | null;
+  temperature: number | null;
+  max_tokens: number | null;
+  system_hash: string | null;
+  system_prompt: string | null;
+  user_prompt: string | null;
+  response: string | null;
+}
+
 /** What a goal recorded — the engine's GET /goals/{id}/trace response. */
 export interface TraceSummary {
   goal_id: string;
   calls: number;
   by_role: Record<string, number>;
-  /** True only when the prompt *text* was kept, which needs
-   * CODIFY_TRACE_PROMPTS=1. The UI says so rather than implying a transcript. */
+  /** True when full prompt text was kept (the default unless CODIFY_TRACE_PROMPTS=0). */
   prompts_kept: boolean;
   /** Why a recording that should have calls has none — a write that failed.
    * Null is the normal case; an engine that predates the field omits it, so

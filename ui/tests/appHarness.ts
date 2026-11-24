@@ -52,6 +52,8 @@ export interface AppOptions {
    * test gives a turn its reply. A goal with none has none, which is what it did before this option.
    */
   goalEvents?: Record<string, Array<Record<string, unknown>>>;
+  /** Recorded model calls per goal id, served by `GET /goals/{id}/trace` and `/trace/{seq}`. */
+  traceCalls?: Record<string, Array<Record<string, unknown> & { seq: number; role: string; model: string; prompt_hash: string }>>;
   /** A remembered tab strip (`CODIFY_TABS`), as the app would have written it. */
   storedTabs?: unknown;
   /** Shell commands that answer with something other than the default `null`. */
@@ -539,6 +541,8 @@ export async function withApp(
         title: String(payload?.prompt ?? ""),
         description: String(payload?.prompt ?? ""),
         status: "PLANNING",
+        mode: "chat",
+        trace: payload?.trace === true,
         version: 1,
         dry_run: true,
         plan_only: false,
@@ -569,7 +573,62 @@ export async function withApp(
     }
     const traceToggle = /^\/goals\/([^/]+)\/trace$/.exec(path);
     if (traceToggle && method === "GET") {
-      return respond({ goal_id: traceToggle[1], calls: 0, by_role: {}, prompts_kept: false, recorded: [] });
+      const gid = traceToggle[1];
+      const calls = options.traceCalls?.[gid] ?? [];
+      const byRole: Record<string, number> = {};
+      for (const c of calls) byRole[c.role] = (byRole[c.role] ?? 0) + 1;
+      const promptsKept = calls.some((c) => typeof c.user_prompt === "string" && c.user_prompt.length > 0);
+      return respond({
+        goal_id: gid,
+        calls: calls.length,
+        by_role: byRole,
+        prompts_kept: promptsKept,
+        recorded: calls.map((c) => ({
+          seq: c.seq,
+          role: c.role,
+          model: c.model,
+          prompt_hash: c.prompt_hash,
+          input_tokens: (c.input_tokens as number | null | undefined) ?? 10,
+          output_tokens: (c.output_tokens as number | null | undefined) ?? 5,
+          duration_ms: (c.duration_ms as number | null | undefined) ?? 42,
+          at: (c.at as number | undefined) ?? 1,
+        })),
+      });
+    }
+    if (traceToggle && method === "DELETE") {
+      const gid = traceToggle[1];
+      const calls = options.traceCalls?.[gid] ?? [];
+      const deleted = calls.length;
+      if (options.traceCalls && gid in options.traceCalls) options.traceCalls[gid] = [];
+      return respond({ deleted });
+    }
+    const traceCallDetail = /^\/goals\/([^/]+)\/trace\/(\d+)$/.exec(path);
+    if (traceCallDetail && method === "GET") {
+      const gid = traceCallDetail[1];
+      const seq = Number(traceCallDetail[2]);
+      const found = (options.traceCalls?.[gid] ?? []).find((c) => c.seq === seq);
+      if (!found) {
+        return respond({ code: "unknown_trace_call", message: `recorded call #${seq} not found` }, 404);
+      }
+      return respond({
+        goal_id: gid,
+        seq: found.seq,
+        step_id: (found.step_id as string | null | undefined) ?? null,
+        role: found.role,
+        provider: (found.provider as string | null | undefined) ?? "ollama",
+        model: found.model,
+        temperature: (found.temperature as number | null | undefined) ?? 0.2,
+        max_tokens: (found.max_tokens as number | null | undefined) ?? 2048,
+        prompt_hash: found.prompt_hash,
+        system_hash: (found.system_hash as string | null | undefined) ?? "00000000000000000000000000000000",
+        system_prompt: (found.system_prompt as string | null | undefined) ?? null,
+        user_prompt: (found.user_prompt as string | null | undefined) ?? null,
+        response: (found.response as string | null | undefined) ?? null,
+        input_tokens: (found.input_tokens as number | null | undefined) ?? 10,
+        output_tokens: (found.output_tokens as number | null | undefined) ?? 5,
+        duration_ms: (found.duration_ms as number | null | undefined) ?? 42,
+        at: (found.at as number | undefined) ?? 1,
+      });
     }
     if (traceToggle && method === "PUT") {
       const goal = goalsById.get(traceToggle[1]);

@@ -4,6 +4,7 @@ import {
   traceHeadline,
   traceRoles,
   promptStorageNote,
+  formatTracePayload,
   canArmTrace,
 } from "../src/traceSummary.ts";
 import type { TraceSummary } from "../src/types.ts";
@@ -39,12 +40,22 @@ test("roles are ordered by count, and ties do not reshuffle between renders", ()
 });
 
 test("digests and kept text are different documents, and the note says which", () => {
-  assert.equal(
-    promptStorageNote(false),
-    "Digests only — the prompt text was not stored.",
-  );
-  assert.match(promptStorageNote(true), /kept/);
+  assert.match(promptStorageNote(false), /Digests only/);
+  assert.match(promptStorageNote(true), /Full prompts and replies kept/);
   assert.notEqual(promptStorageNote(true), promptStorageNote(false));
+});
+
+test("formatTracePayload pretty-prints JSON messages and leaves prose untouched", () => {
+  assert.equal(formatTracePayload(null), "");
+  assert.equal(formatTracePayload("plain prose"), "plain prose");
+  assert.equal(
+    formatTracePayload('[{"role":"user","content":"hello"}]'),
+    '[\n  {\n    "role": "user",\n    "content": "hello"\n  }\n]',
+  );
+  assert.equal(
+    formatTracePayload("[not valid json]"),
+    "[not valid json]",
+  );
 });
 
 test("only a goal that has not started can still be armed", () => {

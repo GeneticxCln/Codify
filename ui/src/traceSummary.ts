@@ -27,14 +27,38 @@ export function traceRoles(summary: TraceSummary): Array<[string, number]> {
 /**
  * What the recording holds of the prompt itself.
  *
- * Two very different documents behind one endpoint: digests only (the
- * default) cannot be read back, and kept text can. The panel has to say which
- * it is holding rather than let a reader assume a transcript exists.
+ * Full prompts and replies are kept by default when a run is recorded; setting
+ * `CODIFY_TRACE_PROMPTS=0` omits prompt text and keeps digests + replies only.
  */
 export function promptStorageNote(promptsKept: boolean): string {
   return promptsKept
-    ? "Prompt text kept (CODIFY_TRACE_PROMPTS=1)."
-    : "Digests only — the prompt text was not stored.";
+    ? "Full prompts and replies kept — click any call below to inspect its context."
+    : "Digests only — prompt text was omitted (CODIFY_TRACE_PROMPTS=0).";
+}
+
+/**
+ * Render a stored prompt or reply body for human inspection: conductor message
+ * arrays and structured tool-call replies are JSON-encoded on write, so pretty-
+ * printing valid JSON objects/arrays makes multi-turn context readable while
+ * leaving plain prose and system prompts untouched.
+ */
+export function formatTracePayload(raw: string | null | undefined): string {
+  if (raw === null || raw === undefined || raw === "") return "";
+  const trimmed = raw.trim();
+  if (
+    (trimmed.startsWith("{") && trimmed.endsWith("}")) ||
+    (trimmed.startsWith("[") && trimmed.endsWith("]"))
+  ) {
+    try {
+      const parsed: unknown = JSON.parse(trimmed);
+      if (typeof parsed === "object" && parsed !== null) {
+        return JSON.stringify(parsed, null, 2);
+      }
+    } catch {
+      /* ordinary text that starts with a bracket — return verbatim */
+    }
+  }
+  return raw;
 }
 
 /**

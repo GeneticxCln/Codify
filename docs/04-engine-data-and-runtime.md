@@ -673,7 +673,8 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `GET` | `/goals/{id}/audit` | — | the goal's audit document (plan edits, fallbacks, fix retries, deep-review reports, errors, outcomes, usage, silent roles) |
 | `POST` | `/goals/{id}/apply` | `{expected_version}` | replays a completed dry-run's stored proposals for real. 409 `plan_only` (enable execution first), `not_dry_run`, `illegal_status`, `version_conflict`, `nothing_to_apply`, `driver_busy`. The driver is **claimed before the response**, so a duplicate Apply, or a Retry racing it, is refused instead of failing the run it could not start. The status moves in the background; the response is not a read of the goal |
 | `POST` | `/goals/{id}/enable-execution` | `{expected_version}` | lifts the `plan_only` guard (`Goal`) |
-| `GET` | `/goals/{id}/trace` | — | the recording's summary: `calls`, `by_role`, `prompts_kept`, `recording_error`, and `recorded[]` (`seq`, `role`, `model`, `prompt_hash`, tokens, `duration_ms`). Never the prompt text — that is a deliberate second step, not something a panel opens on load (`04` §8). 404 `unknown_goal` |
+| `GET` | `/goals/{id}/trace` | — | the recording's summary: `calls`, `by_role`, `prompts_kept`, `recording_error`, and `recorded[]` (`seq`, `role`, `model`, `prompt_hash`, tokens, `duration_ms`). Never the prompt text — that is a deliberate second step (`GET /goals/{id}/trace/{seq}`), not something a panel opens on load (`04` §8). 404 `unknown_goal` |
+| `GET` | `/goals/{id}/trace/{seq}` | — | one recorded model call in full (`system_prompt`, `user_prompt`, `response`, parameters, digests, tokens, `duration_ms`) for on-demand context inspection (`04` §8). 404 `unknown_goal`, `unknown_trace_call` |
 | `PUT` | `/goals/{id}/trace` | `{enabled}` extra=forbid | `Goal`. 409 `trace_locked` when enabling a goal that is no longer PLANNING — a recording that starts halfway is a trace of half a run. Disabling is always allowed |
 | `DELETE` | `/goals/{id}/trace` | — | `{deleted}`. Idempotent and never refused on status: deleting a copy of your own run is the user's call |
 | `GET` | `/stats/overview?window={1\|7\|30\|0}` | — | cross-goal outcomes, success rate, spend, daily trend (`engine/stats.py`), plus `by_stage` and `by_role_outcome` from the `stage_result` events (`engine/metrics.py`, §4.7). Bounded windows are anchored to the request's wall clock, so an idle install sees an empty window rather than its last run relabelled as recent. Both stage blocks are optional and their absence degrades the view rather than failing the read. `coverage` says how much of the history the read covered: `{goals, goal_cap, events, event_cap, truncated, since}`. The read takes the newest 5,000 goals and the newest 20,000 model-call events, so past that an "All" window counts from `since` (epoch seconds, null when nothing was cut) and `truncated` is true; the Statistics drawer says so |
@@ -1191,6 +1192,7 @@ the sentence in the response is the engine's own and is what a person reads.
 | `empty_prompt` | 422 | a turn has nothing to say |
 | `empty_patch` | 422 | a plan-step edit carries no editable field |
 | `unknown_step` | 404 | a step id is not in that goal |
+| `unknown_trace_call` | 404 | `GET /goals/{id}/trace/{seq}` names a call sequence number that goal did not record |
 | `step_vanished`, `batch_no_longer_disjoint` | 409 | a parallel batch was invalidated between batching and dispatch (the driver re-batches; neither is a failure) |
 | `unknown_suggestion` | 404 | a suggestion id does not exist |
 | `thread_in_progress` | 409 | `DELETE /conversations/{id}` while a turn in that thread is still planning or running, or still driven by the executor (docs/09 §2): cancel it first |
@@ -2476,20 +2478,21 @@ model's output about the user's code, so nothing at all is kept for a goal that 
 | Kept (`trace_calls`) | Not kept |
 |---|---|
 | role, provider, model, temperature, `max_tokens` | any file in the workspace |
-| the response, whole — a replay can serve nothing else | the prompt **text**, unless `CODIFY_TRACE_PROMPTS=1` |
-| `prompt_hash` / `system_hash`: 32 hex chars of SHA-256 over `system \x00 user` | the goal's source, evidence pack, or diff |
-| `input_tokens`, `output_tokens`, `duration_ms` | anything at all for a goal with `trace = 0` |
+| the response, whole — a replay can serve nothing else | prompt text when `CODIFY_TRACE_PROMPTS=0` (opt-out to digests + replies only) |
+| `system_prompt` and `user_prompt`, whole by default when recording is armed | the goal's source, evidence pack, or diff outside recorded calls |
+| `prompt_hash` / `system_hash`: 32 hex chars of SHA-256 over `system \x00 user` | anything at all for a goal with `trace = 0` |
+| `input_tokens`, `output_tokens`, `duration_ms` | |
 
 A conductor-driven goal records its loop's calls under `role = "conductor"`, one row per call. Its
 `user_prompt` is the JSON list of the messages the model was *newly* shown since the previous call and its
 `response` is `{text, tool_calls}`: the rows in order hold the whole conversation, and resending the history in
 every row would be quadratic in the length of the run.
 
-The digest is the point rather than an omission. It is what a replay *matches on*, and the prompt is
-the most sensitive thing in a run: the goal, the evidence pack, and the user's own source. Keeping
-the digest means a replay can prove it is replaying the same request; not keeping the text means a
-stolen database is not a transcript of the user's code. `CODIFY_TRACE_PROMPTS=1` opts into the text,
-for the case where "exactly what was the model handed" is the question being asked.
+The digest is what a replay *matches on*, while the full `system_prompt`, `user_prompt` and `response` back the
+context inspector (`GET /goals/{id}/trace/{seq}`, loaded only when a person selects a call row in `TracePanel`).
+Recording itself is strictly opt-in per turn/goal (`trace = 0` by default, disarmed after one send in the composer,
+bounded by `trace_retention_days`), and `CODIFY_TRACE_PROMPTS=0` opts a process down to digests + replies only when
+replay identity is wanted without storing prompt text.
 
 Both halves of that separator matter: `("ab", "c")` and `("a", "bc")` must not produce the same
 digest, so the system and user prompts are joined with a byte neither can contain.
