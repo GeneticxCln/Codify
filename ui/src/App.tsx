@@ -214,6 +214,7 @@ import {
   newestUnread,
   pausedNotification,
   planNotification,
+  providerHealthNotification,
   terminalNotification,
   type AppNotification,
 } from "./notifications";
@@ -1188,6 +1189,7 @@ export const App: React.FC = () => {
         // here, per provider, so the one place that says a model went *away* is the inbox: the "new"
         // badge on a provider row never shows removals.
         if (frame.type === "model_catalog_changed") notify(catalogNotification(frame.payload, Date.now()));
+        if (frame.type === "provider_health_changed") notify(providerHealthNotification(frame.payload, Date.now()));
         setCatalogTick((n) => n + 1);
         void loadModels(false);
       },

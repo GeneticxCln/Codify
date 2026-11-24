@@ -44,6 +44,7 @@ import {
   rolesOnProvider,
 } from "../providerSetup";
 import { newCountLabel, newCountTitle } from "../modelFreshness";
+import { providerHealthView } from "../providerHealth";
 import { protocolLabel, providerLabel } from "../providerLabels";
 
 export interface ProviderRowProps {
@@ -100,6 +101,7 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
   const [removeNote, setRemoveNote] = useState<string | null>(null);
 
   const { provider, needs_key: needsKey, has_key: hasKey } = keyStatus;
+  const health = providerHealthView(status, { hasKey, needsKey });
   /**
    * Counted against what the reader has actually been shown, not against the
    * whole list: a provider's 200 models are not 200 new models, and a badge that
@@ -198,6 +200,13 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
     <div className="bg-codify-bg border border-codify-border rounded-xl p-3.5 space-y-3">
       <div className="flex items-center justify-between gap-2">
         <div className="flex items-center gap-2 min-w-0">
+          <span
+            role="status"
+            data-provider-health={health.state}
+            aria-label={health.detail}
+            title={health.detail}
+            className={`w-2 h-2 rounded-full shrink-0 ${health.dotClass}`}
+          />
           <Cpu className="w-4 h-4 text-codify-design shrink-0" />
           {/* The slug stays the identifier everywhere; this is only how it is read (`providerLabels.ts`). */}
           <span className="font-semibold text-sm text-codify-primary truncate" title={provider}>
@@ -208,6 +217,15 @@ export const ProviderRow: React.FC<ProviderRowProps> = ({
           </span>
           {status?.ok && (
             <span className="text-2xs text-codify-muted shrink-0">{status.count} models</span>
+          )}
+          {health.latency && (
+            <span
+              data-provider-latency="true"
+              className="text-2xs font-mono text-codify-muted shrink-0"
+              title={health.detail}
+            >
+              {health.latency}
+            </span>
           )}
           {newHere > 0 && (
             <span

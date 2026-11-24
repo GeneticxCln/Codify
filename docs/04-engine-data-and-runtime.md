@@ -2347,12 +2347,13 @@ that wants one must take the proof rule above, timer included.) The app re-reads
 `onConnected` that follows any `onReconnecting` (every close counts, a rejected socket as much as a lost one),
 once per run of closes; at mount nothing has closed, so a healthy start does not re-read (docs/06 §6).
 
-Two frames exist today:
+Three frames exist today:
 
 | frame | payload | when |
 |---|---|---|
 | `model_catalog_changed` | `{added: {provider: [id]}, removed: {provider: [id]}, fetched_at}` | a provider's discovered model list differs from the previous sweep |
 | `model_catalog_checked` | `{fetched_at}` | every sweep that found no change — a time, not a diff |
+| `provider_health_changed` | `{down: [{provider, reachable, auth_ok, error, latency_ms}], recovered: [{provider, latency_ms}], fetched_at}` | a configured provider moved from healthy to down (or recovered) between two sweeps; skips remote checks while offline mode is active |
 
 The payload is a **diff, never the catalogue** — eight providers at 500 models each is a payload no
 screen asked for, sent on every change. The client re-reads `GET /models` with `refresh` **false**,
