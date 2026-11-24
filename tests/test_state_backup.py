@@ -340,5 +340,56 @@ class StateBackupTestCase(unittest.TestCase):
         finally:
             check.close()
 
+    def test_validate_and_restore_work_under_paths_with_uri_special_characters(self) -> None:
+        # Preserve the v1.9.0 failure: unencoded `#`, `?`, and `%` in CODIFY_HOME broke
+        # `sqlite3.connect(f"file:{path}?mode=ro", uri=True)` inside validate_backup_file.
+        weird_dir = self.root / "state #1?%20dir"
+        weird_dir.mkdir()
+        weird_db = weird_dir / "codify.db"
+        conn = connect(weird_db)
+        try:
+            WorkspaceService(conn).create(WorkspaceCreate(name="Weird", root_path=str(self.ws_dir)))
+            created = backup.create_backup(weird_db)
+            staged = backup.stage_restore_from_backup(
+                weird_db, created["filename"], max_schema_version=SCHEMA_VERSION
+            )
+            self.assertEqual(staged["source"], created["filename"])
+        finally:
+            conn.close()
+        self.assertTrue(backup.apply_pending_restore(weird_db, max_schema_version=SCHEMA_VERSION))
+
+    def test_apply_pending_restore_logs_diagnostic_to_stderr_when_discarded(self) -> None:
+        import io
+
+        conn = connect(self.db_path)
+        conn.close()
+        self._crafted(self.REPOINT).replace(backup.staged_restore_path(self.db_path))
+        buf = io.StringIO()
+        with patch("sys.stderr", buf):
+            applied = backup.apply_pending_restore(self.db_path, max_schema_version=SCHEMA_VERSION)
+        self.assertFalse(applied)
+        self.assertIn("discarded invalid staged restore", buf.getvalue().lower())
+        self.assertIn("trigger", buf.getvalue().lower())
+
+    def test_concurrent_same_second_backups_do_not_overwrite_each_other(self) -> None:
+        import concurrent.futures
+
+        conn = connect(self.db_path)
+        try:
+            WorkspaceService(conn).create(WorkspaceCreate(name="Race", root_path=str(self.ws_dir)))
+            fixed_now = 1_700_000_000.0
+            with (
+                patch("engine.backup.time.time", return_value=fixed_now),
+                concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool,
+            ):
+                results = list(pool.map(lambda _: backup.create_backup(self.db_path), range(4)))
+        finally:
+            conn.close()
+        names = [r["filename"] for r in results]
+        self.assertEqual(4, len(set(names)), f"concurrent backups collided on filename: {names}")
+        listed = backup.list_backups(self.db_path)
+        self.assertEqual(4, len(listed))
+
+
 if __name__ == "__main__":
     unittest.main()

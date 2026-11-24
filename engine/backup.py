@@ -26,15 +26,18 @@ import base64
 import binascii
 import contextlib
 import datetime as dt
+import errno
 import json
 import os
 import re
 import secrets
 import sqlite3
 import stat
+import sys
 import time
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 from engine import home
 from engine.services import ApiError
@@ -106,7 +109,7 @@ def validate_backup_file(path: Path, *, max_schema_version: int) -> None:
 
     conn: sqlite3.Connection | None = None
     try:
-        uri = f"file:{path.resolve().as_posix()}?mode=ro"
+        uri = f"file:{quote(path.resolve().as_posix(), safe='/:')}?mode=ro"
         conn = sqlite3.connect(uri, uri=True)
         stamped_row = conn.execute("PRAGMA user_version").fetchone()
         stamped = int(stamped_row[0]) if stamped_row else 0
@@ -175,15 +178,35 @@ def _copy_via_sqlite_backup(src_path: Path, dst_path: Path) -> None:
     home.tighten_to_owner(dst_path)
 
 
-def _next_backup_filename(bdir: Path, now: float) -> str:
+_NO_HARD_LINKS = frozenset({errno.EPERM, errno.ENOTSUP, errno.EOPNOTSUPP, errno.ENOSYS, errno.EXDEV})
+
+
+def _backup_candidates(now: float) -> Any:
     stamp = dt.datetime.fromtimestamp(now, tz=dt.timezone.utc).strftime("%Y%m%d-%H%M%S")
-    base = f"codify-backup-{stamp}.db"
-    if not (bdir / base).exists():
-        return base
+    yield f"codify-backup-{stamp}.db"
     seq = 2
-    while (bdir / f"codify-backup-{stamp}-{seq}.db").exists():
+    while True:
+        yield f"codify-backup-{stamp}-{seq}.db"
         seq += 1
-    return f"codify-backup-{stamp}-{seq}.db"
+
+
+def _publish_unique_backup(tmp: Path, bdir: Path, now: float) -> tuple[str, Path]:
+    """Publish `tmp` to the first unused timestamped filename without overwriting concurrent snapshots."""
+    for filename in _backup_candidates(now):
+        target = bdir / filename
+        try:
+            os.link(tmp, target)
+            return filename, target
+        except FileExistsError:
+            continue
+        except OSError as exc:
+            if exc.errno in _NO_HARD_LINKS:
+                if target.exists():
+                    continue
+                os.replace(tmp, target)
+                return filename, target
+            raise
+    raise ApiError(422, "invalid_backup", "could not allocate a unique backup filename")
 
 
 def create_backup(db_path: Path) -> dict[str, Any]:
@@ -194,15 +217,12 @@ def create_backup(db_path: Path) -> dict[str, Any]:
     bdir = backups_dir_for(db_path)
     home.ensure_private_dir(bdir)
     now = time.time()
-    filename = _next_backup_filename(bdir, now)
-    target = bdir / filename
     tmp = _open_private_temp(bdir, "backup")
     try:
         _copy_via_sqlite_backup(db_path, tmp)
-        os.replace(tmp, target)
-        tmp = Path("")  # moved
+        filename, target = _publish_unique_backup(tmp, bdir, now)
     finally:
-        if tmp and str(tmp) != "" and tmp.exists():
+        if tmp.exists():
             with contextlib.suppress(OSError):
                 tmp.unlink()
     home.tighten_to_owner(target)
@@ -432,7 +452,8 @@ def apply_pending_restore(db_path: Path, *, max_schema_version: int) -> bool:
 
     try:
         validate_backup_file(staged, max_schema_version=max_schema_version)
-    except ApiError:
+    except ApiError as exc:
+        print(f"[codify] discarded invalid staged restore {staged}: {exc.message}", file=sys.stderr)
         with contextlib.suppress(OSError):
             staged.unlink()
         with contextlib.suppress(OSError):
