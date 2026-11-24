@@ -46,6 +46,7 @@ import {
   FileDown,
   FileUp,
 } from "lucide-react";
+import { SEARCHABLE_FROM, SelectMenu } from "./SelectMenu";
 
 /**
  * Cross-goal statistics: what the whole history adds up to.
@@ -653,19 +654,18 @@ export const StatsPanel: React.FC = () => {
             {w.label}
           </button>
         ))}
-        <select
-          aria-label="Project"
+        <SelectMenu
+          label="Project"
           value={project}
-          onChange={(e) => setProject(e.target.value)}
-          className="ml-1 rounded-lg border border-codify-border bg-codify-bg px-2 py-1 text-xs text-codify-secondary"
-        >
-          <option value="">All projects</option>
-          {projects.map((p) => (
-            <option key={p.id} value={p.id}>
-              {p.name}
-            </option>
-          ))}
-        </select>
+          onChange={setProject}
+          options={[
+            { value: "", label: "All projects" },
+            ...projects.map((p) => ({ value: p.id, label: p.name })),
+          ]}
+          searchable={projects.length + 1 >= SEARCHABLE_FROM}
+          searchPlaceholder="Search projects…"
+          className="ml-1 flex items-center justify-between gap-2 rounded-lg border border-codify-border bg-codify-bg px-2.5 py-1 text-xs text-codify-secondary focus:outline-hidden focus:border-codify-accent cursor-pointer"
+        />
         {stats && (
           <span className="ml-auto text-2xs text-codify-muted">
             {stats.goals.goals} goal{stats.goals.goals === 1 ? "" : "s"} in view

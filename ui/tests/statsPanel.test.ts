@@ -272,12 +272,12 @@ test("a failed history export says so", async () => {
 // narrowed, so a project view leaves it out of the trend and says so, rather than mixing everyone's days in.
 
 async function chooseProject(dom: Dom, id: string): Promise<void> {
-  const select = dom.byLabel("Project") as HTMLSelectElement;
-  const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLSelectElement.prototype, "value")?.set;
-  await dom.act(async () => {
-    setter?.call(select, id);
-    select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
-  });
+  const trigger = dom.byLabel("Project");
+  await dom.click(trigger);
+  await dom.settle();
+  const option = dom.container.querySelector<HTMLButtonElement>(`[role="option"][data-value="${id}"]`);
+  assert.ok(option, `no project option for ${JSON.stringify(id)}`);
+  await dom.click(option);
   for (let i = 0; i < 6; i++) await dom.settle();
 }
 
@@ -285,8 +285,13 @@ test("choosing a project narrows both reads to it, and All projects widens them 
   const reads: string[] = [];
   const world = { days: 5, reads, workspaces: [{ id: "ws-a", name: "Alpha" }, { id: "ws-b", name: "Beta" }] };
   await withPanel(world, async (dom) => {
-    const options = [...(dom.byLabel("Project") as HTMLSelectElement).options].map((o) => o.textContent);
+    const trigger = dom.byLabel("Project");
+    await dom.click(trigger);
+    await dom.settle();
+    const options = [...dom.container.querySelectorAll('[role="option"]')].map((o) => o.textContent);
     assert.deepEqual(options, ["All projects", "Alpha", "Beta"]);
+    await dom.click(trigger);
+    await dom.settle();
     assert.ok(reads.some((r) => r === "/stats/overview?window=0"), "the first read was not every project");
     assert.doesNotMatch(dom.text(), /saved daily history covers all projects/);
 
