@@ -80,7 +80,7 @@ class Scripted(BaseProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]], tools: list[ToolSpec], model: str,
         temperature: float, max_tokens: int, *, num_ctx: int | None = None, keep_alive: str | None = None,
-        cache_prefix: bool = False,
+        cache_prefix: bool = False, thinking_effort: str | None = None,
     ) -> ToolReply:
         self.seen.append([dict(m) for m in messages])
         return self.replies.pop(0) if self.replies else ToolReply(text="done")

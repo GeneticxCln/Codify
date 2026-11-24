@@ -214,7 +214,8 @@ class TestTheConductor(ConductorTestCase):
             async def complete_with_tools(self, system_prompt: str, messages: list[dict[str, Any]], tools: Any,
                                           model: str, temperature: float, max_tokens: int, *,
                                           num_ctx: int | None = None, keep_alive: str | None = None,
-                                          cache_prefix: bool = False) -> ToolReply:
+                                          cache_prefix: bool = False,
+                                          thinking_effort: str | None = None) -> ToolReply:
                 sent_as_a_request(json.dumps(to_ollama_messages(messages), ensure_ascii=False))
                 return await super().complete_with_tools(
                     system_prompt, messages, tools, model, temperature, max_tokens,

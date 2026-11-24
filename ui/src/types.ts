@@ -686,6 +686,9 @@ export interface EngineSettings {
   laya_checkpoint?: EngineStringSettingValue;
   /** How workspace commands are contained: required, auto or off (docs/03 §1.4). */
   sandbox_isolation?: EngineStringSettingValue;
+  /** How hard the conductor's model thinks: "", "low", "medium" or "high" (docs/04 §3.0). Optional: an engine that
+   * predates the setting omits it, and the composer hides its control. */
+  conductor_thinking_effort?: EngineStringSettingValue;
   /** 1 = workspace commands may reach the network. Off by default; a goal can opt in too. */
   sandbox_network?: EngineSettingValue;
   /** 1 = `auto` may run the project's own code when this host cannot build a jail. Off by default; only a person sets it. */

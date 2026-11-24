@@ -197,6 +197,25 @@ role's `max_tokens`, because thinking and the reply share that cap. Anthropic's 
 role whose cap leaves less than that sends no thinking block rather than a request the API refuses.
 The setting is a request, not a guarantee: a model with no such control still answers.
 
+**The conductor thinks too, on its own setting.** Chat turns are answered by the conductor through
+`complete_with_tools`, which until 2026-11-24 took no thinking setting at all, so no chat turn ever thought.
+`complete_with_tools` now takes the same `thinking_effort` and sends the same control per protocol. The level is
+the engine setting `conductor_thinking_effort` (empty is off), written by `PUT /settings/engine` like every
+conductor setting, read fresh for each run, and stepped from the composer's **Think** control (off, low, medium,
+high). Two things differ from a role call:
+
+- **Room for the budget.** Each conductor call is capped at 2048 tokens, which would clamp every level to the
+  same 1024-token budget, so a thinking call adds `thinking_headroom(level)` (twice the level's budget) to its
+  cap. Each level then gets its full budget and the answer keeps its 2048.
+- **Reasoning is echoed.** With thinking on, Anthropic returns signed `thinking` blocks and refuses a follow-up
+  request whose assistant tool-use turn does not lead with them unchanged. `ToolReply.reasoning` carries them, the
+  conductor keeps them on the assistant message, and `to_anthropic_messages` sends them first. Gemini's signatures
+  already ride on `ToolCall.signature`. DeepSeek stays off on tool calls (`_tool_call_thinking`), because its
+  thinking mode needs every earlier turn's `reasoning_content` back, which this transcript does not keep.
+
+`tests/test_thinking_in_chat.py` holds it against a loopback fake that refuses a dropped thinking block the way the
+API documents; no real cloud model is part of the suite.
+
 `keep_alive` is not a latency setting for a single call. Role calls inside one goal are
 seconds apart and already warm; what it covers is the gap *between* goals, where a role used
 every ten minutes pays a full model reload each time.

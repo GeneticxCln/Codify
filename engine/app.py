@@ -17,7 +17,7 @@ from collections.abc import AsyncIterator, Awaitable, Callable, Coroutine
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import FrameType
-from typing import Any, TypeVar
+from typing import Any, TypeVar, get_args
 from urllib.parse import urlparse
 
 from fastapi import FastAPI, Query, Request, Response, WebSocket, WebSocketDisconnect
@@ -57,6 +57,7 @@ from engine.suggestions import SuggestionWatch
 from engine.notes import MAX_NOTES, NotesService
 from engine.profile import ProfileImport, ProfileTools
 from engine.models import (
+    ThinkingEffort,
     BUILTIN_PROVIDERS,
     scrub_surrogates,
     ErrorBody,
@@ -1889,6 +1890,11 @@ def _clean_engine_string(key: str, value: Any) -> str:
                 f"{key} is {len(written)} characters once written out ({limit} allowed); list fewer sites",
             )
         return written
+    if key == "conductor_thinking_effort" and text not in ("", *get_args(ThinkingEffort)):
+        raise ApiError(
+            422, "invalid_value",
+            "conductor_thinking_effort must be empty (off), low, medium or high",
+        )
     if key == "sandbox_isolation" and text not in ISOLATION_MODES:
         raise ApiError(
             422, "invalid_value",

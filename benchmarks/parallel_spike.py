@@ -127,6 +127,7 @@ class _RoleProvider(BaseProvider):
         self, system_prompt: str, messages: list[dict[str, Any]], tools: list[ToolSpec], model: str,
         temperature: float, max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        thinking_effort: str | None = None,
     ) -> ToolReply:
         await self._latency()
         self.script.calls += 1

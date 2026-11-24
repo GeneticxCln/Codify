@@ -618,6 +618,21 @@ class _Conduct(_Plan):
         hosts, _ = parse_hosts(raw)
         return FetchPolicy(mode=mode if mode in (MODE_LISTED, MODE_ANY) else MODE_OFF, hosts=hosts)
 
+    def _thinking_effort(self) -> str | None:
+        """How hard the conductor's model thinks (`conductor_thinking_effort`), or None for off.
+
+        Read fresh for every run, so the composer's control applies to the next turn without a restart. Best-effort
+        like every setting read here, and the fallback is off: a store that cannot answer must not turn thinking on.
+        """
+        settings = getattr(self, "settings", None)
+        if settings is None:
+            return None
+        try:
+            value = str(settings.get_str("conductor_thinking_effort")).strip()
+        except Exception:
+            return None
+        return value if value in ("low", "medium", "high") else None
+
     def _settings_int(self, key: str, default: int) -> int:
         """One engine setting, or the default.
 
@@ -1285,6 +1300,7 @@ class _Conduct(_Plan):
             num_ctx=cfg.ollama_num_ctx,
             keep_alive=cfg.ollama_keep_alive,
             ledger=self.orchestrator.tool_call_ledger(goal_id, None, targets),
+            thinking_effort=self._thinking_effort(),
         )
         if gate is not None and not gate.asked:
             def arm(decided: LayaDecision) -> None:

@@ -243,6 +243,10 @@ class SettingsService:
         # be built; otherwise refuse a command that runs the project's own code unless `sandbox_unjailed_ok` is on),
         # `off` (the deliberate opt-out). The default is auto so a machine with a jail is jailed without a choice.
         "sandbox_isolation": "auto",
+        # How hard the conductor's model thinks on each call: `low`, `medium` or `high`, where the provider has a
+        # control for it (Anthropic's budget, OpenAI-style `reasoning_effort`, Gemini's `thinkingBudget`, Ollama's
+        # `think`). Empty, the default, sends nothing, so a model with no thinking control is never sent one.
+        "conductor_thinking_effort": "",
     }
 
     # The longest value each string key holds, and the one place that says so: `PUT /settings/engine` validates
@@ -273,6 +277,7 @@ class SettingsService:
         # The sites `fetch_page` may read when `web_fetch` is 1.
         "web_fetch_hosts": MAX_HOSTS_CHARS,
         "sandbox_isolation": 8,
+        "conductor_thinking_effort": 6,
     }
 
     def get_str(self, key: str) -> str:
