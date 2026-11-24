@@ -30,7 +30,7 @@ import {
   Brain,
   type LucideIcon,
 } from "lucide-react";
-import { nextThinking, thinkingLabel } from "../conductorSettings";
+import { THINKING_CHOICES, thinkingLabel } from "../conductorSettings";
 import { COMPOSER_ANCHOR_ID } from "../composerAnchor";
 
 import { Toggle } from "./ui/Toggle";
@@ -205,6 +205,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
   const [isFolderOpen, setIsFolderOpen] = useState(false);
   const [isModelOpen, setIsModelOpen] = useState(false);
   const [isModeOpen, setIsModeOpen] = useState(false);
+  const [isThinkOpen, setIsThinkOpen] = useState(false);
   const [customModelId, setCustomModelId] = useState("");
   const [customModelError, setCustomModelError] = useState<string | null>(null);
   // Typed filter for the model menu. A discovered catalog runs to hundreds of ids
@@ -260,7 +261,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
   // actually exists between the window top and the card, so a long model list
   // always scrolls instead of overflowing the screen. Measured from the real
   // DOM before paint, and re-measured on resize/scroll.
-  type PickerKey = "folder" | "model" | "mode";
+  type PickerKey = "folder" | "model" | "mode" | "think";
   // Viewport-anchored position for each open menu; null until measured.
   const [menuPos, setMenuPos] = useState<
     Record<PickerKey, { left: number; bottom: number } | null>
@@ -268,32 +269,38 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
     folder: null,
     model: null,
     mode: null,
+    think: null,
   });
   // Cap (px) for each menu's scrollable list; null = Tailwind default max-h.
   const [menuMax, setMenuMax] = useState<Record<PickerKey, number | null>>({
     folder: null,
     model: null,
     mode: null,
+    think: null,
   });
   const wrapRefs: Record<PickerKey, React.RefObject<HTMLDivElement | null>> = {
     folder: useRef<HTMLDivElement>(null),
     model: useRef<HTMLDivElement>(null),
     mode: useRef<HTMLDivElement>(null),
+    think: useRef<HTMLDivElement>(null),
   };
   const menuRefs: Record<PickerKey, React.RefObject<HTMLDivElement | null>> = {
     folder: useRef<HTMLDivElement>(null),
     model: useRef<HTMLDivElement>(null),
     mode: useRef<HTMLDivElement>(null),
+    think: useRef<HTMLDivElement>(null),
   };
   const listRefs: Record<PickerKey, React.RefObject<HTMLDivElement | null>> = {
     folder: useRef<HTMLDivElement>(null),
     model: useRef<HTMLDivElement>(null),
     mode: useRef<HTMLDivElement>(null),
+    think: useRef<HTMLDivElement>(null),
   };
   const openState: Record<PickerKey, boolean> = {
     folder: isFolderOpen,
     model: isModelOpen,
     mode: isModeOpen,
+    think: isThinkOpen,
   };
 
   const measure = React.useCallback(() => {
@@ -353,6 +360,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
     isFolderOpen,
     isModelOpen,
     isModeOpen,
+    isThinkOpen,
     availableModels.length,
     workspaces.length,
   ]);
@@ -363,7 +371,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
 
   // Re-measure on resize/scroll so an open menu keeps fitting the window.
   useEffect(() => {
-    const anyOpen = isFolderOpen || isModelOpen || isModeOpen;
+    const anyOpen = isFolderOpen || isModelOpen || isModeOpen || isThinkOpen;
     if (!anyOpen) return;
     window.addEventListener("resize", measure);
     window.addEventListener("scroll", measure, true);
@@ -371,16 +379,17 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
       window.removeEventListener("resize", measure);
       window.removeEventListener("scroll", measure, true);
     };
-  }, [isFolderOpen, isModelOpen, isModeOpen, measure]);
+  }, [isFolderOpen, isModelOpen, isModeOpen, isThinkOpen, measure]);
 
   // Dropdowns overlap the chat — close on any click outside the prompt card.
   useEffect(() => {
-    if (!isFolderOpen && !isModelOpen && !isModeOpen) return;
+    if (!isFolderOpen && !isModelOpen && !isModeOpen && !isThinkOpen) return;
     const onPointerDown = (e: MouseEvent | TouchEvent) => {
       if (barRef.current && !barRef.current.contains(e.target as Node)) {
         setIsFolderOpen(false);
         setIsModelOpen(false);
         setIsModeOpen(false);
+        setIsThinkOpen(false);
       }
     };
     document.addEventListener("mousedown", onPointerDown);
@@ -389,7 +398,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
       document.removeEventListener("mousedown", onPointerDown);
       document.removeEventListener("touchstart", onPointerDown);
     };
-  }, [isFolderOpen, isModelOpen, isModeOpen]);
+  }, [isFolderOpen, isModelOpen, isModeOpen, isThinkOpen]);
 
   // Auto-resize textarea. The cap is 180px at 100% and grows with the UI scale: the prompt's text is
   // rem, so a fixed cap would hold fewer lines the bigger the window is. The scale is a dependency
@@ -477,10 +486,11 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
     // to kill a run — and stopping a goal is far too expensive a thing to trigger by
     // a key that usually means "dismiss this".
     if (e.key === "Escape") {
-      if (isFolderOpen || isModelOpen || isModeOpen) {
+      if (isFolderOpen || isModelOpen || isModeOpen || isThinkOpen) {
         setIsFolderOpen(false);
         setIsModelOpen(false);
         setIsModeOpen(false);
+        setIsThinkOpen(false);
         return;
       }
       if (canStop && onStop && !isLoading) {
@@ -637,6 +647,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
                   setIsFolderOpen(!isFolderOpen);
                   setIsModelOpen(false);
                   setIsModeOpen(false);
+                  setIsThinkOpen(false);
                 }}
                 className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer ${
                   selectedWorkspace
@@ -781,6 +792,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
                   setIsModelOpen(!isModelOpen);
                   setIsFolderOpen(false);
                   setIsModeOpen(false);
+                  setIsThinkOpen(false);
                 }}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-codify-secondary hover:bg-codify-border transition-colors cursor-pointer"
                 title={
@@ -1024,6 +1036,7 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
                   setIsModeOpen(!isModeOpen);
                   setIsFolderOpen(false);
                   setIsModelOpen(false);
+                  setIsThinkOpen(false);
                 }}
                 className="flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-codify-raised border border-codify-border text-codify-secondary hover:bg-codify-border transition-colors cursor-pointer"
               >
@@ -1107,19 +1120,80 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
             </Toggle>
 
             {/* Thinking: how hard the model reasons before it answers, where its provider has a control for it.
-                One click steps Off → low → medium → high → Off; it is an engine setting, so it holds for the next
-                turns until changed. Hidden when the engine does not know the setting. */}
+                A menu of every level, the current one ticked, so any level is one choice away and each says what it
+                costs. It is an engine setting, so it holds for the next turns until changed. Hidden when the engine
+                does not know the setting. */}
             {thinking !== undefined && (
-              <Toggle
-                armed={thinking !== ""}
-                tone="accent"
-                onClick={() => onChangeThinking?.(nextThinking(thinking))}
-                disabled={!onChangeThinking}
-                title="How hard the model thinks before answering (off, low, medium, high). Models without a thinking control ignore it."
-              >
-                <Brain className="w-3.5 h-3.5" />
-                <span>{thinkingLabel(thinking)}</span>
-              </Toggle>
+              <div className="relative" ref={wrapRefs.think}>
+                <button
+                  type="button"
+                  aria-haspopup="menu"
+                  aria-expanded={isThinkOpen}
+                  disabled={!onChangeThinking}
+                  onClick={() => {
+                    setIsThinkOpen(!isThinkOpen);
+                    setIsFolderOpen(false);
+                    setIsModelOpen(false);
+                    setIsModeOpen(false);
+                  }}
+                  title="How hard the model thinks before answering. Models without a thinking control ignore it."
+                  className={
+                    "flex items-center gap-1.5 px-2.5 py-1 rounded-lg border transition-colors cursor-pointer disabled:opacity-40 disabled:cursor-not-allowed " +
+                    (thinking
+                      ? "bg-codify-accent/20 text-codify-accent-ink border-codify-accent/30"
+                      : "bg-codify-raised border-codify-border text-codify-secondary hover:bg-codify-border")
+                  }
+                >
+                  <Brain className="w-3.5 h-3.5" />
+                  <span>{thinkingLabel(thinking)}</span>
+                  <ChevronDown className="w-3 h-3 text-codify-muted" />
+                </button>
+
+                {isThinkOpen && (
+                  <div
+                    ref={menuRefs.think}
+                    role="menu"
+                    aria-label="Thinking level"
+                    style={
+                      menuPos.think
+                        ? { position: "fixed", left: menuPos.think.left, bottom: menuPos.think.bottom }
+                        : undefined
+                    }
+                    className="absolute left-0 bottom-full mb-2 w-72 bg-codify-surface border border-codify-border rounded-xl shadow-2xl p-1.5 z-50 space-y-0.5"
+                  >
+                    {THINKING_CHOICES.map((choice) => {
+                      const isCurrent = choice.level === (thinking ?? "");
+                      return (
+                        <button
+                          key={choice.level || "off"}
+                          type="button"
+                          role="menuitemradio"
+                          aria-checked={isCurrent}
+                          onClick={() => {
+                            if (!isCurrent) onChangeThinking?.(choice.level);
+                            setIsThinkOpen(false);
+                          }}
+                          className={
+                            "w-full text-left px-2.5 py-1.5 rounded-lg border text-xs flex items-start gap-2 cursor-pointer " +
+                            (isCurrent
+                              ? "bg-codify-accent/20 text-codify-accent-ink border-codify-accent/30"
+                              : "border-transparent text-codify-secondary hover:bg-codify-raised")
+                          }
+                        >
+                          <span className="flex-1 min-w-0">
+                            <span className="block font-semibold">{choice.label}</span>
+                            <span className="block text-2xs font-normal text-codify-muted">{choice.hint}</span>
+                          </span>
+                          {isCurrent && <Check className="mt-0.5 w-3.5 h-3.5 text-codify-accent shrink-0" />}
+                        </button>
+                      );
+                    })}
+                    <p className="px-2.5 pt-1 text-2xs text-codify-muted">
+                      Models without a thinking control ignore this.
+                    </p>
+                  </div>
+                )}
+              </div>
             )}
           </div>
         </div>
