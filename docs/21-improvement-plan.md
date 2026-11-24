@@ -133,7 +133,7 @@ Tracked in execution order (`0 → 10`), one change per PR, under three standing
 | 0 | Real delete for threads and messages | **Built** (`DELETE /conversations/{id}`, `DELETE /goals/{id}` from chat turns) |
 | 1 | Thinking in chat for cloud models | **Built** (`conductor_thinking` across provider tool calls + composer thinking control) |
 | 2 | OpenCode Console provider | **Built** (`opencode` built-in provider + live model discovery) |
-| 3 | "Delete all history" in Settings | **In review** (`POST /history/clear` with typed confirmation + `VACUUM` scrub, PR #137) |
+| 3 | "Delete all history" in Settings | **Built** (`POST /history/clear` with typed confirmation + `VACUUM` scrub, PR #137) |
 | 4 | Context inspector + record-next-turn toggle | **Built in this change** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
 | 5 | Backup and restore of Codify's state | **Built in this change** (`/state/backup` and `/state/restore`, `StateBackupCard.tsx`; §6) |
 | 6 | Per-project usage | Planned (`workspace_id` filter on `/stats/overview` + project picker on Stats, tokens only) |
