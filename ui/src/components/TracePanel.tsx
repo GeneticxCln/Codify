@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useState } from "react";
-import { deleteGoalTrace, fetchGoalTrace, fetchGoalTraceCall } from "../api";
-import type { Goal, TraceCallDetail, TraceSummary } from "../types";
+import { deleteGoalTrace, fetchGoalTrace, fetchGoalTraceCall, replayGoalTrace } from "../api";
+import type { Goal, TraceCallDetail, TraceReplayReport, TraceSummary } from "../types";
 import {
   canArmTrace,
   formatTracePayload,
@@ -8,7 +8,7 @@ import {
   traceHeadline,
   traceRoles,
 } from "../traceSummary";
-import { ChevronDown, ChevronRight, CircleDot, Loader2, Radio, Trash2, X } from "lucide-react";
+import { ChevronDown, ChevronRight, CircleDot, Loader2, Play, Radio, Trash2, X } from "lucide-react";
 import { readRejection } from "../rejection.ts";
 
 /**
@@ -41,6 +41,8 @@ export const TracePanel: React.FC<{
   const [detail, setDetail] = useState<TraceCallDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [replaying, setReplaying] = useState(false);
+  const [replay, setReplay] = useState<TraceReplayReport | null>(null);
 
   // The parent owns the goal, so an arming done here has to show up even if the
   // panel is reopened from a stale copy of it.
@@ -67,6 +69,7 @@ export const TracePanel: React.FC<{
     setSelectedSeq(null);
     setDetail(null);
     setDetailError(null);
+    setReplay(null);
     fetchGoalTrace(goalId)
       .then((s) => {
         if (live) setSummary(s);
@@ -114,11 +117,25 @@ export const TracePanel: React.FC<{
       setSelectedSeq(null);
       setDetail(null);
       setDetailError(null);
+      setReplay(null);
       await load();
     } catch (err: any) {
       setError(readRejection(err, "Could not delete the recording."));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const handleReplay = async () => {
+    setReplaying(true);
+    setError(null);
+    setReplay(null);
+    try {
+      setReplay(await replayGoalTrace(goalId));
+    } catch (err: any) {
+      setError(readRejection(err, "Could not replay this run's recording."));
+    } finally {
+      setReplaying(false);
     }
   };
 
@@ -167,16 +184,29 @@ export const TracePanel: React.FC<{
             </button>
           ) : null}
           {summary && summary.calls > 0 && (
-            <button
-              type="button"
-              onClick={handleDelete}
-              disabled={busy}
-              className="p-1 text-codify-muted hover:text-codify-danger rounded-lg transition-colors disabled:opacity-40"
-              title="Delete this recording (the goal and your files are kept)"
-              aria-label="Delete recording"
-            >
-              <Trash2 className="w-4 h-4" />
-            </button>
+            <>
+              <button
+                type="button"
+                onClick={() => void handleReplay()}
+                disabled={busy || replaying}
+                className="flex items-center gap-1 px-2 py-0.5 text-2xs text-codify-secondary hover:text-codify-primary bg-codify-surface border border-codify-border rounded-md transition-colors disabled:opacity-40"
+                title="Replay this recording in a scratch copy without calling a provider"
+                aria-label="Replay recording"
+              >
+                {replaying ? <Loader2 className="w-3 h-3 animate-spin" /> : <Play className="w-3 h-3" />}
+                <span>{replaying ? "Replaying…" : "Replay"}</span>
+              </button>
+              <button
+                type="button"
+                onClick={handleDelete}
+                disabled={busy || replaying}
+                className="p-1 text-codify-muted hover:text-codify-danger rounded-lg transition-colors disabled:opacity-40"
+                title="Delete this recording (the goal and your files are kept)"
+                aria-label="Delete recording"
+              >
+                <Trash2 className="w-4 h-4" />
+              </button>
+            </>
           )}
           <button
             type="button"
@@ -191,6 +221,23 @@ export const TracePanel: React.FC<{
       </div>
 
       {error && <div className="mt-2 text-xs text-codify-danger">{error}</div>}
+
+      {replay && (
+        <div
+          data-trace-replay={replay.matched ? "matched" : "diverged"}
+          className="mt-2 rounded-lg border border-codify-border bg-codify-surface px-2.5 py-2 text-xs"
+        >
+          <span className={replay.matched ? "font-semibold text-codify-success" : "font-semibold text-codify-warning"}>
+            {replay.matched ? "Replay matched" : "Replay diverged"}
+          </span>{" "}
+          <span className="text-codify-muted">
+            — {replay.served_calls}/{replay.recorded_calls} call{replay.recorded_calls === 1 ? "" : "s"} served
+            {replay.gate_calls_replayed > 0 ? `, ${replay.gate_calls_replayed} gate` : ""}
+            {replay.conductor_calls_skipped > 0 ? `, ${replay.conductor_calls_skipped} conductor skipped` : ""}.
+          </span>
+          {replay.diverged && <div className="mt-1 font-mono text-2xs text-codify-secondary">{replay.diverged}</div>}
+        </div>
+      )}
 
       {!error && !summary && (
         <div className="mt-2 flex items-center gap-2 text-xs text-codify-muted">

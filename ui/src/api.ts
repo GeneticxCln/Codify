@@ -1828,6 +1828,19 @@ export async function setGoalTrace(goal_id: string, enabled: boolean): Promise<G
   return res.json();
 }
 
+/** Replay a recorded goal in an isolated scratch copy (`POST /goals/{id}/trace/replay`). */
+export async function replayGoalTrace(
+  goal_id: string,
+): Promise<import("./types").TraceReplayReport> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const res = await fetch(`${base}/goals/${encodeURIComponent(goal_id)}/trace/replay`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) throw await engineError(res, "Failed to replay the recording");
+  return res.json();
+}
+
 export class ApiRequestError extends Error {
   status: number;
   code: string | null;
