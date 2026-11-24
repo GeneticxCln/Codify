@@ -259,6 +259,7 @@ import {
   SOFTWARE_RENDERING_EVENT,
   type MotionState,
 } from "./motionPreference";
+import { useRenderCheckSettled } from "./renderCheck";
 import {
   LOADING_TIMEOUT_MS,
   pageTitlePayload,
@@ -796,11 +797,15 @@ export const App: React.FC = () => {
   // before this hook's listener exists. The store flag is what survives after
   // "Animate anyway" withdraws the verdict, so either one means starved.
   const starvedBoot = useStarvedThisBoot() || motion.shellStarved !== null;
+  // One-off decorations (the wordmark's shimmer) wait for the shell's render watchdog to finish, so the watchdog
+  // never measures them as the app starving itself; see `renderCheck.ts`.
+  const renderChecked = useRenderCheckSettled();
   useEffect(() => {
     const root = document.documentElement;
     root.dataset.motion = motionAllowed(motion) ? "allowed" : "reduced";
     root.dataset.starved = starvedBoot ? "true" : "false";
-  }, [motion, starvedBoot]);
+    root.dataset.renderChecked = renderChecked ? "true" : "false";
+  }, [motion, starvedBoot, renderChecked]);
   useEffect(() => {
     // The banner writes this window's answer through the store, not through this
     // component; without this the attributes above would keep describing the

@@ -758,15 +758,18 @@ body {
      frame — ~45% of a core in the shell on a software-composited window. A
      transform is composited; the glyphs are painted once into the mask above. */
   transform: translate3d(-100%, 0, 0);
-  /* Ten seconds before the first sweep: the boot probe usually has a verdict in
-     under a second (see `frameProbe.ts`), but the shell's watchdog needs ten
-     one-second samples to be sure, and a band that starts before either answer
-     is a band one of them has already paid for. On a window measured starved,
-     the rule below removes the animation before it ever starts. Counted once,
-     not looped: DESIGN.md §7 says nothing loops, and `paintCost.test.ts` holds
-     every endless animation to a stepped timeline. */
+  /* Held until the shell's render watchdog has finished judging this launch
+     (`data-render-checked`, set from `renderCheck.ts`), then played once. It
+     used to wait a fixed ten seconds, which put this nine-second sweep inside the
+     watchdog's thirty: measured on a Wayland window GTK composites on the CPU,
+     the sweep cost 60–94% of a core while the theme's backdrop alone cost ~20%,
+     and the watchdog read the sweep as starvation and stopped the backdrop for
+     the session. A decoration that waits for the measurement cannot be it. On a
+     window measured starved, the rules below remove the animation outright.
+     Counted once, not looped: DESIGN.md §7 says nothing loops, and
+     `paintCost.test.ts` holds every endless animation to a stepped timeline. */
   animation: codify-wordmark-sweep 9s linear 1;
-  animation-delay: 10s;
+  animation-play-state: paused;
   will-change: transform;
   pointer-events: none;
 }
@@ -774,6 +777,11 @@ body {
   0% { transform: translate3d(-100%, 0, 0); }
   55% { transform: translate3d(100%, 0, 0); }
   100% { transform: translate3d(-100%, 0, 0); }
+}
+/* Before the reduced and starved rules below, which share its specificity and
+   so win by coming later: `animation: none` there resets the play state too. */
+html[data-render-checked="true"] .codify-wordmark-sweep {
+  animation-play-state: running;
 }
 @media (prefers-reduced-motion: reduce) {
   .codify-wordmark-sweep {
