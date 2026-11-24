@@ -482,11 +482,13 @@ CREATE TABLE proposed_files (
   created_at REAL NOT NULL
 );
 
--- One row per model call in a goal that was run with tracing on (§8). The
--- request is stored as a digest rather than as text: a digest is what a replay
--- matches on, and the prompt is the most sensitive thing in a run — the goal,
--- the evidence pack and the user's own source. Responses are stored whole
--- because a replay can serve nothing else.
+-- One row per model call in a goal that was run with tracing on (§8), which is
+-- opt-in, one turn at a time, and bounded by `trace_retention_days`. While it is
+-- on, the request is kept as a digest (what a replay matches on) and as its full
+-- text (`system_prompt`, `user_prompt`, which the context inspector shows); the
+-- prompt is the most sensitive thing in a run — the goal, the evidence pack and
+-- the user's own source. `CODIFY_TRACE_PROMPTS=0` keeps digests only. Responses
+-- are stored whole because a replay can serve nothing else.
 CREATE TABLE trace_calls (
   id TEXT PRIMARY KEY,
   goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
