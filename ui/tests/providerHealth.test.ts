@@ -86,7 +86,8 @@ test("ProviderRow renders the status dot and latency pill in Settings", async ()
           base_url: "https://api.openai.com/v1",
           needs_key: true,
           has_key: true,
-          source: "keyring",
+          storage: "keyring",
+          storage_detail: "OS keyring",
         },
         status: {
           provider: "openai",
