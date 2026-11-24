@@ -19,12 +19,12 @@ from typing import Any
 from urllib.parse import quote
 
 from engine.db import default_db_path
-from engine.replay import (  # noqa: F401 — re-exported for script callers & tests
-    _ReplayFactory,
-    _ReplayedGate,
-    _gate_verdict,
-    _stage_sequence,
-    replay,
+from engine.replay import (
+    _ReplayFactory as _ReplayFactory,
+    _ReplayedGate as _ReplayedGate,
+    _gate_verdict as _gate_verdict,
+    _stage_sequence as _stage_sequence,
+    replay as replay,
 )
 from engine.services import ApiError
 from engine.trace import TraceMismatch
