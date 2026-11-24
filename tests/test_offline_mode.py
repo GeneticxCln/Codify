@@ -67,6 +67,10 @@ class TestOfflineMode(unittest.IsolatedAsyncioTestCase):
         (self.ws_dir / "README.md").write_text("# offline fixture\n")
         self.ws = self.workspaces.create(WorkspaceCreate(name="WS", root_path=str(self.ws_dir)))
 
+        self._prev_state = {
+            k: getattr(app.state, k, None)
+            for k in ("conn", "settings", "keychain", "factory", "registry", "goals", "workspaces", "mcp", "models", "token")
+        }
         app.state.conn = self.conn
         app.state.settings = self.settings
         app.state.keychain = self.keychain
@@ -80,6 +84,13 @@ class TestOfflineMode(unittest.IsolatedAsyncioTestCase):
         self.client = httpx.AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
 
     async def asyncTearDown(self) -> None:
+        self.keychain.delete_provider_key("openai")
+        for k, v in self._prev_state.items():
+            if v is None:
+                if hasattr(app.state, k):
+                    delattr(app.state, k)
+            else:
+                setattr(app.state, k, v)
         await self.client.aclose()
         self.conn.close()
         self.tmp.cleanup()

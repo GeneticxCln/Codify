@@ -240,7 +240,10 @@ def _is_offline_mode(settings: SettingsService | None) -> bool:
     if env in ("1", "true", "yes", "on"):
         return True
     if settings is not None and "offline_mode" in SettingsService.SPEC:
-        return bool(settings.get_int("offline_mode"))
+        try:
+            return bool(settings.get_int("offline_mode"))
+        except Exception:
+            return False
     return False
 
 
