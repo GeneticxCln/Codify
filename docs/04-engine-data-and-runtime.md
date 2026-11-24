@@ -662,7 +662,7 @@ FastAPI's own `{detail: [...]}`, so there is one error shape to read, not two.
 | `POST` | `/goals` | `{workspace_id, title, description?, dry_run?, plan_only?, parallel?, allow_network?, mode?, provider?, model?, trace?}` extra=forbid (`allow_network` is API-only: no app control sends it) — `mode` is `"normal"` \| `"design"` (`04` §4.0a.2) \| `"knowledge"` (`04` §4.9); `trace` records the run's model calls (`04` §8) | `Goal` |
 | `GET` | `/goals` | query: `workspace_id?`, `status?`, `limit` (1–200, default 50), `offset` | `Goal[]` — active goals first, then newest |
 | `GET` | `/goals/{id}` | — | `Goal` + `steps: PlanStep[]` |
-| `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals cascade, counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
+| `DELETE` | `/goals/{id}` | — | deletes the run record; events/steps/proposals/recordings cascade, and any thread summary that reaches past it is dropped (`summaries` counts them), so the model is not handed a deleted message again; counts returned. 409 `goal_in_progress` while PLANNING/RUNNING or a driver holds it. Never touches files |
 | `POST` | `/goals/{id}/start` | `{expected_version}` extra=forbid | `Goal`; the goal is `RUNNING` from the response, and the conductor (or the recipe, where it still drives: no tool-capable model, `conductor_drives_execution = 0`, or a `parallel` goal) takes the open steps in the background. A conductor that cannot finish a step pauses the goal with a `goal_status` reason (§1.4); Start resumes it at that step. 409 `driver_busy` while a previous driver still owns the goal — `PAUSED` is written before the old step runner has unwound, so a resume can be refused for that moment and succeed once it releases |
 | `POST` | `/goals/{id}/pause` | `{expected_version}` | `Goal` |
 | `POST` | `/goals/{id}/cancel` | `{expected_version}` | `Goal` |
@@ -1193,6 +1193,7 @@ the sentence in the response is the engine's own and is what a person reads.
 | `unknown_step` | 404 | a step id is not in that goal |
 | `step_vanished`, `batch_no_longer_disjoint` | 409 | a parallel batch was invalidated between batching and dispatch (the driver re-batches; neither is a failure) |
 | `unknown_suggestion` | 404 | a suggestion id does not exist |
+| `thread_in_progress` | 409 | `DELETE /conversations/{id}` while a turn in that thread is still planning or running, or still driven by the executor (docs/09 §2): cancel it first |
 | `invalid_skill_name`, `invalid_skill_description`, `invalid_skill_body`, `invalid_skill_filename`, `invalid_skill_moves`, `invalid_skill` | 422 | a skill a person is creating or importing is refused, each naming the field; `invalid_skill` carries the loader's own problem |
 | `unknown_skill` | 404 | no skill of that name is available in that workspace |
 | `skill_directory_refused` | 422 | `.codify/skills/` cannot be read, or resolves outside the workspace |

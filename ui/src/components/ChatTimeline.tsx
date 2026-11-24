@@ -386,7 +386,9 @@ const TurnExchange: React.FC<{
   onAnswerQuestion?: (text: string) => void;
   /** Nothing has followed this turn, so a question in it is still waiting for an answer. */
   answerable: boolean;
-}> = React.memo(({ msg, traceOpen, onToggleTrace, autoRead, onOpenLink, onAnswerQuestion, answerable }) => {
+  /** Delete this message and its reply (the caller confirms). Offered only once the turn has finished. */
+  onDelete?: () => void;
+}> = React.memo(({ msg, traceOpen, onToggleTrace, autoRead, onOpenLink, onAnswerQuestion, answerable, onDelete }) => {
   const reply = turnReply(msg.events);
   const question = turnQuestion(msg.events);
   // Only while there is nothing to show yet: the streamed snapshot *is* the
@@ -469,9 +471,28 @@ const TurnExchange: React.FC<{
           Recording
         </button>
       )}
+      {/* Finished turns only, as on a run card: a turn still being answered has a live driver, and Cancel is how
+          that stops. Deleting removes the person's message and the reply, and what the model is given later. */}
+      {onDelete && isGoalFinished(msg.goal?.status) && (
+        <button
+          type="button"
+          onClick={onDelete}
+          className="flex items-center gap-1.5 pl-2 text-2xs text-codify-muted hover:text-codify-danger transition-colors"
+          title="Delete this message and its reply"
+          aria-label="Delete message"
+        >
+          <Trash2 className="w-3 h-3" />
+          Delete
+        </button>
+      )}
     </div>
   );
 });
+
+/** A turn that has stopped for good, and so has no driver left that could write after it is deleted. */
+function isGoalFinished(status: string | undefined): boolean {
+  return status === "COMPLETED" || status === "FAILED" || status === "CANCELLED";
+}
 
 /** Edit a plan step's title, description, and target paths before execution. */
 const PlanStepEditor: React.FC<{
@@ -1179,6 +1200,9 @@ export const ChatTimeline: React.FC<ChatTimelineProps> = React.memo(({
                       onOpenLink={onOpenLink}
                       onAnswerQuestion={onAnswerQuestion}
                       answerable={index === messages.length - 1}
+                      onDelete={
+                        msg.goal ? () => onDeleteGoal(msg.goal!.id, msg.goal!.title) : undefined
+                      }
                     />
                   ) : msg.auditDoc ? (
                     <>

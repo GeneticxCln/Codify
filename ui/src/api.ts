@@ -1355,14 +1355,13 @@ export async function archiveConversation(
 }
 
 /**
- * Drop the thread and keep its runs.
- *
- * The engine keeps every goal it held as a single-turn thread, so this is a way
- * to tidy a tab list and never a way to erase a history.
+ * Delete the thread and every turn in it, for good: their events, plans, recordings and the thread's summaries.
+ * Archive is the way to put a thread away and keep it. Refused (`thread_in_progress`) while a turn in it is still
+ * running. Files in the workspace are never touched.
  */
 export async function deleteConversation(
   conversationId: string,
-): Promise<{ deleted: boolean }> {
+): Promise<{ deleted: boolean; turns: number; events: number; files_touched: false }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/conversations/${encodeURIComponent(conversationId)}`, {
     method: "DELETE",

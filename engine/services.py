@@ -1371,18 +1371,41 @@ class ConversationService:
         return self.get(conversation_id)
 
     def delete(self, conversation_id: str) -> dict[str, Any]:
-        """Drop the thread, keep the runs.
+        """Delete the thread and every turn in it.
 
-        A goal's history is the audit trail of what the engine did, and it is not
-        undone by someone closing a tab. `ON DELETE SET NULL` on
-        `goals.conversation_id` means the goals survive as single-turn threads
-        rather than being swept out of the history with the thread that named
-        them — the same reasoning as docs/03 §1.7's commit scope.
+        This used to drop only the thread row: `ON DELETE SET NULL` on `goals.conversation_id` left every turn
+        behind as its own single-turn thread, so "delete" removed a tab and kept the conversation. A person deleting
+        a thread means the conversation, so its turns go with it, and through the schema's cascades their events,
+        plan steps, proposals and recordings, and the thread's summaries. Archive is the way to put a thread away
+        and keep it (docs/09 §2). Files the fixer wrote are the person's and are not touched.
+
+        Refused while any turn in it is still planning or running: a live driver would keep publishing events for
+        rows that no longer exist, so the person cancels first, as `GoalService.delete` asks for one turn. The route
+        also refuses a turn the executor is still driving.
         """
         self._get_row(conversation_id)
+        busy = self._db.execute(
+            "SELECT id, status FROM goals WHERE conversation_id = ? AND status IN ('PLANNING', 'RUNNING')",
+            (conversation_id,),
+        ).fetchall()
+        if busy:
+            raise ApiError(
+                409, "thread_in_progress",
+                "a turn in this thread is still running — cancel it before deleting the thread",
+                {"conversation_id": conversation_id, "goal_ids": [row["id"] for row in busy]},
+            )
+        turns = int(self._db.execute(
+            "SELECT count(*) FROM goals WHERE conversation_id = ?", (conversation_id,)
+        ).fetchone()[0])
+        events = int(self._db.execute(
+            "SELECT count(*) FROM events WHERE goal_id IN (SELECT id FROM goals WHERE conversation_id = ?)",
+            (conversation_id,),
+        ).fetchone()[0])
+        self._db.execute("DELETE FROM goals WHERE conversation_id = ?", (conversation_id,))
         self._db.execute("DELETE FROM conversations WHERE id = ?", (conversation_id,))
         self._db.commit()
-        return {"deleted": True}
+        return {"deleted": True, "conversation_id": conversation_id, "turns": turns, "events": events,
+                "files_touched": False}
 
     def turns(self, conversation_id: str) -> list[ConversationTurn]:
         """The thread's turns, oldest first, as the transcript reads them.
@@ -2549,6 +2572,15 @@ class GoalService:
                 "SELECT count(*) FROM proposed_files WHERE goal_id = ?", (goal_id,)
             ).fetchone()[0]),
         }
+        # A thread summary that covers this turn still carries its words into the next prompt, so a deleted
+        # message would be "forgotten" in the transcript and remembered by the model. The summaries that reach
+        # past it go with it; the next long turn summarises again from what is left.
+        summaries = 0
+        if goal.conversation_id:
+            summaries = int(self._db.execute(
+                "DELETE FROM conversation_compactions WHERE conversation_id = ? AND covers_through >= ?",
+                (goal.conversation_id, goal.created_at),
+            ).rowcount or 0)
         self._db.execute("DELETE FROM goals WHERE id = ?", (goal_id,))
         self._db.commit()
         return {
@@ -2557,6 +2589,7 @@ class GoalService:
             "title": goal.title,
             "workspace_id": goal.workspace_id,
             **counts,
+            "summaries": summaries,
             "files_touched": False,
         }
 

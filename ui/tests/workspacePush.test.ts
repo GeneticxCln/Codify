@@ -74,6 +74,7 @@ const render = (props: {
       onSelect: noop,
       onRename: noop,
       onArchive: noop,
+      onDelete: noop,
       onOpenLink: noop,
       ...props,
     }),

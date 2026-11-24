@@ -30,7 +30,7 @@
  * nothing can check.
  */
 import { isChatMode } from "./types";
-import type { Event, Goal } from "./types";
+import type { ChatMessage, Event, Goal } from "./types";
 
 /** The last log the engine flagged as this turn's reply: what `turnReply` and `turnQuestion` both read, so a question can never come from a different event than the words above it. */
 function lastTurnLog(events: Event[] | undefined): Event | null {
@@ -198,4 +198,19 @@ function target(value: unknown): string {
  */
 export function isConversationalTurn(goal: Goal | undefined): boolean {
   return isChatMode(goal?.mode) && (goal?.steps?.length ?? 0) === 0;
+}
+
+/**
+ * The transcript without one turn: its reply *and* the person's message that asked for it.
+ *
+ * A turn is two messages and only the reply carries the goal; the person's bubble before it has no goal id at all
+ * (a live send and a restored thread even name it differently). Deleting by goal id alone therefore removed the
+ * answer and left the question on screen, a message the engine had already forgotten. The person's message is the
+ * one directly before the reply, which is how both the composer and `threadHydration.turnMessages` lay a turn out.
+ */
+export function withoutTurn(messages: ChatMessage[], goalId: string): ChatMessage[] {
+  const at = messages.findIndex((m) => m.goal?.id === goalId);
+  if (at === -1) return messages;
+  const from = at > 0 && messages[at - 1].role === "user" && !messages[at - 1].goal ? at - 1 : at;
+  return [...messages.slice(0, from), ...messages.slice(at + 1)];
 }

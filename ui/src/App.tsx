@@ -66,6 +66,7 @@ import {
   fetchConversationTurns,
   renameConversation,
   archiveConversation,
+  deleteConversation,
   attachGoalToConversation,
   closeBrowserWebview,
   closeMachine,
@@ -107,6 +108,7 @@ import {
   turnMessages,
   turnsNeedingHydration,
 } from "./threadHydration";
+import { isConversationalTurn, withoutTurn } from "./turnTranscript";
 import { Badge } from "./components/ui/Badge";
 import { IconButton } from "./components/ui/IconButton";
 import { Logo } from "./components/ui/Logo";
@@ -3099,6 +3101,29 @@ export const App: React.FC = () => {
     [updateWorkspaceConversations],
   );
 
+  /** Delete a thread and every turn in it, after the person confirms. Archive is the way to keep one. */
+  const handleDeleteConversation = useCallback(
+    async (conversationId: string, workspaceId: string, title: string) => {
+      const ok = window.confirm(
+        `Delete "${title}"?\n\nThe thread and every message in it will be removed for good, ` +
+          `and the assistant will no longer remember them. Archive keeps a thread instead.\n\n` +
+          `Files in your workspace are NOT touched.`,
+      );
+      if (!ok) return;
+      try {
+        await deleteConversation(conversationId);
+        updateWorkspaceConversations(workspaceId, (previous) =>
+          previous.filter((conversation) => conversation.id !== conversationId),
+        );
+        setTabState((prev) => closeConversation(prev, conversationId));
+        setMessages((prev) => prev.filter((m) => m.conversationId !== conversationId));
+      } catch (err: any) {
+        setError(readRejection(err, "Failed to delete the conversation"));
+      }
+    },
+    [updateWorkspaceConversations],
+  );
+
   /** Drop a goal's stream: forget the handle, then close the socket.
    *
    * Deleting the map entry alone left a reconnecting socket with no owner:
@@ -4066,13 +4091,16 @@ export const App: React.FC = () => {
   };
 
   const handleDeleteGoal = async (goalId: string, title: string) => {
-    // Confirm names the cascade, because "delete" on a run record is not
-    // obviously the same as forgetting a chat entry: the event log, the plan
-    // steps, and any dry-run proposals go with it.
+    // Confirm names what goes. A chat message is the person's words and the reply; a run also has a plan and
+    // proposals. Both are gone for good, from the transcript and from what the model is given next time.
+    const conversational = isConversationalTurn(messages.find((m) => m.goal?.id === goalId)?.goal);
     const ok = window.confirm(
-      `Delete this goal?\n\n"${title}" and its full record will be removed: ` +
-        `its event log, plan steps, and any dry-run proposals.\n\n` +
-        `Files your fixer wrote in the workspace are NOT touched.`,
+      conversational
+        ? `Delete this message?\n\nYour message and its reply will be removed for good, ` +
+            `and the assistant will no longer remember them.\n\nFiles in your workspace are NOT touched.`
+        : `Delete this goal?\n\n"${title}" and its full record will be removed: ` +
+            `its event log, plan steps, and any dry-run proposals.\n\n` +
+            `Files your fixer wrote in the workspace are NOT touched.`,
     );
     if (!ok) return;
     setError(null);
@@ -4089,7 +4117,7 @@ export const App: React.FC = () => {
       );
       // Drop it from the transcript and the history drawer in one move —
       // a card left behind would be a goal the engine has already forgotten.
-      setMessages((prev) => prev.filter((m) => m.goal?.id !== goalId));
+      setMessages((prev) => withoutTurn(prev, goalId));
       setHistory((prev) => prev.filter((g) => g.id !== goalId));
       autoStartedGoals.current.delete(goalId);
     } catch (err: any) {
@@ -4547,6 +4575,12 @@ export const App: React.FC = () => {
             onSelect={handleSelectConversation}
             onRename={(id, title) => void handleRenameConversation(id, title)}
             onArchive={(id) => void handleArchiveConversation(id)}
+            onDelete={(id) => {
+              const target = conversations.find((conversation) => conversation.id === id);
+              if (target) {
+                void handleDeleteConversation(id, target.workspace_id, target.title || "this thread");
+              }
+            }}
             onOpenBrowser={handleNewBrowserTab}
             onOpenTerminal={() => void handleOpenTerminal()}
             onOpenMachine={() => void handleOpenMachine(false)}

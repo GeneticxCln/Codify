@@ -45,14 +45,14 @@ test("New thread is the first item, and it is the only one needing no thread", (
   }
 });
 
-test("on a thread the menu offers New thread, Rename and Archive, in order", () => {
+test("on a thread the menu offers New thread, Rename, Archive and Delete, in order", () => {
   assert.deepEqual(
     threadMenuItems(true).map((i) => i.id),
-    ["new", "rename", "archive"]
+    ["new", "rename", "archive", "delete"]
   );
   assert.deepEqual(
     threadMenuItems(true).map((i) => i.label),
-    ["New thread", "Rename", "Archive"]
+    ["New thread", "Rename", "Archive", "Delete"]
   );
 });
 
@@ -153,13 +153,13 @@ test("a row wins over the active thread even when the row is the empty string", 
   assert.equal(newThreadParentId("", undefined, ["showing-1"]), undefined);
 });
 
-test("only Archive is marked as the one that takes something away", () => {
+test("Archive and Delete are the ones marked as taking something away", () => {
   // Archive hides the thread from the panel. It is not a delete — the engine
   // keeps the runs — but it is the item that removes something from view, so it
   // is the one that may not look identical to the two beside it.
   assert.deepEqual(
     THREAD_MENU_ITEMS.filter((i) => i.caution).map((i) => i.id),
-    ["archive"]
+    ["archive", "delete"]
   );
 });
 

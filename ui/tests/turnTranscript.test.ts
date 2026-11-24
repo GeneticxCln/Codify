@@ -343,3 +343,30 @@ test("a plan step's description keeps its marks, and the person's own message wr
   // The person's own words: line breaks kept, and a long word wraps instead of widening the column.
   assert.match(markup, /<div class="[^"]*\bwhitespace-pre-wrap\b[^"]*\bbreak-words\b[^"]*">hi<\/div>/);
 });
+
+test("deleting a turn removes the person's message with its reply", async () => {
+  // Only the reply carries the goal; the person's bubble before it has no goal id at all. Deleting by goal id
+  // alone left the question on screen after the engine had forgotten the turn.
+  const { withoutTurn } = await import("../src/turnTranscript.ts");
+  const goal = (id: string) => ({ id, mode: "chat", steps: [] }) as never;
+  const messages = [
+    { id: "u1", role: "user", content: "keep", timestamp: 1 },
+    { id: "a1", role: "assistant", content: "", timestamp: 2, goal: goal("g1") },
+    { id: "u2", role: "user", content: "delete me", timestamp: 3 },
+    { id: "a2", role: "assistant", content: "", timestamp: 4, goal: goal("g2") },
+    { id: "u3", role: "user", content: "keep too", timestamp: 5 },
+    { id: "a3", role: "assistant", content: "", timestamp: 6, goal: goal("g3") },
+  ] as never[];
+  assert.deepEqual(withoutTurn(messages, "g2").map((m: { id: string }) => m.id), ["u1", "a1", "u3", "a3"]);
+  assert.deepEqual(withoutTurn(messages, "g1").map((m: { id: string }) => m.id), ["u2", "a2", "u3", "a3"]);
+  assert.equal(withoutTurn(messages, "missing"), messages, "an unknown turn changes nothing");
+});
+
+test("a finished chat message offers Delete, and one still being answered does not", () => {
+  const reply = [event(1, "log", { level: "info", message: "Hello!", turn: true })];
+  assert.match(timeline(reply, { status: "COMPLETED" }), /aria-label="Delete message"/);
+  assert.match(timeline(reply, { status: "FAILED" }), /aria-label="Delete message"/);
+  // A turn with a live driver is stopped with Cancel; deleting it would leave a coroutine writing events for rows
+  // that no longer exist, which the engine refuses anyway.
+  assert.doesNotMatch(timeline(reply, { status: "PLANNING" }), /aria-label="Delete message"/);
+});
