@@ -134,12 +134,12 @@ Tracked in execution order (`0 → 10`), one change per PR, under three standing
 | 1 | Thinking in chat for cloud models | **Built** (`conductor_thinking` across provider tool calls + composer thinking control) |
 | 2 | OpenCode Console provider | **Built** (`opencode` built-in provider + live model discovery) |
 | 3 | "Delete all history" in Settings | **Built** (`POST /history/clear` with typed confirmation + `VACUUM` scrub, PR #137) |
-| 4 | Context inspector + record-next-turn toggle | **Built in this change** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
-| 5 | Backup and restore of Codify's state | **Built in this change** (`/state/backup` and `/state/restore`, `StateBackupCard.tsx`; §6) |
-| 6 | Per-project usage | Planned (`workspace_id` filter on `/stats/overview` + project picker on Stats, tokens only) |
+| 4 | Context inspector + record-next-turn toggle | **Built** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
+| 5 | Backup and restore of Codify's state | **Built** (`/state/backup` and `/state/restore`, `StateBackupCard.tsx`; §6) |
+| 6 | Per-project usage | **Built** (`workspace_id` filter on `/stats/overview` and `/stats/failures` + Project picker in `StatsPanel.tsx`, tokens only) |
 | 7 | Provider health | **Built** (reachability, auth status and latency in `model_catalog.py`, `provider_health_changed` transitions in `catalog_watch.py`, status dot in `ProviderRow.tsx`, down/recovery notice in `notifications.ts`, skips remote pings in offline mode) |
 | 8 | Replay from the app | **Built in this change** (`engine/replay.py`, `POST /goals/{id}/trace/replay`, Replay control and verdict banner in `TracePanel.tsx`) |
-| 9 | Offline switch | Planned (single setting restricting chat/roles to local endpoints and disabling web fetch, MCP, update checks and provider-health pings) |
+| 9 | Offline switch | **Built** (`offline_mode` engine setting restricting chat/roles to local loopback endpoints and disabling web fetch, MCP, CI inbox checks, update checks, and remote provider discovery pings together; `OfflineModeCard.tsx` + `AboutPane.tsx`) |
 | 10 | App-wide audit view | Planned (cross-project list of agent commits, touched files and goals built from persisted per-goal audit events) |
 
 ## 6. State backup and restore

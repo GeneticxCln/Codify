@@ -2071,8 +2071,9 @@ class Keychain:
 
 
 class ProviderFactory:
-    def __init__(self, keychain: Keychain):
+    def __init__(self, keychain: Keychain, *, is_offline: Callable[[], bool] | None = None):
         self._keychain = keychain
+        self._is_offline = is_offline
 
     def build(self, config: AgentConfig) -> BaseProvider:
         """The one way a provider is constructed.
@@ -2084,6 +2085,12 @@ class ProviderFactory:
         """
         key = self._keychain.get(config.api_key_ref) or self._keychain.get_provider_key(config.provider)
         base = config.base_url or BUILTIN_PROVIDERS.get(config.provider, {}).get("base_url") or ""
+        if self._is_offline is not None and self._is_offline() and not is_local_endpoint(base):
+            raise ProviderError(
+                "offline_mode",
+                f"Offline mode is on — {config.provider} ({base or 'remote endpoint'}) cannot be reached; "
+                "switch to a local model or turn off Offline mode in Settings.",
+            )
         if config.protocol == "anthropic":
             return AnthropicProvider(key, base)
         if config.protocol == "openai_compat":

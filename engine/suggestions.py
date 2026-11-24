@@ -489,7 +489,7 @@ class SuggestionWatch:
                 return 0
             moment = self._clock() if now is None else now
             made = await asyncio.to_thread(self._sweep_database, moment)
-            if self._settings.get_int("suggest_ci"):
+            if self._settings.get_int("suggest_ci") and not self._settings.get_int("offline_mode"):
                 made += await self._sweep_ci(moment)
             return made
 

@@ -77,6 +77,7 @@ LEFT_OUT = {
     "browser_actions": "lets the assistant click and type in your browser tabs",
     "web_fetch": "lets the assistant read web pages",
     "web_fetch_hosts": "names the sites it may read",
+    "offline_mode": "limits the app to local models and turns off outbound checks",
     "suggest_ci": "contacts GitHub without a button being pressed",
     "cross_workspace_notes": "lets notes written for one project reach another",
     "laya_required": "is a machine's own choice about its gate",
