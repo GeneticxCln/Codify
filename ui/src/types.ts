@@ -501,6 +501,37 @@ export interface FailureBreakdown {
 
 /** The engine's GET /stats/overview response: cross-goal outcomes, spend, and
  * a sparse daily trend, all read from the persisted goal and event stores. */
+export interface AuditCommitEntry {
+  step_id: string | null;
+  step_title: string | null;
+  sha: string | null;
+  message: string;
+  at: number | null;
+}
+
+export interface AuditChangeGoal {
+  goal_id: string;
+  workspace_id: string;
+  workspace_name: string;
+  title: string;
+  status: GoalStatus;
+  mode: string;
+  dry_run: boolean;
+  updated_at: number;
+  commits: AuditCommitEntry[];
+  files: string[];
+  files_count: number;
+}
+
+export interface AuditChangesResponse {
+  generated_at: number;
+  workspace_id: string | null;
+  total_goals: number;
+  total_commits: number;
+  total_files: number;
+  entries: AuditChangeGoal[];
+}
+
 export interface StatsOverview {
   window_days: number;
   generated_at: number;

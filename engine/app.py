@@ -27,7 +27,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from engine import backup, capabilities, history, home, speech, watchdog
+from engine import audit_feed, backup, capabilities, history, home, speech, watchdog
 from engine import github_remote
 from engine.db import SCHEMA_VERSION, connect
 from engine.compaction import CompactionService
@@ -3156,6 +3156,21 @@ async def _sweep_metrics(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     away.
     """
     return await _read_off_the_loop(conn, _load_metrics)
+
+
+@app.get("/audit/changes")
+async def get_audit_changes(
+    request: Request,
+    workspace_id: str | None = Query(None),
+    limit: int = Query(50, ge=1, le=200),
+) -> dict[str, Any]:
+    """Cross-project audit feed of goals that modified files or created git commits."""
+    if workspace_id:
+        request.app.state.workspaces.get(workspace_id)  # 404 unknown_workspace
+    return await _read_off_the_loop(
+        request.app.state.conn,
+        lambda c: audit_feed.load_audit_changes(c, workspace_id=workspace_id, limit=limit),
+    )
 
 
 @app.get("/stats/overview")

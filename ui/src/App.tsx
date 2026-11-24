@@ -198,6 +198,8 @@ import { looksLikeAudit } from "./components/AuditReport";
 // whole Settings screen (every card, the appearance pane, MCP); `StatsPanel` the statistics drawer.
 const SettingsModal = lazy(() => import("./components/SettingsModal").then((m) => ({ default: m.SettingsModal })));
 const StatsPanel = lazy(() => import("./components/StatsPanel").then((m) => ({ default: m.StatsPanel })));
+const AuditPanel = lazy(() => import("./components/AuditPanel").then((m) => ({ default: m.AuditPanel })));
+const SessionDrawer = lazy(() => import("./components/SessionDrawer").then((m) => ({ default: m.SessionDrawer })));
 import { CommandPalette } from "./components/CommandPalette";
 import { buildPaletteItems, type PaletteItem } from "./commandPalette";
 import { resolveShortcut } from "./shortcuts";
@@ -219,7 +221,6 @@ import {
   type AppNotification,
 } from "./notifications";
 import { NotificationsDrawer } from "./components/NotificationsDrawer";
-import { SessionDrawer } from "./components/SessionDrawer";
 import { ClipboardDrawer } from "./components/ClipboardDrawer";
 import { useClipboardHistory } from "./useClipboardHistory";
 import { ClipboardRecorderContext } from "./clipboardContext";
@@ -1304,6 +1305,7 @@ export const App: React.FC = () => {
   // and "which one" is what the layout rule below needs to know (`drawers.ts`).
   const [drawer, setDrawer] = useState<Drawer | null>(null);
   const statsOpen = drawer === "stats";
+  const auditOpen = drawer === "audit";
   const sessionOpen = drawer === "session";
   const historyOpen = drawer === "history";
   const notificationsOpen = drawer === "notifications";
@@ -4516,6 +4518,15 @@ export const App: React.FC = () => {
             <BarChart3 className="w-3.5 h-3.5" />
             <span>Stats</span>
           </Toggle>
+          <Toggle
+            armed={auditOpen}
+            tone="accent"
+            onClick={() => setDrawer((open) => nextDrawer(open, "audit"))}
+            title="App-wide audit log — commits, files, and goals agents changed across projects"
+          >
+            <ScrollText className="w-3.5 h-3.5" />
+            <span>Audit</span>
+          </Toggle>
 
           {/* Session: what this thread's model call is actually shown. The same
               slot as the other drawers, and next to Stats because both are
@@ -4827,10 +4838,12 @@ export const App: React.FC = () => {
               table measured 500px of content inside a 384px drawer, so it scrolled
               sideways and clipped its own last column. */}
         {sessionOpen && (
-          <SessionDrawer
-            conversationId={activeConversationId}
-            onClose={() => setDrawer((open) => closeDrawer(open, "session"))}
-          />
+          <Suspense fallback={null}>
+            <SessionDrawer
+              conversationId={activeConversationId}
+              onClose={() => setDrawer((open) => closeDrawer(open, "session"))}
+            />
+          </Suspense>
         )}
 
         {statsOpen && (
@@ -4850,6 +4863,28 @@ export const App: React.FC = () => {
             <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
               <Suspense fallback={null}>
                 <StatsPanel />
+              </Suspense>
+            </div>
+          </aside>
+        )}
+
+        {auditOpen && (
+          <aside className="w-[28rem] max-w-[45%] shrink-0 bg-codify-surface border-l border-codify-border flex flex-col">
+            <div className="flex items-center justify-between px-4 py-3 border-b border-codify-border">
+              <div className="flex items-center gap-2 text-sm font-semibold text-codify-primary">
+                <ScrollText className="w-4 h-4 text-codify-info" />
+                Audit log
+              </div>
+              <IconButton
+                label="Close audit log"
+                onClick={() => setDrawer((open) => closeDrawer(open, "audit"))}
+              >
+                <X className="w-4 h-4" />
+              </IconButton>
+            </div>
+            <div className="flex-1 overflow-y-auto overflow-x-hidden p-3">
+              <Suspense fallback={null}>
+                <AuditPanel onOpenGoal={restoreGoal} />
               </Suspense>
             </div>
           </aside>

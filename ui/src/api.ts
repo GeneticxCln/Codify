@@ -15,6 +15,7 @@ import type {
   AgentSkills,
   AudioInputs,
   AudioStatus,
+  AuditChangesResponse,
   CompactionStatus,
   Conversation,
   ConversationTurn,
@@ -773,6 +774,23 @@ export async function fetchRoles(): Promise<RoleInfo[]> {
 
 /** Cross-goal statistics: success rate, spend per role/model, and the daily
  * trend, aggregated by the engine from the goals and events it already stores. */
+export async function fetchAuditChanges(
+  workspaceId?: string | null,
+  limit = 50,
+): Promise<AuditChangesResponse> {
+  const base = `http://127.0.0.1:${currentEngine.port}`;
+  const params = new URLSearchParams({ limit: String(limit) });
+  if (workspaceId) params.set("workspace_id", workspaceId);
+  const res = await fetch(`${base}/audit/changes?${params.toString()}`, {
+    headers: { Authorization: `Bearer ${currentEngine.token}` },
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || `HTTP ${res.status}`);
+  }
+  return res.json();
+}
+
 export async function fetchStatsOverview(windowDays: number): Promise<StatsOverview> {
   const base = `http://127.0.0.1:${currentEngine.port}`;
   const res = await fetch(`${base}/stats/overview?window=${windowDays}`, {
