@@ -250,7 +250,7 @@ async def replay(
             finally:
                 replay_conn.close()
 
-        if diverged is None and final.status == "FAILED":
+        if diverged is None:
             for event in replay_events:
                 if event.type != "agent_call_failed":
                     continue
@@ -258,20 +258,22 @@ async def replay(
                 if payload.get("code") == "trace_mismatch":
                     diverged = str(payload.get("message") or "trace mismatch")
                     break
-            if diverged is None:
-                for event in reversed(replay_events):
-                    if event.type == "error":
-                        payload = dict(event.payload)
-                        diverged = str(
-                            payload.get("message") or payload.get("code") or "the replay failed"
-                        )
-                        break
-                else:
-                    diverged = "the replay failed before every recorded call was served"
+        if diverged is None and final.status == "FAILED":
+            for event in reversed(replay_events):
+                if event.type == "error":
+                    payload = dict(event.payload)
+                    diverged = str(
+                        payload.get("message") or payload.get("code") or "the replay failed"
+                    )
+                    break
+            else:
+                diverged = "the replay failed before every recorded call was served"
 
         stages = _stage_sequence(replay_events)
         gate_calls = [c for c in calls if c.get("role") == "laya"]
         conductor_calls = [c for c in calls if c.get("role") == "conductor"]
+        conductor_served = sum(1 for r in provider.served if r == "conductor")
+        conductor_skipped = max(0, len(conductor_calls) - conductor_served)
         return {
             "goal_id": goal_id,
             "replay_goal_id": replay_goal.id,
@@ -280,12 +282,12 @@ async def replay(
             "recorded_calls": len(calls),
             "served_calls": len(provider.served),
             "gate_calls_replayed": len(gate_calls),
-            "conductor_calls_skipped": len(conductor_calls),
+            "conductor_calls_skipped": conductor_skipped,
             "stages": stages,
             "status": final.status,
             "diverged": diverged,
             "matched": diverged is None
-            and len(provider.served) + len(gate_calls) + len(conductor_calls) == len(calls),
+            and len(provider.served) + len(gate_calls) + conductor_skipped == len(calls),
         }
     finally:
         if cleanup_scratch and owns_scratch:

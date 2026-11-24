@@ -10,6 +10,7 @@ import tempfile
 import threading
 import unittest
 from pathlib import Path
+from typing import Any
 from unittest.mock import patch
 
 import httpx
@@ -18,10 +19,19 @@ from httpx import ASGITransport
 from engine.app import BOOT_TOKEN, app
 from engine.db import connect
 from engine.executor import ExecutorService
-from engine.models import ROLES, AgentConfigUpdate, GoalCreate, WorkspaceCreate
-from engine.providers import Keychain
+from engine.models import (
+    ROLES,
+    AgentConfig,
+    AgentConfigUpdate,
+    ConversationCreate,
+    GoalCreate,
+    TurnCreate,
+    WorkspaceCreate,
+)
+from engine.providers import BaseProvider, Keychain, ProviderFactory
 from engine.sandbox import SandboxService
-from engine.services import AgentRegistryService, GoalService, WorkspaceService
+from engine.services import AgentRegistryService, ConversationService, GoalService, WorkspaceService
+from engine.toolcall import ToolCall, ToolReply, ToolSpec
 from engine.trace import TraceService
 from tests.test_design_role import SkippedGate
 from tests.test_trace import RESPONSES, ScriptedFactory, ScriptedProvider
@@ -171,6 +181,98 @@ class TestReplayApi(unittest.IsolatedAsyncioTestCase):
             r = await self.client.post(f"/goals/{goal.id}/trace/replay", headers=self.headers)
         self.assertEqual(422, r.status_code, r.text)
         self.assertEqual("replay_copy_failed", r.json()["code"])
+
+    async def test_replay_route_replays_recorded_conductor_chat_turn_and_detects_drift(self) -> None:
+        # Preserve the v1.9.0 failure: a recorded chat turn (conductor tool-calling loop) always
+        # failed replay with served_calls=0 because ReplayProvider had supports_tools=False.
+        class _ScriptedConductorProvider(BaseProvider):
+            def __init__(self) -> None:
+                self.turn = 0
+
+            @property
+            def supports_tools(self) -> bool:
+                return True
+
+            async def complete(
+                self,
+                system_prompt: str,
+                user_prompt: str,
+                model: str,
+                temperature: float,
+                max_tokens: int,
+                *,
+                num_ctx: int | None = None,
+                keep_alive: str | None = None,
+                json_schema: dict[str, Any] | None = None,
+                thinking_effort: str | None = None,
+            ) -> str:
+                return "{}"
+
+            async def complete_with_tools(
+                self,
+                system_prompt: str,
+                messages: list[dict[str, Any]],
+                tools: list[ToolSpec],
+                model: str,
+                temperature: float,
+                max_tokens: int,
+                *,
+                num_ctx: int | None = None,
+                keep_alive: str | None = None,
+                cache_prefix: bool = False,
+                thinking_effort: str | None = None,
+            ) -> ToolReply:
+                self.turn += 1
+                if self.turn == 1:
+                    return ToolReply(
+                        text="",
+                        tool_calls=[ToolCall(id="call-1", name="read_file", arguments={"path": "README.md"})],
+                    )
+                return ToolReply(text="README says # fixture.", tool_calls=[])
+
+        class _ConductorFactory(ProviderFactory):
+            def __init__(self, target: BaseProvider, kc: Keychain) -> None:
+                super().__init__(kc)
+                self._target = target
+
+            def build(self, config: AgentConfig) -> BaseProvider:
+                return self._target
+
+        provider = _ScriptedConductorProvider()
+        kc = Keychain()
+        registry = AgentRegistryService(self.conn, _ConductorFactory(provider, kc), kc)
+        for role in ROLES:
+            registry.set_config(role, AgentConfigUpdate(provider="ollama", model_name="m"))
+        executor = ExecutorService(
+            self.goals, self.workspaces, registry, SandboxService(),
+            laya=SkippedGate(), tracer=self.traces,
+        )
+        convo = ConversationService(self.conn).create(
+            ConversationCreate(workspace_id=self.ws.id, title="chat replay")
+        )
+        goal = self.goals.create_turn(convo.id, TurnCreate(prompt="summarize README.md", trace=True))
+        await executor.run_chat(goal.id)
+        self.assertEqual("COMPLETED", self.goals.get(goal.id).status)
+        self.assertEqual(2, self.traces.count(goal.id))
+
+        # Replaying against the unchanged workspace must serve both recorded conductor calls and match.
+        r = await self.client.post(f"/goals/{goal.id}/trace/replay", headers=self.headers)
+        self.assertEqual(200, r.status_code, r.text)
+        body = r.json()
+        self.assertTrue(body["matched"], body)
+        self.assertIsNone(body["diverged"])
+        self.assertEqual(2, body["served_calls"])
+        self.assertEqual(0, body["conductor_calls_skipped"])
+        self.assertEqual("COMPLETED", body["status"])
+
+        # Changing README.md alters the tool result fed into round 2 -> replay must report divergence.
+        (self.ws_dir / "README.md").write_text("# modified fixture\n")
+        r2 = await self.client.post(f"/goals/{goal.id}/trace/replay", headers=self.headers)
+        self.assertEqual(200, r2.status_code, r2.text)
+        body2 = r2.json()
+        self.assertFalse(body2["matched"], body2)
+        self.assertTrue(body2["diverged"], body2)
+        self.assertIn("conductor", str(body2["diverged"]).lower())
 
 
 if __name__ == "__main__":

@@ -24,6 +24,7 @@ The rules, each one a decision about somebody's data:
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import time
@@ -31,6 +32,7 @@ import uuid
 from typing import Any, Protocol
 
 from engine.providers import BaseProvider, ProviderError
+from engine.toolcall import ToolCall, ToolReply, ToolSpec
 
 # Whether an armed recording keeps prompt text beside its digest. On by default
 # because recording itself is opt-in per turn/goal (`trace=True`, disarmed after
@@ -307,12 +309,19 @@ class ReplayProvider(BaseProvider):
         self._calls = list(calls)
         self._served: set[int] = set()
         self.served: list[str] = []
+        # How many messages the conductor loop has already been shown, mirroring `_ConductorLedger.seen`.
+        self._conductor_seen = 0
         # Which role this instance is serving. Set by the factory that builds
         # it, from the `AgentConfig` it was asked for — the same signal the
         # real providers get, rather than a guess from the prompt's wording
         # (these prompts name each other on purpose, so a keyword scan hands
         # back another role's script).
         self.current_role: str | None = None
+
+    @property
+    def supports_tools(self) -> bool:
+        """True when the recording holds conductor tool-calling turns to replay."""
+        return any(call.get("role") == "conductor" for call in self._calls)
 
     async def complete(
         self, system_prompt: str, user_prompt: str, model: str,
@@ -332,6 +341,32 @@ class ReplayProvider(BaseProvider):
         raise TraceMismatch(
             self._explain(role, digest)
         )
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[ToolSpec],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        *,
+        num_ctx: int | None = None,
+        keep_alive: str | None = None,
+        cache_prefix: bool = False,
+        thinking_effort: str | None = None,
+    ) -> ToolReply:
+        shown = list(messages[self._conductor_seen:])
+        user_prompt = json.dumps([_conductor_message_json(m) for m in shown], default=str)
+        digest = prompt_digest(system_prompt, user_prompt)
+        for idx, call in enumerate(self._calls):
+            if idx in self._served or call["role"] != "conductor" or call["prompt_hash"] != digest:
+                continue
+            self._served.add(idx)
+            self.served.append("conductor")
+            self._conductor_seen = len(messages) + 1
+            return _decode_conductor_reply(str(call.get("response") or ""))
+        raise TraceMismatch(self._explain("conductor", digest))
 
     def _explain(self, role: str, digest: str) -> str:
         """Say what diverged, not just that something did."""
@@ -353,6 +388,43 @@ class ReplayProvider(BaseProvider):
             f"replay: {role} was called more times than the recording holds "
             f"(expected {want}) — the run is not reproducible from this trace"
         )
+
+
+def _conductor_message_json(message: dict[str, Any]) -> dict[str, Any]:
+    """Serialize one neutral conductor message identically to `_ConductorCallBooks`."""
+    out = dict(message)
+    calls = out.get("tool_calls")
+    if calls:
+        out["tool_calls"] = [
+            {"id": c.id, "name": c.name, "arguments": c.arguments}
+            if hasattr(c, "id")
+            else c
+            for c in calls
+        ]
+    return out
+
+
+def _decode_conductor_reply(raw: str) -> ToolReply:
+    """Reconstruct a recorded conductor `ToolReply` from its stored JSON payload."""
+    try:
+        data = json.loads(raw) if raw.strip() else {}
+    except ValueError:
+        return ToolReply(text=raw)
+    if not isinstance(data, dict):
+        return ToolReply(text=str(data))
+    tool_calls: list[ToolCall] = []
+    for entry in data.get("tool_calls") or []:
+        if not isinstance(entry, dict):
+            continue
+        args = entry.get("arguments")
+        tool_calls.append(
+            ToolCall(
+                id=str(entry.get("id") or ""),
+                name=str(entry.get("name") or ""),
+                arguments=args if isinstance(args, dict) else {},
+            )
+        )
+    return ToolReply(text=str(data.get("text") or ""), tool_calls=tool_calls)
 
 
 def _int_or_none(value: Any) -> int | None:
