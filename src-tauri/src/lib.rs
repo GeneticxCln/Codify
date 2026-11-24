@@ -451,6 +451,33 @@ pub const RENDER_CHECK_SETTLED_EVENT: &str = "codify:render-check-settled";
 static RENDER_CHECK_SETTLED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+/// The quiet periods the page has asked for (`codify_render_check_quiet`), read by the watchdog each second.
+static RENDER_QUIET: std::sync::Mutex<render_watchdog::Quiet> =
+    std::sync::Mutex::new(render_watchdog::Quiet::new());
+
+/// Milliseconds since this shell started: the one clock both the command and the watchdog read.
+fn shell_ms() -> u64 {
+    static START: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+    u64::try_from(
+        START
+            .get_or_init(std::time::Instant::now)
+            .elapsed()
+            .as_millis(),
+    )
+    .unwrap_or(u64::MAX)
+}
+
+/// The page applied a theme the person chose: the next few seconds are their work, not the backdrop's.
+///
+/// Takes no argument and grants nothing: the most a page can do with it is make the watchdog judge later, and
+/// never past [`render_watchdog::MAX_WATCH_SECS`].
+#[tauri::command]
+fn codify_render_check_quiet() {
+    if let Ok(mut quiet) = RENDER_QUIET.lock() {
+        quiet.hush(shell_ms());
+    }
+}
+
 /// Record that the watchdog is done with this boot, and tell a page that is already listening.
 fn settle_render_check(app: &tauri::AppHandle) {
     RENDER_CHECK_SETTLED.store(true, std::sync::atomic::Ordering::SeqCst);
@@ -489,6 +516,41 @@ pub mod render_watchdog {
     pub const HOT_NEEDED: usize = 6;
     /// The window [`HOT_NEEDED`] is counted over, in 1 s samples.
     pub const HOT_WINDOW: usize = 10;
+    /// How long a person's own action keeps the watchdog from judging, in ms.
+    ///
+    /// Switching themes inside the first thirty seconds mounted a new backdrop and repainted the window, which on a
+    /// CPU-composited window ran past a third of a core for a few seconds; the watchdog read the person's own clicks
+    /// as starvation and capped every backdrop at 2–10 FPS until restart. Measured, a switch's burst lasted ~3–4 s.
+    pub const QUIET_AFTER_ACTION_MS: u64 = 5_000;
+    /// The latest the watchdog still judges, however many of its seconds were quiet: a person switching themes
+    /// without pause must not keep it measuring, and the page's held decorations waiting, for the whole session.
+    pub const MAX_WATCH_SECS: u64 = 90;
+
+    /// Which seconds belong to the person rather than to the window, as a pure rule a test can drive.
+    #[derive(Default)]
+    pub struct Quiet {
+        until_ms: u64,
+    }
+
+    impl Quiet {
+        pub const fn new() -> Self {
+            Quiet { until_ms: 0 }
+        }
+
+        /// The person acted at `now_ms`: the next [`QUIET_AFTER_ACTION_MS`] are theirs.
+        pub fn hush(&mut self, now_ms: u64) {
+            self.until_ms = self
+                .until_ms
+                .max(now_ms.saturating_add(QUIET_AFTER_ACTION_MS));
+        }
+
+        /// Whether any part of the one-second sample ending at `end_ms` falls inside a quiet period. Judged on
+        /// overlap, not on the end alone: a sample whose second half was the burst is as much the action as one
+        /// that started inside it.
+        pub fn covers(&self, end_ms: u64) -> bool {
+            self.until_ms > end_ms.saturating_sub(1_000)
+        }
+    }
 
     /// One CPU sample of one thread, as ticks between two readings.
     #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -571,8 +633,21 @@ fn watch_render_starvation(app: tauri::AppHandle) {
         // verdict arms only after this long.
         const ARM_AFTER_MS: u64 = 5_000;
         let started = std::time::Instant::now();
-        for _ in 0..WINDOW_SAMPLES {
+        // Seconds the watchdog has spent on the window, not the person's own actions (`codify_render_check_quiet`).
+        // A quiet second does not use up one of the thirty, so a theme switch moves the judging later instead of
+        // shortening it; `MAX_WATCH_SECS` bounds how much later.
+        let mut counted = 0usize;
+        while counted < WINDOW_SAMPLES
+            && started.elapsed().as_secs() < render_watchdog::MAX_WATCH_SECS
+        {
             tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+            let quiet = RENDER_QUIET
+                .lock()
+                .map(|q| q.covers(shell_ms()))
+                .unwrap_or(false);
+            if !quiet {
+                counted += 1;
+            }
             let Some(ticks) = tauri::async_runtime::spawn_blocking(render_cpu_ticks)
                 .await
                 .ok()
@@ -583,6 +658,10 @@ fn watch_render_starvation(app: tauri::AppHandle) {
             let Some(prev) = previous.replace(ticks) else {
                 continue; // the first reading establishes the baseline only
             };
+            // Read, so the next sample starts after the action, but not judged: it is the person's work.
+            if quiet {
+                continue;
+            }
             if started.elapsed().as_millis() < u128::from(ARM_AFTER_MS) {
                 continue;
             }
@@ -2937,6 +3016,7 @@ pub fn run() {
             codify_test_agent_connection,
             codify_render_cpu_ms,
             codify_render_check_settled,
+            codify_render_check_quiet,
             codify_software_rendering,
             codify_boot_id,
             codify_terminal_open,
@@ -3179,6 +3259,75 @@ mod tests {
             oldest_web_process(&[(30, 900), (20, 100), (40, 500)])
         );
         assert_eq!(None, oldest_web_process(&[]));
+    }
+
+    #[test]
+    fn a_persons_theme_switch_is_quiet_for_five_seconds_and_no_longer() {
+        // A theme switch inside the first thirty seconds ran past a third of a core for ~3-4 s on a CPU-composited
+        // window, and the watchdog capped every backdrop at 2-10 FPS for the session. Those seconds are the
+        // person's, so the watchdog must not judge them; the seconds after are the window's again.
+        let mut quiet = render_watchdog::Quiet::new();
+        assert!(
+            !quiet.covers(10_000),
+            "nothing is quiet before anyone acted"
+        );
+        quiet.hush(10_000);
+        // Overlap, not the end alone: the sample ending at 10.5 s holds the click itself.
+        assert!(quiet.covers(10_500));
+        assert!(quiet.covers(15_000));
+        assert!(
+            quiet.covers(15_999),
+            "the sample whose first part was still quiet"
+        );
+        assert!(
+            !quiet.covers(16_000),
+            "the window is judged again a second after the quiet ends"
+        );
+        // A second action extends the quiet; an earlier one replayed late does not shorten it.
+        quiet.hush(14_000);
+        assert!(quiet.covers(19_500));
+        quiet.hush(1_000);
+        assert!(
+            quiet.covers(19_500),
+            "a late, older action shortened the quiet"
+        );
+    }
+
+    #[test]
+    fn quiet_seconds_are_neither_judged_nor_counted_and_the_page_can_ask_for_them() {
+        let source = include_str!("lib.rs");
+        let start = source
+            .find("fn watch_render_starvation(")
+            .expect("the watchdog moved");
+        let body = &source[start
+            ..start
+                + source[start..]
+                    .find("\n}\n")
+                    .expect("the watchdog has no end")];
+        let quiet_skip = body
+            .find("if quiet {")
+            .expect("the loop no longer skips quiet seconds");
+        assert!(
+            quiet_skip < body.find("verdict.observe").unwrap(),
+            "a quiet second reaches the verdict"
+        );
+        assert!(
+            body.contains("if !quiet {\n                counted += 1;"),
+            "a quiet second uses up one of the thirty"
+        );
+        assert!(
+            body.contains("render_watchdog::MAX_WATCH_SECS"),
+            "nothing bounds how long quiet seconds can extend it"
+        );
+        assert!(
+            source.contains("            codify_render_check_quiet,\n"),
+            "the command is not registered"
+        );
+        let ui = include_str!("../../ui/src/renderCheck.ts");
+        assert!(
+            ui.contains("\"codify_render_check_quiet\""),
+            "the page no longer asks for quiet seconds"
+        );
     }
 
     #[test]

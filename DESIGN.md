@@ -876,8 +876,12 @@ to survive it deliberately:
   It used to wait a fixed ten seconds, which put the nine-second sweep inside the
   watchdog's thirty: measured on a Wayland window GTK composites on the CPU, the sweep
   cost 60–94% of a core against ~20% for the theme's backdrop, and the watchdog read it
-  as starvation and stopped the backdrop for the session. On a GPU-composited window the
-  band runs, with no glyph repainted. It matches every
+  as starvation and stopped the backdrop for the session. The person's own theme switches
+  are kept out of the same thirty seconds: while it judges, the page tells the shell on
+  each switch (`codify_render_check_quiet`), and the next five seconds are neither judged
+  nor counted, up to a ninety-second ceiling, because a switch mounts a new backdrop and
+  a burst of it had capped every backdrop at 2–10 FPS until restart. On a GPU-composited
+  window the band runs, with no glyph repainted. It matches every
   theme by *reading* one — every colour is `rgb(var(--codify-*-rgb) / …)` and there is
   no `switch` on the theme id — so the same rules give phosphor green, magenta, or flat
   white depending on what is active, and no new rule is needed for the seventeenth theme.
