@@ -187,14 +187,17 @@ CREATE TABLE IF NOT EXISTS stats_snapshots (
 );
 
 -- One row per model call in a goal that was run with tracing on, so the run
--- can be replayed without a provider (docs/04 §8). The request is stored as
--- a digest rather than as text: a digest is what a replay has to match on, and
--- the prompt is the most sensitive thing in the run — the goal, the evidence
--- pack and the user's own source. `CODIFY_TRACE_PROMPTS=1` opts into storing
--- the text as well, for the case where "what exactly was the model handed" is
--- the question being asked. Responses are stored whole: a replay cannot serve
--- anything else, and a response is model prose about the user's code rather
--- than the code itself.
+-- can be replayed without a provider (docs/04 §8). Recording is opt-in: the
+-- composer arms it for one turn at a time, and `trace_retention_days` bounds
+-- how long a row lives. While it is on, the request is kept twice: as a digest
+-- (`prompt_hash`, what a replay matches on) and as its full text
+-- (`system_prompt`, `user_prompt`), which the context inspector shows. That
+-- text is the most sensitive thing in a run — the goal, the evidence pack and
+-- the user's own source. `CODIFY_TRACE_PROMPTS=0` keeps the digests only, for
+-- a process that wants replay without the text (`engine/trace.py`
+-- `keep_prompts`). Responses are stored whole: a replay cannot serve anything
+-- else, and a response is model prose about the user's code rather than the
+-- code itself.
 CREATE TABLE IF NOT EXISTS trace_calls (
   id TEXT PRIMARY KEY,
   goal_id TEXT NOT NULL REFERENCES goals(id) ON DELETE CASCADE,
