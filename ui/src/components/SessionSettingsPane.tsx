@@ -2,9 +2,14 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Archive, AlertCircle, Check } from "lucide-react";
 
 import { getEngineSettings, saveEngineSettings } from "../api.ts";
-import type { EngineSettings } from "../types.ts";
+import type { ClearedHistory, EngineSettings } from "../types.ts";
 import { readRejection } from "../rejection.ts";
 import { Checkbox } from "./ui/Checkbox";
+import { ClearHistoryCard } from "./ClearHistoryCard.tsx";
+
+export interface SessionSettingsPaneProps {
+  onHistoryCleared?: (result: ClearedHistory) => void;
+}
 
 /**
  * Settings → Sessions: the app-wide compaction defaults.
@@ -17,7 +22,7 @@ import { Checkbox } from "./ui/Checkbox";
  * shows what the engine stored rather than what was typed. Manual compaction of
  * one thread is in the Session drawer, beside the transcript it acts on.
  */
-export const SessionSettingsPane: React.FC = () => {
+export const SessionSettingsPane: React.FC<SessionSettingsPaneProps> = ({ onHistoryCleared }) => {
   const [settings, setSettings] = useState<EngineSettings | null>(null);
   const [keepDraft, setKeepDraft] = useState("");
   const [loading, setLoading] = useState(true);
@@ -160,6 +165,8 @@ export const SessionSettingsPane: React.FC = () => {
           </div>
         )}
       </div>
+
+      <ClearHistoryCard onCleared={onHistoryCleared} />
     </div>
   );
 };

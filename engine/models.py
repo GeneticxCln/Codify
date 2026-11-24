@@ -976,6 +976,13 @@ class ProviderKeyUpdate(BaseModel):
         return value
 
 
+class HistoryClear(BaseModel):
+    """`POST /history/clear`: the phrase a person typed, which the engine checks itself (`engine/history.py`)."""
+
+    model_config = {"extra": "forbid"}
+    confirm: str = Field(..., max_length=64)
+
+
 class TurnCreate(BaseModel):
     """One turn in a thread: what the user said, and nothing else.
 

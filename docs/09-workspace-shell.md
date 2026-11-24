@@ -64,10 +64,13 @@ Three decisions in that shape, and why:
   who deleted a conversation still had all of it. It is refused (`409 thread_in_progress`) while a turn in it is
   still planning or running, or still driven by the executor; the person cancels first. Deleting one message is
   `DELETE /goals/{id}`, which also drops any thread summary that reaches past it, because a summary that quotes a
-  deleted message would put it back in front of the model. Files the fixer wrote are never touched. The thread
+  deleted message would put it back in front of the model. Settings → Sessions also offers **Delete all history**
+  (`POST /history/clear`, gated on typing `delete all history`), which empties every thread, turn and derived record
+  across workspaces, detaches open chat tabs onto clean slates, and vacuums `codify.db` on disk while keeping keys,
+  roles, settings, workspaces, notes and workspace files untouched. Files the fixer wrote are never touched. The thread
   menu offers both (New thread, Rename, Archive, Delete), and a finished chat message has its own Delete; the
   transcript removes the person's message with its reply (`turnTranscript.withoutTurn`).
-  `tests/test_conversations.py` and `ui/tests/turnTranscript.test.ts` hold it.
+  `tests/test_conversations.py`, `tests/test_clear_history.py` and `ui/tests/turnTranscript.test.ts` hold it.
 
 Indexes: `idx_goals_conversation (conversation_id, created_at)` and
 `idx_conversations_workspace (workspace_id, updated_at)`. Listing a thread's

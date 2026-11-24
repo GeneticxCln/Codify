@@ -1219,3 +1219,25 @@ export interface NotesListing {
   enabled: boolean;
   max_notes: number;
 }
+
+/** Row counts emptied by `POST /history/clear` (`engine/history.py`). */
+export interface ClearedHistoryCounts {
+  events: number;
+  plan_steps: number;
+  proposals: number;
+  recordings: number;
+  summaries: number;
+  suggestions: number;
+  observations: number;
+  stats_days: number;
+  turns: number;
+  threads: number;
+}
+
+/** What `POST /history/clear` removed and whether `VACUUM` + WAL truncation completed. */
+export interface ClearedHistory {
+  deleted: true;
+  removed: ClearedHistoryCounts;
+  files_touched: false;
+  scrubbed: boolean;
+}

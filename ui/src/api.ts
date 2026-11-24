@@ -59,6 +59,7 @@ import type {
   Suggestion,
   SuggestionList,
   NotesListing,
+  ClearedHistory,
 } from "./types.ts";
 
 /**
@@ -2417,4 +2418,22 @@ export async function addNote(text: string): Promise<StandingNote> {
 export async function deleteNote(id: string): Promise<void> {
   const res = await engineFetch(`/settings/notes/${encodeURIComponent(id)}`, { method: "DELETE" });
   if (!res.ok) throw await refusalOf(res);
+}
+
+// ── clear all history (engine/history.py) ───────────────────────────────────────────────────────────────────────────
+
+/** The exact phrase both the UI and `POST /history/clear` require before deleting all history. */
+export const HISTORY_CLEAR_PHRASE = "delete all history";
+
+/**
+ * Empty every history table (`POST /history/clear`) and rebuild `codify.db` on disk.
+ * Refused (`422 confirmation_required`) without the phrase, and (`409 thread_in_progress`) while a turn is running.
+ */
+export async function clearAllHistory(confirm: string): Promise<ClearedHistory> {
+  const res = await engineFetch("/history/clear", {
+    method: "POST",
+    body: JSON.stringify({ confirm }),
+  });
+  if (!res.ok) throw await engineError(res, "Could not delete history");
+  return res.json();
 }

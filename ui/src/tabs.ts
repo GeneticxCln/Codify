@@ -447,6 +447,21 @@ export function closeConversation(
 }
 
 /**
+ * Detach every chat tab from its thread when all history is cleared, leaving each project tab open on a clean slate.
+ * Browser, editor, terminal and machine tabs are untouched.
+ */
+export function clearAllConversations(state: TabState): TabState {
+  let changed = false;
+  const tabs = state.tabs.map((t) => {
+    if (t.kind !== "chat") return t;
+    if (t.conversationId === undefined && t.title === UNTITLED_THREAD_TITLE) return t;
+    changed = true;
+    return { ...t, conversationId: undefined, title: UNTITLED_THREAD_TITLE };
+  });
+  return changed ? { ...state, tabs } : state;
+}
+
+/**
  * A tab that belongs to this window alone: never remembered, never keyed, never sent to the engine.
  *
  * A terminal and a machine are live processes, and an editor holds text a person has not saved. None is something to write into
