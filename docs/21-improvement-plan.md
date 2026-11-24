@@ -134,9 +134,9 @@ Tracked in execution order (`0 → 10`), one change per PR, under three standing
 | 1 | Thinking in chat for cloud models | **Built** (`conductor_thinking` across provider tool calls + composer thinking control) |
 | 2 | OpenCode Console provider | **Built** (`opencode` built-in provider + live model discovery) |
 | 3 | "Delete all history" in Settings | **Built** (`POST /history/clear` with typed confirmation + `VACUUM` scrub, PR #137) |
-| 4 | Context inspector + record-next-turn toggle | **Built in this change** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
-| 5 | Backup and restore of Codify's state | **Built in this change** (`/state/backup` and `/state/restore`, `StateBackupCard.tsx`; §6) |
-| 6 | Per-project usage | Planned (`workspace_id` filter on `/stats/overview` + project picker on Stats, tokens only) |
+| 4 | Context inspector + record-next-turn toggle | **Built** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
+| 5 | Backup and restore of Codify's state | **Built** (`/state/backup` and `/state/restore`, `StateBackupCard.tsx`; §6) |
+| 6 | Per-project usage | **Built in this change** (`workspace_id` filter on `/stats/overview` and `/stats/failures` + Project picker in `StatsPanel.tsx`, tokens only) |
 | 7 | Provider health | Planned (background reachability/auth/latency check per configured provider, status dot in Settings, down notification, respects offline mode) |
 | 8 | Replay from the app | Planned (`Replay` action on recorded goals running `ReplayProvider` in a scratch tree and reporting match vs divergence) |
 | 9 | Offline switch | Planned (single setting restricting chat/roles to local endpoints and disabling web fetch, MCP, update checks and provider-health pings) |

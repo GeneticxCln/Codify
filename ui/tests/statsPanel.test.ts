@@ -61,6 +61,10 @@ interface World {
   days?: number;
   models?: number;
   coverage?: unknown;
+  /** The projects `/workspaces` lists, for the project picker. */
+  workspaces?: Array<{ id: string; name: string }>;
+  /** Every stats read the panel made, as path plus query, in order. */
+  reads?: string[];
 }
 
 async function withPanel(world: World, body: (dom: Dom) => Promise<void>): Promise<void> {
@@ -68,6 +72,8 @@ async function withPanel(world: World, body: (dom: Dom) => Promise<void>): Promi
     globalThis.fetch = (async (input: RequestInfo | URL) => {
       const url = new URL(String(input));
       const path = url.pathname;
+      if (path.startsWith("/stats/")) world.reads?.push(path + url.search);
+      if (path === "/workspaces") return json((world.workspaces ?? []).map((w) => ({ ...w, root_path: `/p/${w.id}`, design_contract_path: "", created_at: 1 })));
       if (path === "/stats/overview" && world.overviewAnswer) return world.overviewAnswer(Number(url.searchParams.get("window")));
       if (path === "/stats/overview") return json(overview(world.models ?? 3, world.coverage));
       if (path === "/stats/failures") return json({ total: 0, retries: 0, causes: [], by_role: {}, by_stage: {}, window_days: 0, recovered: 0, recovery_rate: null, generated_at: NOW_S });
@@ -257,5 +263,42 @@ test("a failed history export says so", async () => {
     for (let i = 0; i < 4; i++) await dom.settle();
     assert.match(dom.text(), /Could not export/);
     dom.takeConsoleErrors();
+  });
+});
+
+// ── per project (docs/21 item 6) ────────────────────────────────────────────
+//
+// Tokens and calls narrowed to one project. The frozen and imported history is about every project and cannot be
+// narrowed, so a project view leaves it out of the trend and says so, rather than mixing everyone's days in.
+
+async function chooseProject(dom: Dom, id: string): Promise<void> {
+  const select = dom.byLabel("Project") as HTMLSelectElement;
+  const setter = Object.getOwnPropertyDescriptor(dom.window.HTMLSelectElement.prototype, "value")?.set;
+  await dom.act(async () => {
+    setter?.call(select, id);
+    select.dispatchEvent(new dom.window.Event("change", { bubbles: true }));
+  });
+  for (let i = 0; i < 6; i++) await dom.settle();
+}
+
+test("choosing a project narrows both reads to it, and All projects widens them again", async () => {
+  const reads: string[] = [];
+  const world = { days: 5, reads, workspaces: [{ id: "ws-a", name: "Alpha" }, { id: "ws-b", name: "Beta" }] };
+  await withPanel(world, async (dom) => {
+    const options = [...(dom.byLabel("Project") as HTMLSelectElement).options].map((o) => o.textContent);
+    assert.deepEqual(options, ["All projects", "Alpha", "Beta"]);
+    assert.ok(reads.some((r) => r === "/stats/overview?window=0"), "the first read was not every project");
+    assert.doesNotMatch(dom.text(), /saved daily history covers all projects/);
+
+    reads.length = 0;
+    await chooseProject(dom, "ws-b");
+    assert.ok(reads.includes("/stats/overview?window=0&workspace_id=ws-b"), `overview not narrowed: ${reads.join(", ")}`);
+    assert.ok(reads.includes("/stats/failures?window=0&workspace_id=ws-b"), "the failures beside it still count every project");
+    assert.match(dom.text(), /saved daily history covers all projects/, "the project view does not say its trend is recent days only");
+
+    reads.length = 0;
+    await chooseProject(dom, "");
+    assert.ok(reads.includes("/stats/overview?window=0"), "All projects did not go back to every project");
+    assert.ok(!reads.some((r) => r.includes("workspace_id")));
   });
 });
