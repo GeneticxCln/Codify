@@ -7,6 +7,7 @@ import {
   downloadUpdate,
   getAppFacts,
   getEngineInfo,
+  getEngineSettings,
   underShell,
   type AppFacts,
   type HealthStatus,
@@ -144,9 +145,25 @@ const UpdatePanel: React.FC = () => {
       ? { kind: "downloading", check: activeDownload.check, progress: activeDownload.progress }
       : { kind: "idle" },
   );
+  const [offline, setOffline] = useState(false);
   const mountedRef = useRef(true);
 
+  useEffect(() => {
+    let cancelled = false;
+    getEngineSettings()
+      .then((s) => {
+        if (!cancelled && s?.offline_mode) setOffline(s.offline_mode.value === 1);
+      })
+      .catch(() => {
+        // Older engine or unreachable settings: default to allowing manual update checks.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const check = useCallback(async () => {
+    if (offline) return;
     setState({ kind: "checking" });
     try {
       const answer = await checkForUpdate();
@@ -154,7 +171,7 @@ const UpdatePanel: React.FC = () => {
     } catch (err) {
       if (mountedRef.current) setState({ kind: "failed", check: null, message: readRejection(err) });
     }
-  }, []);
+  }, [offline]);
 
   const follow = useCallback(async (entry: ActiveDownload) => {
     const known = entry.check;
@@ -285,21 +302,29 @@ const UpdatePanel: React.FC = () => {
             The releases are at <span className="font-mono">{RELEASES}</span>.
           </p>
         ) : (
-          <div className="flex flex-wrap items-center gap-2">
-            <Button
-              tone={known?.asset ? "subtle" : "primary"}
-              onClick={() => void check()}
-              disabled={busy}
-            >
-              <RefreshCw className="w-3.5 h-3.5" />
-              {state.kind === "idle" ? "Check for updates" : "Check again"}
-            </Button>
-            {known?.asset && state.kind !== "downloaded" && (
-              <Button tone="primary" onClick={() => void fetch(known)} disabled={busy}>
-                <Download className="w-3.5 h-3.5" />
-                {state.kind === "downloading" ? "Downloading…" : `Download ${known.asset}`}
-              </Button>
+          <div className="space-y-2">
+            {offline && (
+              <p className="text-xs text-codify-muted leading-relaxed" role="status">
+                Update checks are paused while Offline mode is on. Turn off Offline mode in Settings
+                to check GitHub for releases.
+              </p>
             )}
+            <div className="flex flex-wrap items-center gap-2">
+              <Button
+                tone={known?.asset ? "subtle" : "primary"}
+                onClick={() => void check()}
+                disabled={busy || offline}
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                {state.kind === "idle" ? "Check for updates" : "Check again"}
+              </Button>
+              {known?.asset && state.kind !== "downloaded" && (
+                <Button tone="primary" onClick={() => void fetch(known)} disabled={busy || offline}>
+                  <Download className="w-3.5 h-3.5" />
+                  {state.kind === "downloading" ? "Downloading…" : `Download ${known.asset}`}
+                </Button>
+              )}
+            </div>
           </div>
         )}
       </div>

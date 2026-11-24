@@ -443,6 +443,8 @@ class ConductorTools:
         This reads the settings rows and returns text. It calls no server, so a
         listing cannot become a request the person did not admit.
         """
+        if self.service._settings_int("offline_mode", 0) == 1:
+            return "Refused: Offline mode is on, so remote MCP servers are disabled."
         mcp = getattr(self.service, "mcp", None)
         if mcp is None:
             return "MCP is not configured in this engine, so there are no remote tools to list."
@@ -478,6 +480,8 @@ class ConductorTools:
         while the goal's stored status is `RUNNING`, and it is announced before it
         is sent (docs/20 §5).
         """
+        if self.service._settings_int("offline_mode", 0) == 1:
+            return "Refused: Offline mode is on, so remote MCP servers are disabled."
         if self.mcp_calls >= MAX_CALLS_PER_RUN:
             return (
                 f"This run has already called MCP tools {MAX_CALLS_PER_RUN} times, which is the "

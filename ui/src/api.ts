@@ -705,6 +705,7 @@ export async function saveEngineSettings(
     event_retention_days?: number;
     session_compact_auto?: boolean;
     session_compact_keep_turns?: number;
+    offline_mode?: boolean;
   }
 ): Promise<{ saved: Record<string, number | string> }> {
   const base = `http://127.0.0.1:${currentEngine.port}`;

@@ -200,6 +200,9 @@ class SettingsService:
         # is made. Only a person writes this, never a goal or a turn (docs/00 §6.2). An install that already
         # stored a choice keeps it.
         "web_fetch": (0, lambda v: max(0, min(v, 2))),
+        # One switch that keeps the app local: restricts chat and roles to loopback model endpoints and disables
+        # web fetch, MCP, GitHub CI suggestions, update checks, and remote provider-health/catalog pings.
+        "offline_mode": (0, lambda v: 1 if v else 0),
     }
 
     # The conductor's model, and why it is here rather than in `agent_configs`:

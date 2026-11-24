@@ -266,9 +266,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 @asynccontextmanager
 async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> AsyncIterator[None]:
     """Wire the services onto `app.state`, run the engine, and unwire it — with the store already open."""
-    factory = ProviderFactory(keychain)
     app.state.conn = conn
     app.state.keychain = keychain
+    app.state.settings = SettingsService(conn)
+    offline_check = lambda: _is_offline_mode(getattr(app.state, "settings", None))  # noqa: E731
+    factory = ProviderFactory(keychain, is_offline=offline_check)
     app.state.factory = factory
     app.state.registry = AgentRegistryService(conn, factory, keychain)
     app.state.workspaces = WorkspaceService(conn)
@@ -284,16 +286,11 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # reads the same goal rows the transcript does, so a summary can never
     # disagree with the turns it replaces.
     app.state.compactions = CompactionService(conn, app.state.goals)
-    app.state.settings = SettingsService(conn)
     app.state.sandbox = SandboxService(app.state.settings)
     # The MCP admission list, its probe, and the read-only call path a person's
     # per-tool authority unlocks (`engine/mcp.py`, docs/20).
     app.state.mcp = McpService(conn, keychain)
-    app.state.models = ModelCatalogService(
-        app.state.registry,
-        keychain,
-        is_offline=lambda: _is_offline_mode(app.state.settings),
-    )
+    app.state.models = ModelCatalogService(app.state.registry, keychain, is_offline=offline_check)
     # One frozen statistics document per past day, written lazily on the first
     # stats read after a day ends (see engine/stats_history.py).
     app.state.stats_snapshots = StatsSnapshotService(conn)
@@ -1495,6 +1492,7 @@ async def list_available_models(request: Request, refresh: bool = False) -> dict
     catalog: ModelCatalogService = getattr(request.app.state, "models", None) or ModelCatalogService(
         request.app.state.registry,
         getattr(request.app.state, "keychain", None) or Keychain(),
+        is_offline=lambda: _is_offline_mode(getattr(request.app.state, "settings", None)),
     )
     payload = await catalog.get(refresh=refresh)
     # Added here and not to the cached catalog: which model a turn runs on follows Settings, which can change
@@ -1567,6 +1565,9 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
     "laya_required": (0, 1),
     # Whether the critic is preceded by two fresh-context review lenses (docs/21 P1). Off by default.
     "review_deep": (0, 1),
+    # Restricts chat/roles to local endpoints and turns off web fetch, MCP, CI suggestions, update checks, and
+    # remote provider-health/catalog pings together (docs/21 item 9). Off by default.
+    "offline_mode": (0, 1),
 }
 
 # The integer settings that are really switches, so a checkbox's `true` is a 1
@@ -1574,7 +1575,7 @@ ENGINE_INT_SETTINGS: dict[str, tuple[int, int]] = {
 ENGINE_SWITCH_SETTINGS = frozenset({
     "conductor_drives_execution", "tts_auto_read", "browser_actions", "session_compact_auto",
     "sandbox_network", "sandbox_unjailed_ok", "laya_required", "review_deep", "suggestions", "suggest_ci",
-    "cross_workspace_notes",
+    "cross_workspace_notes", "offline_mode",
 })
 
 # The string settings (the conductor's own provider and model, voice, web pages), keyed to the longest
@@ -1648,6 +1649,8 @@ async def list_mcp_servers(request: Request) -> list[dict[str, Any]]:
 @app.post("/settings/mcp", status_code=201)
 async def create_mcp_server(body: McpServerCreate, request: Request) -> dict[str, Any]:
     """Store one HTTPS server and probe it. A failed probe leaves the row failed."""
+    if _is_offline_mode(getattr(request.app.state, "settings", None)):
+        raise ApiError(409, "offline_mode", "Offline mode is on — MCP server connections are disabled.")
     return await _mcp_service(request).create(body)
 
 
@@ -1666,6 +1669,8 @@ async def delete_mcp_server(server_id: str, request: Request) -> dict[str, Any]:
 @app.post("/settings/mcp/{server_id}/probe")
 async def probe_mcp_server(server_id: str, request: Request) -> dict[str, Any]:
     """Run `initialize` and `tools/list`; never `tools/call`."""
+    if _is_offline_mode(getattr(request.app.state, "settings", None)):
+        raise ApiError(409, "offline_mode", "Offline mode is on — MCP server probing is disabled.")
     return await _mcp_service(request).probe(server_id)
 
 
@@ -1976,6 +1981,10 @@ async def put_engine_settings(body: dict[str, Any], request: Request) -> dict[st
         laya: LayaService | None = getattr(request.app.state, "laya", None)
         if laya is not None:
             laya.reload()
+    if "offline_mode" in body:
+        catalog: ModelCatalogService | None = getattr(request.app.state, "models", None)
+        if catalog is not None:
+            catalog.invalidate()
     return {"saved": out}
 
 
