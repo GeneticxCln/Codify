@@ -139,7 +139,7 @@ Tracked in execution order (`0 → 10`), one change per PR, under three standing
 | 6 | Per-project usage | **Built in this change** (`workspace_id` filter on `/stats/overview` and `/stats/failures` + Project picker in `StatsPanel.tsx`, tokens only) |
 | 7 | Provider health | **Built** (reachability, auth status and latency in `model_catalog.py`, `provider_health_changed` transitions in `catalog_watch.py`, status dot in `ProviderRow.tsx`, down/recovery notice in `notifications.ts`, skips remote pings in offline mode) |
 | 8 | Replay from the app | Planned (`Replay` action on recorded goals running `ReplayProvider` in a scratch tree and reporting match vs divergence) |
-| 9 | Offline switch | Planned (single setting restricting chat/roles to local endpoints and disabling web fetch, MCP, update checks and provider-health pings) |
+| 9 | Offline switch | **Built in this change** (`offline_mode` engine setting restricting chat/roles to local loopback endpoints and disabling web fetch, MCP, CI inbox checks, update checks, and remote provider discovery pings together; `OfflineModeCard.tsx` + `AboutPane.tsx`) |
 | 10 | App-wide audit view | Planned (cross-project list of agent commits, touched files and goals built from persisted per-goal audit events) |
 
 ## 6. State backup and restore

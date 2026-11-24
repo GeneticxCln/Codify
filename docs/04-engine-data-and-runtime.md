@@ -1211,6 +1211,7 @@ the sentence in the response is the engine's own and is what a person reads.
 | `unknown_skill` | 404 | no skill of that name is available in that workspace |
 | `skill_directory_refused` | 422 | `.codify/skills/` cannot be read, or resolves outside the workspace |
 | `unknown_mcp_server`, `unknown_mcp_tool` | 404 | the server or tool is not one a person added |
+| `offline_mode` | 409 | `offline_mode` is on (`PUT /settings/engine` or `CODIFY_OFFLINE=1`), so remote MCP connections/probes and non-local model calls are disabled |
 | `mcp_limit` | 409 | the server count is at `MAX_SERVERS` |
 | `mcp_secret_required`, `mcp_header_required` | 422 | a bearer server has no token, or a custom-header server has no header name |
 | `mcp_authority_required` | 422 | a tool is enabled with neither `read` nor `act` chosen |

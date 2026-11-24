@@ -607,6 +607,8 @@ class _Conduct(_Plan):
         failed" must not mean "yes". A row that cannot be parsed is unset, which is the default (any public
         site), and so is no row at all: that is what a fresh install has.
         """
+        if self._settings_int("offline_mode", 0) == 1:
+            return FetchPolicy(mode=MODE_OFF, hosts=())
         mode = self._settings_int("web_fetch", MODE_OFF)
         settings = getattr(self, "settings", None)
         raw = ""
@@ -870,8 +872,12 @@ class _Conduct(_Plan):
             # goal's stored status is RUNNING. A tool the stored rows do not admit
             # is not a slot a model should spend a call discovering (docs/20 §5).
             mcp = getattr(self, "mcp", None)
-            if mcp is not None and mcp.has_admitted_tools(
-                goal.status == "RUNNING" and not goal.dry_run and not goal.plan_only
+            if (
+                mcp is not None
+                and self._settings_int("offline_mode", 0) != 1
+                and mcp.has_admitted_tools(
+                    goal.status == "RUNNING" and not goal.dry_run and not goal.plan_only
+                )
             ):
                 offered.extend(MCP_TOOLS)
             # The person's standing notes, only while they switched them on and wrote at least one.

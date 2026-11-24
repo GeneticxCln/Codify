@@ -729,6 +729,8 @@ export interface EngineSettings {
   session_compact_auto?: EngineSettingValue;
   /** How many recent turns stay verbatim beside the summary. */
   session_compact_keep_turns?: EngineSettingValue;
+  /** 1 = restrict chat and roles to local endpoints and pause web fetch, MCP, update checks, and remote provider pings. */
+  offline_mode?: EngineSettingValue;
 }
 
 /** The Settings screen's tabs, in the order they are shown. One definition, so a new tab is one edit. */
