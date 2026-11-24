@@ -311,6 +311,7 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     app.state.bridge = WebviewBridge()
     # The same, for the surfaces the app window itself owns (the editor): the window polls `/surfaces/next`.
     app.state.surfaces = SurfaceBridge()
+    app.state.loop = asyncio.get_running_loop()
     app.state.executor = ExecutorService(
         app.state.goals,
         app.state.workspaces,
@@ -425,6 +426,8 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     try:
         yield
     finally:
+        app.state.bridge.close()
+        app.state.surfaces.close()
         await asyncio.to_thread(app.state.recorder.discard)
         # Stopped before the database closes, and before the socket does: a task
         # that outlived the state directory it was watching for is an orphan with a
@@ -4276,6 +4279,15 @@ def serve() -> None:
     class BoundedShutdown(uvicorn.Server):
         def handle_exit(self, sig: int, frame: FrameType | None) -> None:
             watchdog.arm_hard_deadline()
+            loop = getattr(app.state, "loop", None)
+            for attr in ("bridge", "surfaces"):
+                target = getattr(app.state, attr, None)
+                close_fn = getattr(target, "close", None)
+                if callable(close_fn):
+                    if loop is not None and loop.is_running():
+                        loop.call_soon_threadsafe(close_fn)
+                    else:
+                        close_fn()
             super().handle_exit(sig, frame)
 
     server = BoundedShutdown(config)

@@ -193,6 +193,12 @@ class WebviewBridge:
         # spinning, so an idle bridge costs nothing and a question is picked
         # up in the same loop iteration it was asked in.
         self._wake = asyncio.Event()
+        self._closed = False
+
+    def close(self) -> None:
+        """Unblock every active `/bridge/next` long-poll immediately so shutdown does not stall."""
+        self._closed = True
+        self._wake.set()
 
     # ── the engine's side ──────────────────────────────────────────────────
 
@@ -424,6 +430,8 @@ class WebviewBridge:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, wait_s)
         while True:
+            if self._closed:
+                return None
             item = self._oldest()
             if item is not None:
                 return self._hand_out(item)

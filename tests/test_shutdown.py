@@ -83,6 +83,29 @@ class TestShutdown(unittest.TestCase):
         # The first call is the boot-time rescue, before the driver exists; the last is the shutdown's.
         self.assertTrue(stopped_when_recorded[-1], "the goal was recorded as failed while its driver still ran")
 
+    def test_close_wakes_active_bridge_and_surface_long_polls_immediately(self) -> None:
+        """An active 20s `/bridge/next` or `/surfaces/next` poll must return None as soon as
+        shutdown begins instead of stalling uvicorn for its entire graceful-shutdown timeout."""
+        from engine.surfaces import SurfaceBridge
+        from engine.webview_bridge import WebviewBridge
+
+        async def _check() -> None:
+            surfaces = SurfaceBridge()
+            bridge = WebviewBridge()
+            t_surf = asyncio.create_task(surfaces.next_request(wait_s=20.0))
+            t_bridge = asyncio.create_task(bridge.next_request(wait_s=20.0))
+            await asyncio.sleep(0.02)
+            surfaces.close()
+            bridge.close()
+            res_surf, res_bridge = await asyncio.wait_for(asyncio.gather(t_surf, t_bridge), timeout=1.0)
+            self.assertIsNone(res_surf)
+            self.assertIsNone(res_bridge)
+            # Subsequent polls after close also return immediately.
+            self.assertIsNone(await asyncio.wait_for(surfaces.next_request(wait_s=20.0), timeout=0.5))
+            self.assertIsNone(await asyncio.wait_for(bridge.next_request(wait_s=20.0), timeout=0.5))
+
+        asyncio.run(_check())
+
 
 if __name__ == "__main__":
     unittest.main()

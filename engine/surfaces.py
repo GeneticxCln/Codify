@@ -169,6 +169,12 @@ class SurfaceBridge:
         # still checks every question's workspace, and this grants nothing.
         self._machine_workspaces: set[str] = set()
         self._wake = asyncio.Event()
+        self._closed = False
+
+    def close(self) -> None:
+        """Unblock every active `/surfaces/next` long-poll immediately so shutdown does not stall."""
+        self._closed = True
+        self._wake.set()
 
     # ── the engine's side ──────────────────────────────────────────────────
 
@@ -266,6 +272,8 @@ class SurfaceBridge:
         handed_id: str | None = None
         try:
             while True:
+                if self._closed:
+                    return None
                 item = self._oldest()
                 if item is not None:
                     result = self._hand_out(item)
