@@ -692,6 +692,7 @@ export async function saveEngineSettings(
     web_fetch_hosts?: string;
     laya_checkpoint?: string;
     sandbox_isolation?: string;
+    conductor_thinking_effort?: string;
     sandbox_network?: boolean;
     sandbox_unjailed_ok?: boolean;
     laya_required?: boolean;

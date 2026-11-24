@@ -94,6 +94,7 @@ class CannedProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        thinking_effort: str | None = None,
     ) -> ToolReply:
         """The scripted conductor's next move, rebuilt from the transcript like a model with no memory of its own.
 

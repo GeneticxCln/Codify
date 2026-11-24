@@ -98,7 +98,7 @@ from engine.ask import MAX_OPTION_CHARS, MAX_OPTIONS, MAX_QUESTION_CHARS
 from engine.models import scrub_surrogates
 from engine.sandbox import CommandNotAllowed
 from engine.services import ApiError
-from engine.providers import FALLBACK_TRIGGER_CODES, ProviderError
+from engine.providers import FALLBACK_TRIGGER_CODES, ProviderError, thinking_headroom
 from engine.toolcall import ToolReply, ToolSpec, coerce_arguments
 
 # How much of a tool result the model is shown. A whole file read into a
@@ -464,6 +464,10 @@ class Conductor:
         keep_alive: str | None = None,
         # Where this loop's model calls are booked and traced. Optional: see `ToolCallLedger`.
         ledger: ToolCallLedger | None = None,
+        # How hard the model thinks on each call (`low`, `medium`, `high`), where its protocol has a control for it;
+        # None (the default) sends nothing, so a provider or a test double that has never heard of thinking is asked
+        # exactly what it was asked before. The engine setting `conductor_thinking_effort` decides it.
+        thinking_effort: str | None = None,
     ) -> None:
         # `nudge` is a directive added *once*, when the model stops without
         # having done anything and `needs_action()` still says something is
@@ -485,6 +489,7 @@ class Conductor:
         self.num_ctx = num_ctx
         self.keep_alive = keep_alive
         self._ledger = ledger
+        self.thinking_effort = thinking_effort
         # The target to move onto when the primary cannot serve a call, and the
         # notification that it did. The fallback is consumed on use rather than
         # kept: a loop that could hop back and forth between two providers would
@@ -568,23 +573,25 @@ class Conductor:
         than be run a second time somewhere it might succeed by luck.
         """
         while True:
+            max_tokens = CALL_MAX_TOKENS + thinking_headroom(self.thinking_effort)
             books = (
                 self._ledger.open(ToolCallRequest(
                     self.provider, self.model, self.system_prompt, messages,
-                    CALL_TEMPERATURE, CALL_MAX_TOKENS, tuple(t.name for t in self.tools),
+                    CALL_TEMPERATURE, max_tokens, tuple(t.name for t in self.tools),
                 ))
                 if self._ledger is not None else None
             )
             try:
                 reply: ToolReply = await self.provider.complete_with_tools(
                     self.system_prompt, messages, self.tools, self.model,
-                    temperature=CALL_TEMPERATURE, max_tokens=CALL_MAX_TOKENS,
+                    temperature=CALL_TEMPERATURE, max_tokens=max_tokens,
                     num_ctx=self.num_ctx, keep_alive=self.keep_alive,
                     # This loop is the one caller that re-sends the same system prompt many times in one turn,
                     # so it is the one caller whose prompt-cache write can be read back. Only a protocol with a
                     # field for it acts on this (Anthropic's `cache_control`); every other provider ignores it,
                     # and a one-shot role call never asks.
                     cache_prefix=True,
+                    **({"thinking_effort": self.thinking_effort} if self.thinking_effort else {}),
                 )
             except ProviderError as exc:
                 if books is not None:
@@ -611,7 +618,9 @@ class Conductor:
         if extra <= 0:
             return reply
         self._dropped_calls = (MAX_CALLS_PER_REPLY, len(reply.tool_calls))
-        return ToolReply(text=reply.text, tool_calls=reply.tool_calls[:MAX_CALLS_PER_REPLY])
+        return ToolReply(
+            text=reply.text, tool_calls=reply.tool_calls[:MAX_CALLS_PER_REPLY], reasoning=reply.reasoning,
+        )
 
     def _refresh_menu(self) -> None:
         """Rebuild the offered set, and drop the stage moves once they are spent.
@@ -684,6 +693,8 @@ class Conductor:
                 self.on_text(reply.text)
             messages.append({
                 "role": "assistant", "content": reply.text, "tool_calls": reply.tool_calls,
+                # Echoed by the converters that need it (Anthropic's thinking blocks); only present when there is any.
+                **({"reasoning": reply.reasoning} if reply.reasoning else {}),
             })
 
             if not reply.wants_tools:

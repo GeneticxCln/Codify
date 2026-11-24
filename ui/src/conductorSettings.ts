@@ -172,3 +172,20 @@ export function conductorFallback(
       "There is no fallback: a dead model ends the turn, after the moves it already made. Set a provider and a model below to keep that from happening.",
   };
 }
+
+/** How hard the conductor's model thinks; "" is off (the engine sends no thinking control at all). */
+export type ThinkingLevel = "" | "low" | "medium" | "high";
+
+/** The order the composer's Think control steps through, off first. */
+export const THINKING_LEVELS: readonly ThinkingLevel[] = ["", "low", "medium", "high"];
+
+/** The level after `level`, wrapping back to off. Anything the engine sent that is not a level counts as off. */
+export function nextThinking(level: string): ThinkingLevel {
+  const at = THINKING_LEVELS.indexOf(level as ThinkingLevel);
+  return THINKING_LEVELS[(at + 1) % THINKING_LEVELS.length];
+}
+
+/** What the control says: "Think" when off, "Think: high" when on. */
+export function thinkingLabel(level: string): string {
+  return THINKING_LEVELS.includes(level as ThinkingLevel) && level ? `Think: ${level}` : "Think";
+}

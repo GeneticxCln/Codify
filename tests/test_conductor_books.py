@@ -38,7 +38,7 @@ class _Metered(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False, thinking_effort: str | None = None,
     ) -> ToolReply:
         reply = await super().complete_with_tools(
             system_prompt, messages, tools, model, temperature, max_tokens,
@@ -52,7 +52,7 @@ class _MeteredDying(_DyingProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False, thinking_effort: str | None = None,
     ) -> ToolReply:
         reply = await super().complete_with_tools(
             system_prompt, messages, tools, model, temperature, max_tokens,

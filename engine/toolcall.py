@@ -505,6 +505,11 @@ class ToolReply:
 
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
+    # The provider's own reasoning blocks, opaque and in the order it sent them (Anthropic's signed `thinking` and
+    # `redacted_thinking` blocks). With thinking on, a turn that continues after a tool result must hand the
+    # assistant's reasoning back unchanged or the API refuses the request, so the conductor keeps them on the
+    # assistant message and the converter echoes them. Empty when thinking is off, which is every turn by default.
+    reasoning: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def wants_tools(self) -> bool:
@@ -702,7 +707,9 @@ def to_anthropic_messages(messages: list[dict[str, Any]]) -> list[dict[str, Any]
             # API refuses an empty message that is not the last one, and the neighbouring user turns are merged.
             continue
         if role == "assistant" and m.get("tool_calls"):
-            blocks: list[dict[str, Any]] = []
+            # Reasoning first: Anthropic requires an assistant turn's thinking blocks to lead it, unchanged, when
+            # the conversation continues after its tool calls (`ToolReply.reasoning`).
+            blocks: list[dict[str, Any]] = [dict(b) for b in m.get("reasoning") or [] if isinstance(b, dict)]
             if m.get("content"):
                 blocks.append({"type": "text", "text": m["content"]})
             blocks.extend(

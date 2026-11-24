@@ -134,7 +134,7 @@ class _ToolProvider(BaseProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False, thinking_effort: str | None = None,
     ) -> ToolReply:
         self.seen_tools.append([t.name for t in tools])
         self.seen_systems.append(system_prompt)
@@ -173,7 +173,7 @@ class _DyingProvider(_ToolProvider):
     async def complete_with_tools(
         self, system_prompt: str, messages: list[dict[str, Any]],
         tools: list[ToolSpec], model: str, temperature: float, max_tokens: int,
-        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False, thinking_effort: str | None = None,
     ) -> ToolReply:
         self.attempts.append(model)
         self.served += 1

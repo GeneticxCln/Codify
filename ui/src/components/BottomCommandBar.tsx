@@ -27,8 +27,10 @@ import {
   Trash2,
   Palette,
   Square,
+  Brain,
   type LucideIcon,
 } from "lucide-react";
+import { nextThinking, thinkingLabel } from "../conductorSettings";
 import { COMPOSER_ANCHOR_ID } from "../composerAnchor";
 
 import { Toggle } from "./ui/Toggle";
@@ -130,6 +132,9 @@ interface BottomCommandBarProps {
   /** Opt-in: record this goal's model calls so the run can be replayed. */
   record?: boolean;
   onToggleRecord?: (on: boolean) => void;
+  /** How hard the model thinks on chat turns ("" is off). Absent hides the control (an engine without the setting). */
+  thinking?: string;
+  onChangeThinking?: (level: string) => void;
   /**
    * Returns false when the send was refused before anything was dispatched. A
    * promise is awaited before the prompt is cleared.
@@ -184,6 +189,8 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
   onChangeMode,
   record = false,
   onToggleRecord,
+  thinking,
+  onChangeThinking,
   onSubmit,
   isLoading,
   onStop,
@@ -1095,6 +1102,22 @@ export const BottomCommandBar: React.FC<BottomCommandBarProps> = React.memo(({
               <Radio className="w-3.5 h-3.5" />
               <span>Record</span>
             </Toggle>
+
+            {/* Thinking: how hard the model reasons before it answers, where its provider has a control for it.
+                One click steps Off → low → medium → high → Off; it is an engine setting, so it holds for the next
+                turns until changed. Hidden when the engine does not know the setting. */}
+            {thinking !== undefined && (
+              <Toggle
+                armed={thinking !== ""}
+                tone="accent"
+                onClick={() => onChangeThinking?.(nextThinking(thinking))}
+                disabled={!onChangeThinking}
+                title="How hard the model thinks before answering (off, low, medium, high). Models without a thinking control ignore it."
+              >
+                <Brain className="w-3.5 h-3.5" />
+                <span>{thinkingLabel(thinking)}</span>
+              </Toggle>
+            )}
           </div>
         </div>
 

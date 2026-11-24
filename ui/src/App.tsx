@@ -31,6 +31,8 @@ import { keepPick, pickFromMenu, resolveModelChoice } from "./modelChoice";
 import { openEngineStream } from "./engineStream";
 import {
   listWorkspaces,
+  getEngineSettings,
+  saveEngineSettings,
   fetchAgentConfigs,
   fetchRecentRunModels,
   createWorkspace,
@@ -825,6 +827,32 @@ export const App: React.FC = () => {
   // What the engine noticed and a person may want to act on (docs/09 §10.22). Read on a timer while the engine is
   // up; it never sends anything. The bell counts it, and Send to chat in the drawer is the only way it becomes a turn.
   const suggestionInbox = useSuggestions(engineConnection === "live");
+  // How hard the model thinks on chat turns, an engine setting. Undefined until the engine says, and stays undefined
+  // for an engine that does not know the setting, which hides the composer's control rather than showing a dead one.
+  const [thinking, setThinking] = useState<string | undefined>(undefined);
+  useEffect(() => {
+    if (engineConnection !== "live") return;
+    let alive = true;
+    getEngineSettings()
+      .then((settings) => {
+        if (alive) setThinking(settings.conductor_thinking_effort?.value);
+      })
+      .catch(() => {
+        // The control stays hidden; nothing else depends on this read.
+      });
+    return () => {
+      alive = false;
+    };
+  }, [engineConnection]);
+  const changeThinking = useCallback(async (level: string) => {
+    try {
+      // What the engine stored is what the control shows, not what was asked for.
+      const result = await saveEngineSettings({ conductor_thinking_effort: level });
+      setThinking(String(result.saved.conductor_thinking_effort ?? level));
+    } catch (err: any) {
+      setError(readRejection(err, "Failed to change thinking"));
+    }
+  }, []);
 
   // Live goal streams (one per goal, with reconnect backoff).
   // Which answer about a goal is the newest one asked for; see `goalReadOrder.ts`.
@@ -4246,6 +4274,8 @@ export const App: React.FC = () => {
               onChangeMode={setMode}
               record={record}
               onToggleRecord={setRecord}
+              thinking={thinking}
+              onChangeThinking={(level) => void changeThinking(level)}
               onSubmit={handleSendMessage}
               isLoading={isLoading}
               onStop={handleStopGoal}

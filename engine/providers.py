@@ -735,6 +735,7 @@ class BaseProvider(ABC):
         temperature: float,
         max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        thinking_effort: str | None = None,
     ) -> ToolReply:
         """One turn of a tool-calling conversation. Overridden per protocol.
 
@@ -906,6 +907,7 @@ class AnthropicProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        thinking_effort: str | None = None,
     ) -> ToolReply:
         body: dict[str, Any] = {
             "model": model,
@@ -914,6 +916,11 @@ class AnthropicProvider(BaseProvider):
             "tools": [t.to_anthropic() for t in tools],
             "messages": to_anthropic_messages(messages),
         }
+        budget = _thinking_budget(thinking_effort, max_tokens)
+        if budget is not None and budget >= 1024:
+            # The same rule `complete` holds; the blocks it produces are kept on the reply below, because a turn
+            # that continues after a tool result must send them back unchanged (`ToolReply.reasoning`).
+            body["thinking"] = {"type": "enabled", "budget_tokens": budget}
         if cache_prefix and self._prompt_cache:
             # The conductor re-sends this one system prompt on every call of a turn, which is the one prefix whose
             # cache write is read back. ONLY the system block is marked: the tool schemas and the transcript are
@@ -941,6 +948,7 @@ class AnthropicProvider(BaseProvider):
             for c in parse_anthropic_tool_calls(blocks)
         ]
         reply = coerce_tool_reply(text, calls, tools)
+        reply.reasoning = [dict(b) for b in blocks if b.get("type") in ("thinking", "redacted_thinking")]
         if reply.text and self.on_delta is not None:
             try:
                 self.on_delta(reply.text)
@@ -972,6 +980,17 @@ def _response_format(capability: str | None, schema: dict[str, Any] | None) -> d
 _THINKING_BUDGETS = {"low": 1024, "medium": 4096, "high": 8192}
 
 
+def thinking_headroom(effort: str | None) -> int:
+    """Tokens a caller adds to a call's `max_tokens` so thinking gets its whole budget at this level.
+
+    `_thinking_budget` clamps the budget to half the cap, which is right for a role that sized its cap for its
+    answer. The conductor's calls are capped at 2048, so every level would have been clamped to the same 1024 and
+    "high" would think exactly as much as "low". Twice the level's budget on top keeps the full budget and leaves the
+    answer the room it had. 0 when thinking is off, so the call is the one it always was.
+    """
+    return 2 * _THINKING_BUDGETS[effort] if effort in _THINKING_BUDGETS else 0
+
+
 def _thinking_budget(effort: str | None, max_tokens: int) -> int | None:
     """The thinking budget for one effort level, clamped under the reply's own cap.
 
@@ -985,6 +1004,14 @@ def _thinking_budget(effort: str | None, max_tokens: int) -> int | None:
     # Half the reply's cap, not the cap itself: thinking and the answer share `max_tokens`, and a
     # budget at the cap leaves no room for the JSON the role exists to produce.
     return min(_THINKING_BUDGETS[effort], max_tokens // 2)
+
+
+def _google_thinking(effort: str | None, max_tokens: int) -> dict[str, Any]:
+    """Gemini's `thinkingConfig` for one effort level, or nothing: the one rule `complete` and tool calls share."""
+    if effort is None or effort not in _THINKING_BUDGETS or max_tokens < 1024:
+        return {}
+    budget = min(_THINKING_BUDGETS[effort], max_tokens // 2)
+    return {"thinkingConfig": {"thinkingBudget": budget}} if budget > 0 else {}
 
 
 def _tool_call_thinking(provider_name: str) -> dict[str, Any]:
@@ -1044,6 +1071,7 @@ class OpenAICompatProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        thinking_effort: str | None = None,
     ) -> ToolReply:
         # One call per provider class rather than four: every `openai_compat`
         # entry in BUILTIN_PROVIDERS (openai, deepseek, openrouter, groq, and
@@ -1081,6 +1109,13 @@ class OpenAICompatProvider(BaseProvider):
                     "tools": [t.to_openai() for t in tools],
                     "tool_choice": "auto",
                     **_tool_call_thinking(self._provider_name),
+                    # The level `complete` sends, under the same name. Not where the provider needs thinking off
+                    # on a tool call (DeepSeek, `_tool_call_thinking`): turning it back on there is a 400.
+                    **(
+                        {"reasoning_effort": thinking_effort}
+                        if thinking_effort is not None and not _tool_call_thinking(self._provider_name)
+                        else {}
+                    ),
                 },
             )
         if not isinstance(data, dict):
@@ -1351,6 +1386,7 @@ class OllamaProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        thinking_effort: str | None = None,
     ) -> ToolReply:
         # `/api/chat` rather than `/api/generate`: only the chat endpoint takes
         # a `tools` array and returns `message.tool_calls`. The generate
@@ -1387,6 +1423,8 @@ class OllamaProvider(BaseProvider):
                     # nesting it under `options` is accepted-but-ignored, which
                     # would look like the setting does nothing.
                     **({"keep_alive": keep_alive} if keep_alive is not None else {}),
+                    # `think`, as `complete` sends it: top-level too, and only when asked for.
+                    **({"think": thinking_effort} if thinking_effort is not None else {}),
                 },
             )
         if not isinstance(data, dict):
@@ -1570,6 +1608,7 @@ class GoogleProvider(BaseProvider):
         temperature: float,
         max_tokens: int,
         *, num_ctx: int | None = None, keep_alive: str | None = None, cache_prefix: bool = False,
+        thinking_effort: str | None = None,
     ) -> ToolReply:
         # Google's function calling is the one dialect here that is not
         # OpenAI-shaped: `functionDeclarations` on the tool list, and the
@@ -1588,7 +1627,12 @@ class GoogleProvider(BaseProvider):
                     "tool_config": {
                         "function_calling_config": {"mode": "AUTO"},
                     },
-                    "generationConfig": {"maxOutputTokens": max_tokens},
+                    "generationConfig": {
+                        "maxOutputTokens": max_tokens,
+                        # The budget `complete` sends. The thought signatures this turns on already ride back on
+                        # each function call (`ToolCall.signature`), which is what a multi-step turn needs.
+                        **_google_thinking(thinking_effort, max_tokens),
+                    },
                 },
                 headers={"x-goog-api-key": self._api_key},
             )
@@ -1637,13 +1681,9 @@ class GoogleProvider(BaseProvider):
         # `json_schema` is accepted and not sent: this protocol's schema field is a separate generation config
         # this adapter does not build, and a reply schema is prompt material here.
         url = f"{self._base_url}/models/{model}:generateContent"
-        generation_config: dict[str, Any] = {"maxOutputTokens": max_tokens}
-        if thinking_effort is not None and thinking_effort in _THINKING_BUDGETS and max_tokens >= 1024:
-            budget = min(_THINKING_BUDGETS[thinking_effort], max_tokens // 2)
-            if budget > 0:
-                generation_config["thinkingConfig"] = {
-                    "thinkingBudget": budget,
-                }
+        generation_config: dict[str, Any] = {
+            "maxOutputTokens": max_tokens, **_google_thinking(thinking_effort, max_tokens),
+        }
         payload = {
             "system_instruction": {"parts": [{"text": system_prompt}]},
             "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
