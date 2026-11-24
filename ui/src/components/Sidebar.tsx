@@ -63,8 +63,10 @@ export interface SidebarProps {
   onSelect: (conversationId: string) => void;
   /** Rename a thread in place. */
   onRename: (conversationId: string, title: string) => void;
-  /** Hide a thread from the panel. Archived, never deleted. */
+  /** Hide a thread from the panel and keep it. */
   onArchive: (conversationId: string) => void;
+  /** Delete a thread and every turn in it, for good. The caller confirms. */
+  onDelete: (conversationId: string) => void;
   /** These shell actions remain available at the foot of the panel. */
   onOpenBrowser?: () => void;
   onOpenTerminal?: () => void;
@@ -269,6 +271,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
   onSelect,
   onRename,
   onArchive,
+  onDelete,
   onOpenBrowser,
   onOpenTerminal,
   onOpenMachine,
@@ -650,6 +653,7 @@ export const Sidebar: React.FC<SidebarProps> = React.memo(({
                 target && onRename(target.id, threadTitle(target))
               }
               onArchive={() => target && onArchive(target.id)}
+              onDelete={() => target && onDelete(target.id)}
             />
           );
         })()}

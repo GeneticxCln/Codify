@@ -12,9 +12,9 @@ The shape they hold, and why:
 - **A goal joins a thread, and the link is checked.** Not a free label: the
   thread has to exist and be in the same workspace, or a client could show one
   workspace's work under another's name.
-- **Deleting a thread keeps its runs.** `ON DELETE SET NULL`. A goal's history is
-  the audit trail of what the engine did, and closing a tab is not a way to
-  erase it.
+- **Deleting a thread deletes its turns.** Archive keeps a thread; delete removes it and every turn in it, with
+  their events and the thread's summaries, and is refused while a turn is still running. It used to leave every
+  turn behind as its own single-turn thread, so "delete" removed a tab and kept the conversation.
 - **A rename cannot move or archive the thread.** `extra: "forbid"`, for the same
   reason invariant 2 (docs/00 §6.2) forbids extras on `POST /goals`.
 """
@@ -36,6 +36,7 @@ from httpx import ASGITransport
 from tests import hermetic  # noqa: F401 — throwaway state dir; see tests/hermetic.py
 
 from engine.app import BOOT_TOKEN, app
+from engine.compaction import CompactionService
 from engine.db import connect
 from engine.executor import ExecutorService
 from engine.models import ConversationCreate, GoalCreate, TurnCreate, WorkspaceCreate
@@ -518,42 +519,70 @@ class ConversationTestCase(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(restored.json()["archived"])
 
-    # ── deleting a thread keeps the runs ───────────────────────────────────
+    # ── deleting a thread deletes it, turns and all ───────────────────────
 
-    async def test_deleting_a_thread_keeps_its_runs_in_the_history(self) -> None:
-        # Closing a tab is not a way to erase an audit trail. `ON DELETE SET
-        # NULL` means the goals survive as single-turn threads.
-        thread = (
-            await self.call(
-                "POST", "/conversations", json={"workspace_id": self.workspace.id}
-            )
-        ).json()["id"]
-        goal = (
-            await self.call(
-                "POST",
-                "/goals",
-                json={
-                    "workspace_id": self.workspace.id,
-                    "conversation_id": thread,
-                    "title": "the run that mattered",
-                },
-            )
-        ).json()
+    def _finished_turn(self, thread: str, prompt: str) -> Any:
+        """A turn that has finished, with one event on its log: what a person sees and asks to delete."""
+        goals = app.state.goals
+        turn = goals.create_turn(thread, TurnCreate(prompt=prompt))
+        goals.publish(app.state.executor._event(turn.id, None, "log", {"level": "info", "message": "answer", "turn": True}))
+        current = goals.get(turn.id)
+        return goals.update_status(turn.id, current.version, "COMPLETED")
+
+    def _count(self, sql: str, *args: Any) -> int:
+        return int(self.conn.execute(sql, args).fetchone()[0])
+
+    async def test_deleting_a_thread_deletes_its_turns_their_events_and_summaries(self) -> None:
+        # Delete used to drop only the thread row, and `ON DELETE SET NULL` left every turn behind as its own
+        # single-turn thread: the person deleted a conversation and still had all of it. Archive is the keep.
+        thread = (await self.call("POST", "/conversations", json={"workspace_id": self.workspace.id})).json()["id"]
+        first = self._finished_turn(thread, "the first message")
+        second = self._finished_turn(thread, "the second message")
+        CompactionService(self.conn, app.state.goals).create(thread, "The person asked about the parser and was told it returns its input unchanged.", 1, first.created_at)
 
         deleted = await self.call("DELETE", f"/conversations/{thread}")
         self.assertEqual(deleted.status_code, 200, deleted.text)
+        self.assertEqual(2, deleted.json()["turns"])
+        self.assertFalse(deleted.json()["files_touched"])
 
-        gone = await self.call("GET", f"/conversations/{thread}")
-        self.assertEqual(gone.status_code, 404)
+        self.assertEqual(404, (await self.call("GET", f"/conversations/{thread}")).status_code)
+        for turn in (first, second):
+            self.assertEqual(404, (await self.call("GET", f"/goals/{turn.id}")).status_code, "a turn outlived its thread")
+        self.assertEqual(0, self._count("SELECT count(*) FROM events WHERE goal_id IN (?, ?)", first.id, second.id))
+        self.assertEqual(0, self._count("SELECT count(*) FROM conversation_compactions WHERE conversation_id = ?", thread))
+        history = await self.call("GET", "/goals", params={"workspace_id": self.workspace.id})
+        self.assertEqual([], [g["id"] for g in history.json() if g["id"] in (first.id, second.id)])
 
-        survivor = await self.call("GET", f"/goals/{goal['id']}")
-        self.assertEqual(survivor.status_code, 200)
-        self.assertIsNone(survivor.json()["conversation_id"])
+    async def test_a_thread_with_a_running_turn_is_not_deleted(self) -> None:
+        # A live driver would keep publishing events for rows that no longer exist; the person cancels first.
+        thread = (await self.call("POST", "/conversations", json={"workspace_id": self.workspace.id})).json()["id"]
+        done = self._finished_turn(thread, "finished")
+        running = app.state.goals.create_turn(thread, TurnCreate(prompt="still going"))
+        self.assertIn(running.status, ("PLANNING", "RUNNING"))
 
-        history = await self.call(
-            "GET", "/goals", params={"workspace_id": self.workspace.id}
-        )
-        self.assertIn(goal["id"], [g["id"] for g in history.json()])
+        refused = await self.call("DELETE", f"/conversations/{thread}")
+        self.assertEqual(409, refused.status_code, refused.text)
+        self.assertEqual("thread_in_progress", refused.json()["code"])
+        self.assertEqual(200, (await self.call("GET", f"/conversations/{thread}")).status_code)
+        self.assertEqual(200, (await self.call("GET", f"/goals/{done.id}")).status_code, "a refused delete removed a turn")
+
+    async def test_deleting_one_message_forgets_the_summary_that_covers_it(self) -> None:
+        # A summary that reaches past a deleted turn still carries its words into the next prompt. One that ends
+        # before it says nothing about it and stays.
+        thread = (await self.call("POST", "/conversations", json={"workspace_id": self.workspace.id})).json()["id"]
+        first = self._finished_turn(thread, "keep me")
+        second = self._finished_turn(thread, "delete me")
+        compactions = CompactionService(self.conn, app.state.goals)
+        compactions.create(thread, "The person asked to keep the first answer as it was written.", 1, first.created_at)
+        compactions.create(thread, "The person asked to keep the first answer and then asked to delete me.", 2, second.created_at)
+
+        deleted = await self.call("DELETE", f"/goals/{second.id}")
+        self.assertEqual(200, deleted.status_code, deleted.text)
+        self.assertEqual(1, deleted.json()["summaries"])
+        left = [r[0] for r in self.conn.execute(
+            "SELECT summary FROM conversation_compactions WHERE conversation_id = ?", (thread,))]
+        self.assertEqual(["The person asked to keep the first answer as it was written."], left)
+        self.assertEqual(200, (await self.call("GET", f"/goals/{first.id}")).status_code)
 
     # ── invariant 2 survives the new field ────────────────────────────────
 

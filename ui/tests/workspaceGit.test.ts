@@ -43,6 +43,7 @@ const render = (git?: WorkspaceGit | null): string =>
       onSelect: noop,
       onRename: noop,
       onArchive: noop,
+      onDelete: noop,
       ...(git === undefined ? {} : { git }),
     }),
   );

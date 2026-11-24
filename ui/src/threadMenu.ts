@@ -17,16 +17,15 @@
  * `new` starts a thread *on* the thread you are looking at — see
  * `newThreadParentId`. The rest act on the thread the menu was opened on.
  */
-export type ThreadMenuItemId = "new" | "rename" | "archive";
+export type ThreadMenuItemId = "new" | "rename" | "archive" | "delete";
 
 export interface ThreadMenuItem {
   id: ThreadMenuItemId;
   label: string;
   /**
-   * Archive removes the thread from the panel. It is not destructive — the
-   * engine keeps every run either way — but it does take something away, and
-   * the one item that does should not sit where a stray click lands with no
-   * difference made about it.
+   * Archive and Delete take something away. Archive puts the thread out of the panel and keeps it; Delete removes
+   * the thread and every turn in it for good (the caller confirms first). Neither should sit where a stray click
+   * lands with no difference made about it.
    */
   caution?: boolean;
   /** Acts on the thread the menu was opened on, so it needs one to exist. */
@@ -53,6 +52,7 @@ export const THREAD_MENU_ITEMS: readonly ThreadMenuItem[] = [
   { id: "new", label: "New thread" },
   { id: "rename", label: "Rename", needsThread: true },
   { id: "archive", label: "Archive", caution: true, needsThread: true },
+  { id: "delete", label: "Delete", caution: true, needsThread: true },
 ];
 
 /**

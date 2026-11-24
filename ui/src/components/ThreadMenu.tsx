@@ -1,5 +1,5 @@
 import React from "react";
-import { Archive, MessageSquarePlus, Pencil } from "lucide-react";
+import { Archive, MessageSquarePlus, Pencil, Trash2 } from "lucide-react";
 
 import { Button } from "./ui/Button";
 import {
@@ -65,6 +65,8 @@ export interface ThreadMenuProps {
   onNewThread: () => void;
   onRename: () => void;
   onArchive: () => void;
+  /** Delete the thread and every turn in it. The caller confirms; this only asks. */
+  onDelete: () => void;
   onClose: () => void;
   /**
    * The area the menu has to stay inside. Defaults to the window.
@@ -83,6 +85,7 @@ const ICONS: Record<ThreadMenuItemId, React.FC<{ className?: string }>> = {
   new: MessageSquarePlus,
   rename: Pencil,
   archive: Archive,
+  delete: Trash2,
 };
 
 export const ThreadMenu: React.FC<ThreadMenuProps> = ({
@@ -93,6 +96,7 @@ export const ThreadMenu: React.FC<ThreadMenuProps> = ({
   onNewThread,
   onRename,
   onArchive,
+  onDelete,
   onClose,
   bounds,
 }) => {
@@ -211,7 +215,13 @@ export const ThreadMenu: React.FC<ThreadMenuProps> = ({
         {threadMenuItems(title !== undefined).map((item: ThreadMenuItem) => {
           const Icon = ICONS[item.id];
           const action =
-            item.id === "new" ? onNewThread : item.id === "rename" ? onRename : onArchive;
+            item.id === "new"
+              ? onNewThread
+              : item.id === "rename"
+                ? onRename
+                : item.id === "archive"
+                  ? onArchive
+                  : onDelete;
           return (
             <Button
               key={item.id}

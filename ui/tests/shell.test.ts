@@ -64,6 +64,7 @@ const sidebar = (
       onSelect: noop,
       onRename: noop,
       onArchive: noop,
+      onDelete: noop,
     })
   );
 
@@ -384,6 +385,7 @@ const sidebarWithBadges = (over: Record<string, unknown> = {}): string =>
       onSelect: noop,
       onRename: noop,
       onArchive: noop,
+      onDelete: noop,
       onOpenBrowser: noop,
       onOpenTerminal: noop,
       onOpenSettings: noop,
@@ -551,6 +553,7 @@ const menu = (over: Partial<React.ComponentProps<typeof ThreadMenu>> = {}) =>
       onNewThread: noop,
       onRename: noop,
       onArchive: noop,
+      onDelete: noop,
       onClose: noop,
       ...over,
     })
@@ -570,12 +573,11 @@ test("the thread menu leads with New thread, then the thread's own actions", () 
   // should not be one the pointer has to travel to.
   const shown = text(menu());
   assert.match(menu(), /role="menuitem"/);
-  const order = ["New thread", "Rename", "Archive"].map((l) => shown.indexOf(l));
+  const order = ["New thread", "Rename", "Archive", "Delete"].map((l) => shown.indexOf(l));
   for (const at of order) assert.ok(at >= 0, `the menu is missing an item: ${shown}`);
   assert.deepEqual(order, [...order].sort((a, b) => a - b), `out of order: ${shown}`);
-  // Nothing that looks like a delete. Archive hides a thread; the engine keeps
-  // every run either way, and a menu offering Delete would be a lie.
-  assert.doesNotMatch(shown, /Delete/);
+  // Delete is real now: the engine removes the thread and every turn in it (it used to keep them, which is why
+  // this test once refused the word). It is last, after Archive, the way to keep a thread instead.
 });
 
 /** The opening tag of every element in the markup that carries this role. */
@@ -592,7 +594,7 @@ test("a menu item's label is on the left, not floating in the middle", () => {
   // this; the primitive has to emit exactly one of the two, and the rendered
   // item is where that is visible.
   const items = withRole(menu(), "menuitem");
-  assert.equal(items.length, 3, "the menu did not render its three items");
+  assert.equal(items.length, 4, "the menu did not render its four items");
   for (const tag of items) {
     const classes = classesOf(tag);
     const justify = classes.filter((c) => /^justify-(start|center|end|between)$/.test(c));
@@ -675,6 +677,7 @@ test("each menu item acts on the thread it names, and no other", async () => {
     ["New thread", "onNewThread"],
     ["Rename", "onRename"],
     ["Archive", "onArchive"],
+    ["Delete", "onDelete"],
   ] as const) {
     const called: string[] = [];
     await withDom(async (dom) => {
@@ -688,6 +691,7 @@ test("each menu item acts on the thread it names, and no other", async () => {
           onNewThread: () => called.push("onNewThread"),
           onRename: () => called.push("onRename"),
           onArchive: () => called.push("onArchive"),
+          onDelete: () => called.push("onDelete"),
           onClose: () => called.push("onClose"),
         }),
       );

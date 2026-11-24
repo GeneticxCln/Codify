@@ -34,6 +34,7 @@ async function mountSidebar(dom: Dom) {
       onSelect: (id: string) => calls.push(`select:${id}`),
       onRename: (id: string) => calls.push(`rename:${id}`),
       onArchive: (id: string) => calls.push(`archive:${id}`),
+      onDelete: (id: string) => calls.push(`delete:${id}`),
     }),
   );
   return calls;

@@ -57,10 +57,17 @@ Three decisions in that shape, and why:
   `tests/test_conversations.py::MigrationTestCase`, which hand-writes the *old*
   schema on purpose, because a migration test that only ran against today's
   schema would pass no matter what the migration did.
-- **Archived, never deleted.** A goal belongs to the thread it was asked in.
-  `DELETE /conversations/{id}` drops the thread and `ON DELETE SET NULL` leaves
-  every run in the history as its own thread — closing a tab is not a way to
-  erase an audit trail.
+- **Archive keeps; Delete removes.** A goal belongs to the thread it was asked in. Archive puts a thread out of
+  the panel and keeps all of it. `DELETE /conversations/{id}` deletes the thread **and every turn in it**: their
+  events, plan steps, proposals and recordings (the schema's cascades) and the thread's summaries. It used to drop
+  only the thread row, and `ON DELETE SET NULL` left every turn behind as its own single-turn thread, so a person
+  who deleted a conversation still had all of it. It is refused (`409 thread_in_progress`) while a turn in it is
+  still planning or running, or still driven by the executor; the person cancels first. Deleting one message is
+  `DELETE /goals/{id}`, which also drops any thread summary that reaches past it, because a summary that quotes a
+  deleted message would put it back in front of the model. Files the fixer wrote are never touched. The thread
+  menu offers both (New thread, Rename, Archive, Delete), and a finished chat message has its own Delete; the
+  transcript removes the person's message with its reply (`turnTranscript.withoutTurn`).
+  `tests/test_conversations.py` and `ui/tests/turnTranscript.test.ts` hold it.
 
 Indexes: `idx_goals_conversation (conversation_id, created_at)` and
 `idx_conversations_workspace (workspace_id, updated_at)`. Listing a thread's
@@ -231,7 +238,7 @@ tests, not a flag on this one.
 | `POST /conversations/{id}/turns` | Make a turn: `{prompt, provider?, model?, trace?}`, `extra=forbid`. `provider` and `model` come as a pair or not at all (§10.20). A turn into an archived thread restores it in the same write, so the thread is back in the panel it is being worked in (a second window that still had it open is the ordinary way to get there). |
 | `PATCH /conversations/{id}` | Rename. The only mutable thing about a thread. |
 | `POST /conversations/{id}/archive?archived=` | Hide from the panel, or restore. |
-| `DELETE /conversations/{id}` | Drop the thread, keep the runs. |
+| `DELETE /conversations/{id}` | Delete the thread and every turn in it (§2). `409 thread_in_progress` while a turn in it is running. |
 | `PUT /goals/{id}/conversation` | Attach an *existing* goal to a thread — the other half of `POST /goals` (§6). |
 
 `POST /goals` accepts an optional `conversation_id`; an existing goal joins a

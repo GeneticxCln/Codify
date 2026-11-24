@@ -2489,13 +2489,21 @@ async def archive_conversation(
 async def delete_conversation(
     conversation_id: str, request: Request
 ) -> dict[str, Any]:
-    """Drop the thread and keep its runs.
+    """Delete the thread and every turn in it (`ConversationService.delete`).
 
-    Goals reference a conversation `ON DELETE SET NULL`, so every run it held
-    survives as a single-turn thread in the history. Deleting a tab is not a way
-    to delete an audit trail.
+    Refused while any of its turns is still being driven, checked against the executor's live driver set as
+    `DELETE /goals/{id}` checks one turn: a stored status can say a turn finished a moment before its driver lets go.
     """
     conversations: ConversationService = request.app.state.conversations
+    executor = getattr(request.app.state, "executor", None)
+    if executor is not None:
+        driving = [t.goal_id for t in conversations.turns(conversation_id) if executor.is_driving(t.goal_id)]
+        if driving:
+            raise ApiError(
+                409, "thread_in_progress",
+                "a turn in this thread is still running — cancel it before deleting the thread",
+                {"conversation_id": conversation_id, "goal_ids": driving},
+            )
     return conversations.delete(conversation_id)
 
 
