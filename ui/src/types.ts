@@ -378,6 +378,20 @@ export interface TraceSummary {
   recorded: TraceCall[];
 }
 
+/** `POST /goals/{id}/trace/replay`: whether replaying the recording matched without a provider. */
+export interface TraceReplayReport {
+  goal_id: string;
+  replay_goal_id: string;
+  recorded_calls: number;
+  served_calls: number;
+  gate_calls_replayed: number;
+  conductor_calls_skipped: number;
+  stages: Array<[string, string]>;
+  status: string;
+  diverged: string | null;
+  matched: boolean;
+}
+
 /** What actually happened to one role the last time it was called, read from
  * the goal event log — the engine's GET /settings/agents/stats response. */
 export interface AgentCallStat {

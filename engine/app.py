@@ -27,7 +27,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import FileResponse, JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from engine import backup, capabilities, history, home, speech, watchdog
+from engine import backup, capabilities, history, home, replay as trace_replay, speech, watchdog
 from engine import github_remote
 from engine.db import SCHEMA_VERSION, connect
 from engine.compaction import CompactionService
@@ -3545,6 +3545,13 @@ async def put_goal_trace(goal_id: str, body: TraceToggle, request: Request) -> G
     """
     goals: GoalService = request.app.state.goals
     return goals.set_trace(goal_id, body.enabled)
+
+
+@app.post("/goals/{goal_id}/trace/replay")
+async def replay_goal_trace(goal_id: str, request: Request) -> dict[str, Any]:
+    """Replay a recorded goal in an isolated scratch copy without calling a provider (docs/04 §8.4)."""
+    conn = request.app.state.conn
+    return await trace_replay.replay(conn, goal_id, cleanup_scratch=True)
 
 
 @app.post("/goals/{goal_id}/pause")
