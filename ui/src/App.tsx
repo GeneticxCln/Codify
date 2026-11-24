@@ -3442,7 +3442,7 @@ export const App: React.FC = () => {
             openConversation(prev, thread, goal.title, goal.workspace_id),
           );
         }
-        setDrawer((open) => closeDrawer(open, "history"));
+        setDrawer((open) => closeDrawer(closeDrawer(open, "history"), "audit"));
         const terminal = new Set(["COMPLETED", "FAILED", "CANCELLED"]);
         if (!terminal.has(goal.status)) {
           // Floor the replay at what was just fetched. A goal re-opened by Apply
@@ -5019,6 +5019,7 @@ export const App: React.FC = () => {
           setActiveGoalId(null);
           autoStartedGoals.current.clear();
           setTabState((prev) => clearAllConversations(prev));
+          setDrawer((open) => closeDrawer(closeDrawer(closeDrawer(open, "audit"), "stats"), "history"));
           inbox.clear();
           void suggestionInbox.refresh();
         }}

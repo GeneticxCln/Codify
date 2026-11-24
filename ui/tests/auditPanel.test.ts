@@ -9,6 +9,7 @@ import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
 const { withDom } = await import("./dom.ts");
+const { withApp, conversation } = await import("./appHarness.ts");
 
 function json(body: unknown, status = 200): Response {
   return new Response(JSON.stringify(body), {
@@ -219,4 +220,100 @@ test("AuditPanel ignores a slower earlier project response after switching proje
       globalThis.fetch = prevFetch;
     }
   });
+});
+
+test("Opening a goal from the Audit drawer closes the drawer, and clearing history closes stale drawers", async () => {
+  await withApp(
+    {
+      conversations: [conversation({ id: "c1", title: "Audit thread" })],
+      goals: [
+        {
+          id: "g-audit-1",
+          conversation_id: "c1",
+          title: "Refactor auth",
+          mode: "normal",
+          status: "COMPLETED",
+        },
+      ],
+      auditChanges: {
+        generated_at: 1_700_000_300,
+        workspace_id: null,
+        total_goals: 1,
+        total_commits: 1,
+        total_files: 1,
+        entries: [
+          {
+            goal_id: "g-audit-1",
+            workspace_id: "ws-1",
+            workspace_name: "Codify",
+            title: "Refactor auth",
+            status: "COMPLETED",
+            mode: "normal",
+            dry_run: false,
+            updated_at: 1_700_000_200,
+            commits: [
+              {
+                step_id: "s1",
+                step_title: "Step 1",
+                sha: "deadbee",
+                message: "refactor: auth",
+                at: 1_700_000_200,
+              },
+            ],
+            files: ["auth.py"],
+            files_count: 1,
+          },
+        ],
+      },
+    },
+    async ({ dom, settle }) => {
+      // 1. Open the Audit drawer via the header toggle.
+      const auditBtn = dom.byButton("Audit");
+      await dom.click(auditBtn);
+      for (let i = 0; i < 6; i++) await settle();
+      assert.ok(dom.container.querySelector('button[aria-label="Close audit log"]'), "Audit drawer must open");
+      assert.match(dom.text(), /Refactor auth/);
+
+      // 2. Click the goal in AuditPanel: it should jump to the goal AND close the Audit drawer.
+      await dom.click(dom.byButton("Refactor auth"));
+      for (let i = 0; i < 6; i++) await settle();
+      assert.ok(
+        dom.container.querySelector('button[aria-label="Close audit log"]') === null,
+        "Audit drawer must close after clicking a goal to open it",
+      );
+
+      // 3. Re-open the Audit drawer, then clear all history in Settings -> Sessions: Audit drawer must close.
+      await dom.click(auditBtn);
+      for (let i = 0; i < 6; i++) await settle();
+      assert.ok(dom.container.querySelector('button[aria-label="Close audit log"]'), "Audit drawer reopened");
+
+      // Open Settings via the header status pill while the Audit drawer stays open behind it.
+      await dom.click(dom.byButton("Live"));
+      for (let i = 0; i < 8; i++) await settle();
+      await dom.click(dom.byButton("Sessions"));
+      for (let i = 0; i < 6; i++) await settle();
+      const deleteBtn = Array.from(dom.container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Delete all history…"),
+      ) as HTMLButtonElement | undefined;
+      assert.ok(deleteBtn, "Delete all history button missing");
+      await dom.click(deleteBtn);
+      await settle();
+      await dom.fill(
+        dom.container.querySelector('input[placeholder="delete all history"]') as HTMLInputElement,
+        "delete all history",
+      );
+      await settle();
+      const confirmBtn = Array.from(dom.container.querySelectorAll("button")).find((b) =>
+        b.textContent?.includes("Permanently delete history"),
+      ) as HTMLButtonElement | undefined;
+      assert.ok(confirmBtn, "Confirm delete button missing");
+      await dom.click(confirmBtn);
+      for (let i = 0; i < 6; i++) await settle();
+
+      assert.ok(
+        dom.container.querySelector('button[aria-label="Close audit log"]') === null,
+        "Audit drawer must close when all history is cleared so deleted goals do not linger",
+      );
+    },
+  );
 });

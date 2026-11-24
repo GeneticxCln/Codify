@@ -54,6 +54,8 @@ export interface AppOptions {
   goalEvents?: Record<string, Array<Record<string, unknown>>>;
   /** Recorded model calls per goal id, served by `GET /goals/{id}/trace` and `/trace/{seq}`. */
   traceCalls?: Record<string, Array<Record<string, unknown> & { seq: number; role: string; model: string; prompt_hash: string }>>;
+  /** Payload served by `GET /audit/changes`. */
+  auditChanges?: Record<string, unknown>;
   /** A remembered tab strip (`CODIFY_TABS`), as the app would have written it. */
   storedTabs?: unknown;
   /** Shell commands that answer with something other than the default `null`. */
@@ -489,6 +491,39 @@ export async function withApp(
         backups_dir: "/home/me/.codify/backups",
         backups: [],
         pending_restore: null,
+      });
+    }
+    if (path === "/audit/changes" && method === "GET") {
+      return respond(
+        options.auditChanges ?? {
+          generated_at: 1,
+          workspace_id: query.get("workspace_id"),
+          total_goals: 0,
+          total_commits: 0,
+          total_files: 0,
+          entries: [],
+        },
+      );
+    }
+    if (path === "/history/clear" && method === "POST") {
+      conversations.length = 0;
+      goalsById.clear();
+      return respond({
+        deleted: true,
+        removed: {
+          threads: 1,
+          turns: 1,
+          events: 1,
+          plan_steps: 0,
+          proposals: 0,
+          recordings: 0,
+          summaries: 0,
+          suggestions: 0,
+          observations: 0,
+          stats_days: 0,
+        },
+        files_touched: false,
+        scrubbed: true,
       });
     }
     if (path === "/settings/runtime") {
