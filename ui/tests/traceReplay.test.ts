@@ -114,3 +114,104 @@ test("TracePanel Replay button posts /goals/{id}/trace/replay and renders match 
     }
   });
 });
+
+test("TracePanel ignores a slower earlier call-detail response when a newer call is selected", async () => {
+  await withDom(async (dom) => {
+    setEngineInfo({ port: 7430, token: "tok" });
+    const realFetch = globalThis.fetch;
+
+    let resolveCall1!: (res: Response) => void;
+    const call1Deferred = new Promise<Response>((resolve) => {
+      resolveCall1 = resolve;
+    });
+
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.endsWith("/goals/g1/trace")) {
+        return new Response(JSON.stringify(SUMMARY), { status: 200, headers: { "Content-Type": "application/json" } });
+      }
+      if (url.endsWith("/goals/g1/trace/1")) {
+        return call1Deferred;
+      }
+      if (url.endsWith("/goals/g1/trace/2")) {
+        return new Response(
+          JSON.stringify({
+            goal_id: "g1",
+            seq: 2,
+            step_id: null,
+            role: "design",
+            provider: "ollama",
+            model: "m",
+            temperature: 0.2,
+            max_tokens: 100,
+            prompt_hash: "cccc3333dddd4444",
+            system_hash: "sys2",
+            system_prompt: "Design system prompt",
+            user_prompt: "Design user prompt",
+            response: "Design reply",
+            input_tokens: 10,
+            output_tokens: 5,
+            duration_ms: 20,
+            at: 2,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response("{}", { status: 404 });
+    }) as typeof fetch;
+
+    try {
+      await dom.render(
+        React.createElement(TracePanel, {
+          goalId: "g1",
+          goal: GOAL,
+          onSetTrace: () => {},
+          onClose: () => {},
+        }),
+      );
+      await dom.settle();
+
+      const btn1 = dom.container.querySelector('button[aria-label="Inspect call 1"]') as HTMLButtonElement | null;
+      const btn2 = dom.container.querySelector('button[aria-label="Inspect call 2"]') as HTMLButtonElement | null;
+      assert.ok(btn1 && btn2, "inspect buttons missing");
+
+      // Click call 1 (stays pending), then immediately click call 2 (resolves first).
+      await dom.click(btn1);
+      await dom.click(btn2);
+      for (let i = 0; i < 4; i++) await dom.settle();
+      assert.match(dom.text(), /Design reply/);
+
+      // Resolve slower call 1: it must NOT overwrite call 2's inspector view.
+      resolveCall1(
+        new Response(
+          JSON.stringify({
+            goal_id: "g1",
+            seq: 1,
+            step_id: null,
+            role: "librarian",
+            provider: "ollama",
+            model: "m",
+            temperature: 0.2,
+            max_tokens: 100,
+            prompt_hash: "aaaa1111bbbb2222",
+            system_hash: "sys1",
+            system_prompt: "Stale librarian system prompt",
+            user_prompt: "Stale librarian user prompt",
+            response: "Stale librarian reply",
+            input_tokens: 10,
+            output_tokens: 5,
+            duration_ms: 20,
+            at: 1,
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      );
+      for (let i = 0; i < 4; i++) await dom.settle();
+
+      assert.match(dom.text(), /Design reply/);
+      assert.doesNotMatch(dom.text(), /Stale librarian reply/);
+    } finally {
+      globalThis.fetch = realFetch;
+    }
+  });
+});

@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { deleteGoalTrace, fetchGoalTrace, fetchGoalTraceCall, replayGoalTrace } from "../api";
 import type { Goal, TraceCallDetail, TraceReplayReport, TraceSummary } from "../types";
 import {
@@ -43,6 +43,16 @@ export const TracePanel: React.FC<{
   const [detailError, setDetailError] = useState<string | null>(null);
   const [replaying, setReplaying] = useState(false);
   const [replay, setReplay] = useState<TraceReplayReport | null>(null);
+  const detailReqRef = useRef(0);
+  const replayReqRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // The parent owns the goal, so an arming done here has to show up even if the
   // panel is reopened from a stale copy of it.
@@ -63,12 +73,16 @@ export const TracePanel: React.FC<{
 
   useEffect(() => {
     let live = true;
-    // A different goal: the last one's count must not be what Delete confirms against.
+    // A different goal: invalidate any in-flight call-detail or replay responses for the previous goal.
+    detailReqRef.current += 1;
+    replayReqRef.current += 1;
     setSummary(null);
     setError(null);
     setSelectedSeq(null);
     setDetail(null);
     setDetailError(null);
+    setDetailLoading(false);
+    setReplaying(false);
     setReplay(null);
     fetchGoalTrace(goalId)
       .then((s) => {
@@ -83,10 +97,12 @@ export const TracePanel: React.FC<{
   }, [goalId, load]);
 
   const handleSelectCall = async (seq: number) => {
+    const req = ++detailReqRef.current;
     if (selectedSeq === seq) {
       setSelectedSeq(null);
       setDetail(null);
       setDetailError(null);
+      setDetailLoading(false);
       return;
     }
     setSelectedSeq(seq);
@@ -95,11 +111,15 @@ export const TracePanel: React.FC<{
     setDetailLoading(true);
     try {
       const loaded = await fetchGoalTraceCall(goalId, seq);
+      if (!mountedRef.current || detailReqRef.current !== req) return;
       setDetail(loaded);
     } catch (err: any) {
+      if (!mountedRef.current || detailReqRef.current !== req) return;
       setDetailError(readRejection(err, `Could not read call #${seq}.`));
     } finally {
-      setDetailLoading(false);
+      if (mountedRef.current && detailReqRef.current === req) {
+        setDetailLoading(false);
+      }
     }
   };
 
@@ -114,9 +134,13 @@ export const TracePanel: React.FC<{
     setBusy(true);
     try {
       await deleteGoalTrace(goalId);
+      detailReqRef.current += 1;
+      replayReqRef.current += 1;
       setSelectedSeq(null);
       setDetail(null);
       setDetailError(null);
+      setDetailLoading(false);
+      setReplaying(false);
       setReplay(null);
       await load();
     } catch (err: any) {
@@ -127,15 +151,21 @@ export const TracePanel: React.FC<{
   };
 
   const handleReplay = async () => {
+    const req = ++replayReqRef.current;
     setReplaying(true);
     setError(null);
     setReplay(null);
     try {
-      setReplay(await replayGoalTrace(goalId));
+      const result = await replayGoalTrace(goalId);
+      if (!mountedRef.current || replayReqRef.current !== req) return;
+      setReplay(result);
     } catch (err: any) {
+      if (!mountedRef.current || replayReqRef.current !== req) return;
       setError(readRejection(err, "Could not replay this run's recording."));
     } finally {
-      setReplaying(false);
+      if (mountedRef.current && replayReqRef.current === req) {
+        setReplaying(false);
+      }
     }
   };
 
@@ -361,9 +391,11 @@ export const TracePanel: React.FC<{
                 <button
                   type="button"
                   onClick={() => {
+                    detailReqRef.current += 1;
                     setSelectedSeq(null);
                     setDetail(null);
                     setDetailError(null);
+                    setDetailLoading(false);
                   }}
                   aria-label="Close call inspector"
                   className="text-codify-muted hover:text-codify-secondary"

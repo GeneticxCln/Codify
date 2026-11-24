@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { FileCode2, FolderGit2, GitCommitHorizontal, RefreshCw } from "lucide-react";
 
 import { fetchAuditChanges, listWorkspaces } from "../api";
@@ -114,6 +114,15 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ onOpenGoal }) => {
   const [feed, setFeed] = useState<AuditChangesResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const reqSeqRef = useRef(0);
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -128,16 +137,21 @@ export const AuditPanel: React.FC<AuditPanelProps> = ({ onOpenGoal }) => {
   }, []);
 
   const load = useCallback(async (wsId: string) => {
+    const req = ++reqSeqRef.current;
     setLoading(true);
     setError(null);
     setFeed(null);
     try {
       const data = await fetchAuditChanges(wsId || null);
+      if (!mountedRef.current || reqSeqRef.current !== req) return;
       setFeed(data);
     } catch (err: unknown) {
+      if (!mountedRef.current || reqSeqRef.current !== req) return;
       setError(err instanceof Error ? err.message : "Could not load audit changes.");
     } finally {
-      setLoading(false);
+      if (mountedRef.current && reqSeqRef.current === req) {
+        setLoading(false);
+      }
     }
   }, []);
 
