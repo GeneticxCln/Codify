@@ -133,5 +133,25 @@ class RegistryContract(unittest.TestCase):
                 self.assertEqual(config.provider, slug)
 
 
+
+class OpenCodeProvider(unittest.TestCase):
+    """OpenCode's hosted gateway, asked for by name ("opencode zen"). It is pinned by its current URL: the
+    product was renamed from Zen to Console, and `/zen/v1` still answers today, but the docs name
+    `/inference/openai/v1` as the OpenAI-compatible endpoint, so that is the one a release ships."""
+
+    def test_opencode_is_a_builtin_openai_compatible_provider_that_needs_a_key(self) -> None:
+        meta = BUILTIN_PROVIDERS["opencode"]
+        self.assertEqual(meta["protocol"], "openai_compat")
+        self.assertEqual(meta["base_url"], "https://opencode.ai/inference/openai/v1")
+        # Its free models answer only inside OpenCode's own client; with no key the API says "Missing API key".
+        self.assertTrue(meta["needs_key"])
+        self.assertFalse(meta["local_only"])
+
+    def test_its_key_can_come_from_the_variable_its_docs_name(self) -> None:
+        from engine.providers import ENV_KEY_MAP
+
+        self.assertEqual(ENV_KEY_MAP["opencode"], ["OPENCODE_API_KEY"])
+
+
 if __name__ == "__main__":
     unittest.main()

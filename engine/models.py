@@ -213,6 +213,17 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_key": True,
         "local_only": False,
     },
+    # OpenCode's hosted gateway ("OpenCode Console", formerly Zen): one key, many vendors' models. Its
+    # `/models` lists every model it sells, but only some are served on chat/completions (Claude is on
+    # `/anthropic/v1/messages`, GPT on `/responses`); each row says which endpoints serve it, and
+    # discovery reads that (`docs/06` §2), so a model this protocol cannot reach is marked rather than
+    # offered. Its free models answer only inside OpenCode's own client, not to an API key.
+    "opencode": {
+        "protocol": "openai_compat",
+        "base_url": "https://opencode.ai/inference/openai/v1",
+        "needs_key": True,
+        "local_only": False,
+    },
 }
 
 

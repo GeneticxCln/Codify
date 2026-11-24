@@ -1717,6 +1717,7 @@ ENV_KEY_MAP: dict[str, list[str]] = {
     "deepseek": ["DEEPSEEK_API_KEY"],
     "openrouter": ["OPENROUTER_API_KEY"],
     "groq": ["GROQ_API_KEY"],
+    "opencode": ["OPENCODE_API_KEY"],
 }
 
 
