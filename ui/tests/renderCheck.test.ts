@@ -12,7 +12,10 @@ import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
 
 const { withApp } = await import("./appHarness.ts");
-const { RENDER_CHECK_SETTLED_COMMAND, RENDER_CHECK_SETTLED_EVENT } = await import("../src/renderCheck.ts");
+const { RENDER_CHECK_QUIET_COMMAND, RENDER_CHECK_SETTLED_COMMAND, RENDER_CHECK_SETTLED_EVENT } = await import(
+  "../src/renderCheck.ts"
+);
+const { CMATRIX_OLED, CYBERPUNK_NEON } = await import("../src/appearance.ts");
 
 const checked = (ctx: { dom: { window: Window } }): string | undefined =>
   ctx.dom.window.document.documentElement.dataset.renderChecked;
@@ -40,4 +43,47 @@ test("a shell that predates the command is treated as settled, not as waiting fo
     await ctx.settle();
     assert.equal(checked(ctx), "true");
   });
+});
+
+// ── a person's own theme switch is not the window starving ─────────────────
+//
+// Switching themes inside the first thirty seconds mounted a new backdrop and repainted the window past a third of a
+// core for a few seconds; the watchdog read the person's clicks as starvation and capped every backdrop at 2-10 FPS
+// until restart. While the watchdog is judging, each theme application tells the shell to leave the next seconds out.
+
+async function clickTheme(ctx: { dom: any; settle: () => Promise<void> }, label: string): Promise<void> {
+  const row = [...ctx.dom.container.querySelectorAll('[role="radiogroup"][aria-label="Theme"] [role="radio"]')].find(
+    (el: Element) => (el.textContent ?? "").includes(label),
+  );
+  assert.ok(row, `no theme row for ${label}`);
+  await ctx.dom.click(row);
+  await ctx.settle();
+}
+
+const quietCalls = (ctx: { shell: { calls: string[] } }): number =>
+  ctx.shell.calls.filter((c) => c === RENDER_CHECK_QUIET_COMMAND).length;
+
+test("while the watchdog judges, a theme switch tells the shell to leave those seconds out", async () => {
+  await withApp(
+    { localStorage: { "codify.theme": CMATRIX_OLED.id }, shellAnswers: { [RENDER_CHECK_SETTLED_COMMAND]: false } },
+    async (ctx) => {
+      await ctx.settle();
+      await ctx.dom.click(ctx.dom.byButton("Settings"));
+      await ctx.settle();
+      await ctx.dom.click(ctx.dom.byButton("Appearance"));
+      await ctx.settle();
+      assert.equal(quietCalls(ctx), 0, "the shell was told to look away before anyone acted");
+
+      await clickTheme(ctx, CYBERPUNK_NEON.label);
+      assert.equal(quietCalls(ctx), 1, "a theme switch during the check was judged as the window starving");
+      await clickTheme(ctx, CMATRIX_OLED.label);
+      assert.equal(quietCalls(ctx), 2);
+
+      // Once the watchdog has finished there is nothing to keep out of it, and nothing is sent.
+      await ctx.emit(RENDER_CHECK_SETTLED_EVENT, null);
+      await ctx.settle();
+      await clickTheme(ctx, CYBERPUNK_NEON.label);
+      assert.equal(quietCalls(ctx), 2, "the shell was still being told after its check had settled");
+    },
+  );
 });

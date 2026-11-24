@@ -52,6 +52,11 @@
       "commands": { "allow": ["codify_render_check_settled"] }
     },
     {
+      "identifier": "allow-codify-render-check-quiet",
+      "description": "Tells the shell's render watchdog that the person just changed the theme, so it does not judge the next few seconds as the window starving. Takes no argument and grants nothing: the most it can do is make the watchdog judge later, never past its ninety-second ceiling.",
+      "commands": { "allow": ["codify_render_check_quiet"] }
+    },
+    {
       "identifier": "allow-codify-software-rendering",
       "description": "Reports whether this shell was launched with WebKit's dma-buf path disabled, which is the one signal the page can act on before the first animation frame. Read-only, takes no argument and describes the shell's own environment — no file, no process and no other app.",
       "commands": { "allow": ["codify_software_rendering"] }
@@ -177,6 +182,7 @@
         "allow-codify-test-agent-connection",
         "allow-codify-render-cpu-ms",
         "allow-codify-render-check-settled",
+        "allow-codify-render-check-quiet",
         "allow-codify-software-rendering",
         "allow-codify-boot-id",
         "allow-codify-terminal-open",
