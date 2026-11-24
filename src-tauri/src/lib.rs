@@ -2302,6 +2302,34 @@ fn display_backend(wayland_display: Option<&str>, requested: Option<&str>) -> Op
     None
 }
 
+/// Resolve the display backend for a real launch, accounting for AppImage's `linuxdeploy-plugin-gtk.sh`.
+///
+/// Tauri's AppImage bundler injects `export GDK_BACKEND=x11` unconditionally in `apprun-hooks/linuxdeploy-plugin-gtk.sh`.
+/// Measured live on KDE Plasma Wayland + NVIDIA RTX 4060 Ti (2026-11-24), that forced XWayland path delivered
+/// **0.6–0.7 FPS** and bypassed `GDK_GL=always`, while native Wayland delivered **31.1 FPS**. Inside an AppImage on a
+/// Wayland session, ignore the bundler-injected `GDK_BACKEND=x11` unless the person explicitly asked for a backend via
+/// `CODIFY_GDK_BACKEND`.
+fn display_backend_for_launch(
+    wayland_display: Option<&str>,
+    requested: Option<&str>,
+    in_appimage: bool,
+    codify_override: Option<&str>,
+) -> Option<&'static str> {
+    if let Some(explicit) = codify_override.map(str::trim).filter(|s| !s.is_empty()) {
+        return match explicit {
+            "wayland" => Some("wayland"),
+            "x11" => Some("x11"),
+            _ => None,
+        };
+    }
+    let effective_requested = if in_appimage && requested.map(str::trim) == Some("x11") {
+        None
+    } else {
+        requested
+    };
+    display_backend(wayland_display, effective_requested)
+}
+
 /// Whether GTK should paint this window with GL (`GDK_GL=always`), given the backend this launch
 /// ended up on, a `GDK_GL` the person set, and whether WebKit was told to give up its GPU path.
 ///
@@ -2339,13 +2367,30 @@ fn apply_display_backend() {
     let wayland = std::env::var("WAYLAND_DISPLAY")
         .ok()
         .filter(|v| !v.trim().is_empty());
-    match display_backend(wayland.as_deref(), requested.as_deref()) {
+    let in_appimage = appimage_env::appdir().is_some();
+    let codify_override = std::env::var("CODIFY_GDK_BACKEND")
+        .ok()
+        .filter(|v| !v.trim().is_empty());
+    match display_backend_for_launch(
+        wayland.as_deref(),
+        requested.as_deref(),
+        in_appimage,
+        codify_override.as_deref(),
+    ) {
         Some(backend) => {
             std::env::set_var("GDK_BACKEND", backend);
-            println!(
-                "[Codify] Display backend {backend} (chosen here: a Wayland compositor is \
-                 running and nothing set GDK_BACKEND)"
-            );
+            if codify_override.is_some() {
+                println!("[Codify] Display backend {backend} (from CODIFY_GDK_BACKEND)");
+            } else if in_appimage && requested.as_deref().map(str::trim) == Some("x11") {
+                println!(
+                    "[Codify] Display backend {backend} (overriding AppImage linuxdeploy GDK_BACKEND=x11 on Wayland; set CODIFY_GDK_BACKEND=x11 to force X11)"
+                );
+            } else {
+                println!(
+                    "[Codify] Display backend {backend} (chosen here: a Wayland compositor is \
+                     running and nothing set GDK_BACKEND)"
+                );
+            }
         }
         // Named even when nothing was decided, because "which backend am I on"
         // is not answerable from inside the window: an X client and a Wayland
@@ -4141,5 +4186,35 @@ mod tests {
             "offline_mode": {"value": 0, "min": 0, "max": 1}
         })));
         assert!(!super::parse_offline_setting(&serde_json::json!({})));
+    }
+
+    #[test]
+    fn appimage_forced_x11_is_overridden_to_wayland_unless_explicitly_requested() {
+        use super::display_backend_for_launch;
+        // Inside an AppImage on Wayland, linuxdeploy-plugin-gtk.sh exports GDK_BACKEND=x11.
+        // We must restore Wayland so GDK_GL=always engages and rendering is not stuck at 0.6 FPS.
+        assert_eq!(
+            display_backend_for_launch(Some("wayland-0"), Some("x11"), true, None),
+            Some("wayland")
+        );
+        // Outside an AppImage, an explicit GDK_BACKEND=x11 still wins.
+        assert_eq!(
+            display_backend_for_launch(Some("wayland-0"), Some("x11"), false, None),
+            None
+        );
+        // On a pure X11 session (no WAYLAND_DISPLAY), AppImage stays on X11.
+        assert_eq!(
+            display_backend_for_launch(None, Some("x11"), true, None),
+            None
+        );
+        // An explicit CODIFY_GDK_BACKEND=x11 lets a user opt back into X11 inside an AppImage.
+        assert_eq!(
+            display_backend_for_launch(Some("wayland-0"), Some("x11"), true, Some("x11")),
+            Some("x11")
+        );
+        assert_eq!(
+            display_backend_for_launch(Some("wayland-0"), None, false, Some("wayland")),
+            Some("wayland")
+        );
     }
 }
