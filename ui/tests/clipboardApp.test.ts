@@ -89,8 +89,8 @@ test("the clipboard icon sits right after Notifications, with no word beside it"
     const names = toggleNames(ctx);
     const at = (re: RegExp): number => names.findIndex((n) => re.test(n));
     assert.deepEqual(
-      [at(/^Stats/), at(/^Session/), at(/^Notifications/), at(/^Clipboard history$/), at(/^History/)].map((n, i, all) => (i === 0 ? n >= 0 : n === all[i - 1] + 1)),
-      [true, true, true, true, true],
+      [at(/^Stats/), at(/^Audit/), at(/^Session/), at(/^Notifications/), at(/^Clipboard history$/), at(/^History/)].map((n, i, all) => (i === 0 ? n >= 0 : n === all[i - 1] + 1)),
+      [true, true, true, true, true, true],
       `toggles, in order: ${names.join(" | ")}`,
     );
     const button = toggle(ctx);
