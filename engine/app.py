@@ -234,6 +234,16 @@ def _claim_state_lock() -> tuple[int | None, bool]:
     return fd, True
 
 
+def _is_offline_mode(settings: SettingsService | None) -> bool:
+    """True when offline mode is active (CODIFY_OFFLINE env or the offline_mode engine setting)."""
+    env = (os.environ.get("CODIFY_OFFLINE") or "").strip().lower()
+    if env in ("1", "true", "yes", "on"):
+        return True
+    if settings is not None and "offline_mode" in SettingsService.SPEC:
+        return bool(settings.get_int("offline_mode"))
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # The keychain is built first so a role-id migration (coder→fixer, ...) can
@@ -279,7 +289,11 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
     # The MCP admission list, its probe, and the read-only call path a person's
     # per-tool authority unlocks (`engine/mcp.py`, docs/20).
     app.state.mcp = McpService(conn, keychain)
-    app.state.models = ModelCatalogService(app.state.registry, keychain)
+    app.state.models = ModelCatalogService(
+        app.state.registry,
+        keychain,
+        is_offline=lambda: _is_offline_mode(app.state.settings),
+    )
     # One frozen statistics document per past day, written lazily on the first
     # stats read after a day ends (see engine/stats_history.py).
     app.state.stats_snapshots = StatsSnapshotService(conn)

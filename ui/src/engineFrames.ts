@@ -16,7 +16,7 @@ import type { EngineEvent } from "./types.ts";
  * answer, re-read it" — and they are told apart only so a test can say which one
  * arrived. The distinction is the engine's, not the screen's.
  */
-export type FrameOutcome = "catalog" | "checked" | "ignored" | "unreadable";
+export type FrameOutcome = "catalog" | "checked" | "health" | "ignored" | "unreadable";
 
 export function readEngineFrame(
   raw: unknown,
@@ -33,12 +33,18 @@ export function readEngineFrame(
   // The type is the check, not the payload's shape. A frame that arrives without
   // one has not been labelled by the engine, and guessing that it was a catalogue
   // change would re-read the catalogue on every frame of any kind.
-  if (frame.type !== "model_catalog_changed" && frame.type !== "model_catalog_checked") {
+  if (
+    frame.type !== "model_catalog_changed" &&
+    frame.type !== "model_catalog_checked" &&
+    frame.type !== "provider_health_changed"
+  ) {
     return "ignored";
   }
   onFrame({
     type: frame.type,
     payload: frame.payload,
   } as EngineEvent);
-  return frame.type === "model_catalog_changed" ? "catalog" : "checked";
+  if (frame.type === "model_catalog_changed") return "catalog";
+  if (frame.type === "provider_health_changed") return "health";
+  return "checked";
 }

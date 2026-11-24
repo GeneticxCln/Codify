@@ -1084,9 +1084,25 @@ export interface ModelCatalogChanged {
  * report the age of its own list truthfully — otherwise "checked 40s ago" is a
  * number nobody is keeping true.
  */
+export interface ProviderHealthTransition {
+  provider: string;
+  reachable?: boolean;
+  auth_ok?: boolean | null;
+  error?: string | null;
+  latency_ms?: number | null;
+}
+
+export interface ProviderHealthChanged {
+  down: ProviderHealthTransition[];
+  recovered: Array<{ provider: string; latency_ms?: number | null }>;
+  /** Epoch seconds: when the providers were actually asked. */
+  fetched_at: number;
+}
+
 export type EngineEvent =
   | { type: "model_catalog_changed"; payload: ModelCatalogChanged }
-  | { type: "model_catalog_checked"; payload: { fetched_at: number } };
+  | { type: "model_catalog_checked"; payload: { fetched_at: number } }
+  | { type: "provider_health_changed"; payload: ProviderHealthChanged };
 
 /**
  * A model that recently answered, read from the engine's `agent_assigned` events.
@@ -1102,13 +1118,23 @@ export interface RecentRunModel {
   ran_at: number;
 }
 
-/** Per-provider discovery outcome — one provider failing never empties the list. */
+/** Per-provider discovery & health outcome — one provider failing never empties the list. */
 export interface ProviderModelStatus {
   provider: string;
   protocol: string;
   ok: boolean;
   count: number;
   error?: string | null;
+  /** Whether the endpoint answered over HTTP (true on 2xx/4xx/5xx, false on timeout/connect error/offline). */
+  reachable?: boolean;
+  /** True on 2xx, false on 401/403 or missing key, null when unreachable or skipped offline. */
+  auth_ok?: boolean | null;
+  /** Round-trip time of the health/discovery request in ms, when one was sent. */
+  latency_ms?: number | null;
+  /** Epoch seconds when this check finished. */
+  checked_at?: number;
+  /** True when remote health checks were skipped because offline mode is active. */
+  offline_skipped?: boolean;
 }
 
 /**

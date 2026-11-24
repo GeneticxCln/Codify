@@ -137,7 +137,7 @@ Tracked in execution order (`0 → 10`), one change per PR, under three standing
 | 4 | Context inspector + record-next-turn toggle | **Built** (`GET /goals/{id}/trace/{seq}`, expandable prompts and replies in `TracePanel.tsx`, one-shot `Record` toggle in `BottomCommandBar.tsx`) |
 | 5 | Backup and restore of Codify's state | **Built** (`/state/backup` and `/state/restore`, `StateBackupCard.tsx`; §6) |
 | 6 | Per-project usage | **Built in this change** (`workspace_id` filter on `/stats/overview` and `/stats/failures` + Project picker in `StatsPanel.tsx`, tokens only) |
-| 7 | Provider health | Planned (background reachability/auth/latency check per configured provider, status dot in Settings, down notification, respects offline mode) |
+| 7 | Provider health | **Built** (reachability, auth status and latency in `model_catalog.py`, `provider_health_changed` transitions in `catalog_watch.py`, status dot in `ProviderRow.tsx`, down/recovery notice in `notifications.ts`, skips remote pings in offline mode) |
 | 8 | Replay from the app | Planned (`Replay` action on recorded goals running `ReplayProvider` in a scratch tree and reporting match vs divergence) |
 | 9 | Offline switch | Planned (single setting restricting chat/roles to local endpoints and disabling web fetch, MCP, update checks and provider-health pings) |
 | 10 | App-wide audit view | Planned (cross-project list of agent commits, touched files and goals built from persisted per-goal audit events) |
