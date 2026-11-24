@@ -159,6 +159,7 @@ import {
   tabForConversation,
   tabForFile,
   closeConversation,
+  clearAllConversations,
   tabId,
   type Tab,
   type TabState,
@@ -4968,6 +4969,17 @@ export const App: React.FC = () => {
         catalogTick={catalogTick}
         catalogLive={catalogLive}
         workspaceId={selectedWs?.id}
+        onHistoryCleared={() => {
+          setConversationsByWorkspace({});
+          setMessages([]);
+          setHistory([]);
+          setRecentRuns([]);
+          setActiveGoalId(null);
+          autoStartedGoals.current.clear();
+          setTabState((prev) => clearAllConversations(prev));
+          inbox.clear();
+          void suggestionInbox.refresh();
+        }}
         onClose={() => {
           setIsSettingsOpen(false);
           // Keys or endpoints may have changed — re-discover, don't re-read cache.

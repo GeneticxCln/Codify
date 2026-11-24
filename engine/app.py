@@ -27,7 +27,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
-from engine import capabilities, home, speech, watchdog
+from engine import capabilities, history, home, speech, watchdog
 from engine import github_remote
 from engine.db import connect
 from engine.compaction import CompactionService
@@ -76,6 +76,7 @@ from engine.models import (
     GoalConversationUpdate,
     GoalCreate,
     GoalDetail,
+    HistoryClear,
     McpServerCreate,
     McpServerUpdate,
     McpToolUpdate,
@@ -2511,6 +2512,27 @@ async def delete_conversation(
                 {"conversation_id": conversation_id, "goal_ids": driving},
             )
     return conversations.delete(conversation_id)
+
+
+@app.post("/history/clear")
+async def clear_all_history(body: HistoryClear, request: Request) -> dict[str, Any]:
+    """Delete every thread, turn and what the engine learned from them; keep everything a person set (`engine/history.py`).
+
+    The body must carry the phrase the person typed, so no client clears everything with an empty request. Refused
+    (`409 thread_in_progress`) while any turn is still running or still driven. The rows go on the event loop, where
+    no turn can start between the check and the delete; the file rewrite that takes their text off disk runs on a
+    worker, because a `VACUUM` waits out SQLite's busy timeout when another connection is reading.
+    """
+    if body.confirm.strip().lower() != history.CONFIRM_PHRASE:
+        raise ApiError(
+            422, "confirmation_required",
+            f"type “{history.CONFIRM_PHRASE}” to confirm; nothing was deleted",
+        )
+    conn = request.app.state.conn
+    executor = getattr(request.app.state, "executor", None)
+    result = history.clear_history(conn, executor.is_driving if executor is not None else None)
+    result["scrubbed"] = await asyncio.to_thread(history.scrub_file, conn)
+    return result
 
 
 @app.get("/shell/tabs", response_model=list[ShellTab])

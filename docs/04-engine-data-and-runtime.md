@@ -1189,6 +1189,7 @@ the sentence in the response is the engine's own and is what a person reads.
 | `invalid_status` | 422 | a goal list is filtered by a status that does not exist |
 | `invalid_tab_payload` | 422 | a shell tab's payload is not JSON |
 | `empty_prompt` | 422 | a turn has nothing to say |
+| `confirmation_required` | 422 | `POST /history/clear` did not carry the phrase `"delete all history"` |
 | `empty_patch` | 422 | a plan-step edit carries no editable field |
 | `unknown_step` | 404 | a step id is not in that goal |
 | `step_vanished`, `batch_no_longer_disjoint` | 409 | a parallel batch was invalidated between batching and dispatch (the driver re-batches; neither is a failure) |
@@ -2534,6 +2535,15 @@ old it looks: `PLANNING` and `RUNNING` are in use, `PAUSED` is waiting for a per
 their own Pause) and `PENDING` for their approval, and a Start on either resumes a run that needs its history
 (`tests/test_db_and_services.py` `test_only_a_goal_that_has_ended_loses_its_timeline_to_retention`; the first version
 excluded only `PLANNING` and `RUNNING`).
+
+`POST /history/clear` (Settings → Sessions, *Delete all history*, `engine/history.py`) empties every history table in
+one transaction — `events`, `plan_steps`, `proposed_files`, `trace_calls`, `conversation_compactions`, `suggestions`,
+`observations`, `stats_snapshots`, `goals` and `conversations` — clears `conversationId` from shared `chat` rows in
+`shell_tabs`, and rewrites `codify.db` + truncates the WAL (`VACUUM` + `PRAGMA wal_checkpoint(TRUNCATE)`) so deleted
+prompts, replies and diffs do not remain in SQLite free pages. It requires `{"confirm": "delete all history"}` (422
+`confirmation_required` otherwise), refuses (409 `thread_in_progress`) while any turn is `PLANNING`, `RUNNING` or held
+by the executor, and never touches API keys, `agent_configs`, `engine_settings`, `mcp_servers`/`mcp_tools`,
+`workspaces`, `global_notes`, `stats_imports`, `workspace_disabled_skills` or workspace files on disk.
 
 ### 8.4 Replay
 

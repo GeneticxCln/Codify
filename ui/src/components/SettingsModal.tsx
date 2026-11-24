@@ -75,6 +75,8 @@ interface SettingsModalProps {
   catalogLive?: boolean;
   /** The selected workspace whose `.codify/skills/` the Agent skills tab lists. */
   workspaceId?: string;
+  /** Called once `POST /history/clear` removes all history so the open window clears transcripts and tabs. */
+  onHistoryCleared?: () => void;
 }
 
 /**
@@ -93,6 +95,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
   catalogTick = 0,
   catalogLive = false,
   workspaceId,
+  onHistoryCleared,
 }) => {
   const [tab, setTab] = useState<SettingsTab>(initialTab);
   const [keys, setKeys] = useState<ProviderKeyStatus[]>([]);
@@ -414,7 +417,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
                       : tab === "skills"
                       ? "Choose which skills the conductor may offer. Enabled skills are named; their instructions are loaded only when one is chosen."
                       : tab === "sessions"
-                        ? "How a long thread is remembered: automatic rolling summaries, and how many recent turns stay verbatim."
+                        ? "How a long thread is remembered, and how to clear every thread and run from this machine."
                       : tab === "mcp"
                         ? "Remote HTTPS servers you admit and probe. The conductor can call their Read tools; Act tools need a goal that is running."
                       : tab === "audio"
@@ -651,7 +654,7 @@ export const SettingsModal: React.FC<SettingsModalProps> = ({
 
           {tab === "skills" && <AgentSkillsPane workspaceId={workspaceId} />}
 
-          {tab === "sessions" && <SessionSettingsPane />}
+          {tab === "sessions" && <SessionSettingsPane onHistoryCleared={onHistoryCleared} />}
 
           {tab === "mcp" && <McpPane />}
 
