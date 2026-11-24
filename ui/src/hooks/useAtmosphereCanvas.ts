@@ -301,11 +301,29 @@ export function useAtmosphereCanvas(
     const reduced = animated === undefined ? !motionAllowed : !animated;
 
     const styles = getComputedStyle(document.documentElement);
+    const varCache = new Map<string, string>();
+    const clearVarCache = (): void => {
+      varCache.clear();
+    };
     const read = (name: string): string => {
+      const hit = varCache.get(name);
+      if (hit !== undefined) return hit;
       const fallback = latest.current.vars?.[name] ?? "";
       const raw = styles.getPropertyValue(name).trim();
-      return raw || fallback;
+      const value = raw || fallback;
+      varCache.set(name, value);
+      return value;
     };
+    window.addEventListener("codify:theme-changed", clearVarCache);
+    window.addEventListener("storage", clearVarCache);
+    let styleObserver: MutationObserver | undefined;
+    if (typeof MutationObserver !== "undefined") {
+      styleObserver = new MutationObserver(clearVarCache);
+      styleObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["style", "class"],
+      });
+    }
     const painter = latest.current.create(read);
 
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -323,18 +341,22 @@ export function useAtmosphereCanvas(
       frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
     };
 
-    const layout = (): void => {
+    const layout = (): boolean => {
       const rect = canvas.getBoundingClientRect();
       const cssW = Math.max(1, rect.width);
       const cssH = Math.max(1, rect.height);
       const targetW = cssW * dpr;
       const targetH = cssH * dpr;
       const scale = Math.min(1, maxDimension / Math.max(targetW, targetH));
-      size.width = Math.max(1, Math.round(targetW * scale));
-      size.height = Math.max(1, Math.round(targetH * scale));
-      canvas.width = size.width;
-      canvas.height = size.height;
+      const nextW = Math.max(1, Math.round(targetW * scale));
+      const nextH = Math.max(1, Math.round(targetH * scale));
+      const changed = size.width !== nextW || size.height !== nextH || canvas.width !== nextW || canvas.height !== nextH;
+      size.width = nextW;
+      size.height = nextH;
+      if (canvas.width !== nextW) canvas.width = nextW;
+      if (canvas.height !== nextH) canvas.height = nextH;
       updateFrameBudget(rect.width, rect.height);
+      return changed;
     };
 
     const tick: AtmosphereTick = { frame: 0, seconds: 0, size };
@@ -507,7 +529,7 @@ export function useAtmosphereCanvas(
 
     if (typeof ResizeObserver !== "undefined") {
       observer = new ResizeObserver(() => {
-        layout();
+        if (!layout()) return;
         // Same reason the loop checks: a lost context makes the draw a no-op, and
         // the restore handler is what will repaint when it comes back.
         if (recovery.isLost()) return;
@@ -520,6 +542,9 @@ export function useAtmosphereCanvas(
       cancelled = true;
       if (raf) cancelAnimationFrame(raf);
       observer?.disconnect();
+      styleObserver?.disconnect();
+      window.removeEventListener("codify:theme-changed", clearVarCache);
+      window.removeEventListener("storage", clearVarCache);
       recovery.detach();
       document.removeEventListener("visibilitychange", onVisibility);
     };

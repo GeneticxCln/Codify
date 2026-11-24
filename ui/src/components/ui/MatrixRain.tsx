@@ -117,11 +117,31 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     // Both mean "play", and `reduced` is the opposite of that.
     const reduced = animated === undefined ? !motionAllowed : !animated;
 
-    // The theme's own colours, read live so a settings change restyles an
-    // already-running canvas on its next tick without a remount.
+    // The theme's own colours, cached per theme/style change so per-frame ticks
+    // avoid repeated `getPropertyValue` style lookups while still restyling on
+    // the next frame without a remount.
     const styles = getComputedStyle(document.documentElement);
-    const readVar = (name: string, fallback: string): string =>
-      styles.getPropertyValue(name).trim() || fallback;
+    const varCache = new Map<string, string>();
+    const clearVarCache = (): void => {
+      varCache.clear();
+    };
+    const readVar = (name: string, fallback: string): string => {
+      const hit = varCache.get(name);
+      if (hit !== undefined) return hit;
+      const value = styles.getPropertyValue(name).trim() || fallback;
+      varCache.set(name, value);
+      return value;
+    };
+    window.addEventListener("codify:theme-changed", clearVarCache);
+    window.addEventListener("storage", clearVarCache);
+    let styleObserver: MutationObserver | undefined;
+    if (typeof MutationObserver !== "undefined") {
+      styleObserver = new MutationObserver(clearVarCache);
+      styleObserver.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["style", "class"],
+      });
+    }
 
     const CELL = 14; // glyph cell, CSS pixels
     const dpr = Math.min(window.devicePixelRatio || 1, 2);
@@ -129,6 +149,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     let cssW = 0;
     let cssH = 0;
     let cell = CELL;
+    let fontSpec = `${Math.round(CELL * 0.82)}px monospace`;
     let columns: Column[] = [];
     let cellRows = 0;
     let frameMs = Math.max(1, 1000 / Math.max(1, fps));
@@ -143,7 +164,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       frameMs = Math.max(1, 1000 / Math.max(1, releaseFps));
     };
 
-    const layout = (): void => {
+    const layout = (): boolean => {
       const rect = canvas.getBoundingClientRect();
       cssW = Math.max(1, rect.width);
       cssH = Math.max(1, rect.height);
@@ -152,23 +173,30 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       const targetW = cssW * dpr;
       const targetH = cssH * dpr;
       const scale = Math.min(1, cap / Math.max(targetW, targetH));
-      canvas.width = Math.max(1, Math.round(targetW * scale));
-      canvas.height = Math.max(1, Math.round(targetH * scale));
-      // Cell size in *canvas* pixels, so column count follows the cap, not
-      // the CSS box.
-      cell = CELL * dpr * scale;
-      const cols = Math.max(1, Math.floor(canvas.width / cell));
-      cellRows = Math.max(1, Math.floor(canvas.height / cell));
-      columns = Array.from({ length: cols }, () => ({
-        y: Math.floor(Math.random() * cellRows),
-        // Random, not zero: a shared starting remainder would make every column
-        // take its next whole cell on the same frame, and the rain would pulse
-        // in lockstep instead of showering.
-        frac: Math.random(),
-        trail: 4 + Math.floor(Math.random() * 9),
-        speed: Math.random() < 0.25 ? 2 : 1,
-      }));
+      const nextW = Math.max(1, Math.round(targetW * scale));
+      const nextH = Math.max(1, Math.round(targetH * scale));
+      const changed = columns.length === 0 || canvas.width !== nextW || canvas.height !== nextH;
+      if (canvas.width !== nextW) canvas.width = nextW;
+      if (canvas.height !== nextH) canvas.height = nextH;
+      if (changed) {
+        // Cell size in *canvas* pixels, so column count follows the cap, not
+        // the CSS box.
+        cell = CELL * dpr * scale;
+        fontSpec = `${Math.round(cell * 0.82)}px monospace`;
+        const cols = Math.max(1, Math.floor(canvas.width / cell));
+        cellRows = Math.max(1, Math.floor(canvas.height / cell));
+        columns = Array.from({ length: cols }, () => ({
+          y: Math.floor(Math.random() * cellRows),
+          // Random, not zero: a shared starting remainder would make every column
+          // take its next whole cell on the same frame, and the rain would pulse
+          // in lockstep instead of showering.
+          frac: Math.random(),
+          trail: 4 + Math.floor(Math.random() * 9),
+          speed: Math.random() < 0.25 ? 2 : 1,
+        }));
+      }
       updateFrameBudget(rect.width, rect.height);
+      return changed;
     };
 
     // ── drawing ────────────────────────────────────────────────────────────
@@ -188,8 +216,8 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
         // full repaint that still reads as rain.
         : bgColor;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-      ctx.font = `${Math.round(cell * 0.82)}px monospace`;
-      ctx.textBaseline = "top";
+      if (ctx.font !== fontSpec) ctx.font = fontSpec;
+      if (ctx.textBaseline !== "top") ctx.textBaseline = "top";
       // Draw heads in one fillStyle pass, then trails in a second pass (2 state
       // switches per frame instead of 2 per column).
       ctx.fillStyle = textColor;
@@ -370,7 +398,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
 
     if (typeof ResizeObserver !== "undefined") {
       observer = new ResizeObserver(() => {
-        layout();
+        if (!layout()) return;
         // Same reason the loop checks: a lost context makes the draw a no-op, and
         // the restore handler is what will repaint when it comes back.
         if (recovery.isLost()) return;
@@ -383,6 +411,9 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       cancelled = true;
       if (raf) cancelAnimationFrame(raf);
       observer?.disconnect();
+      styleObserver?.disconnect();
+      window.removeEventListener("codify:theme-changed", clearVarCache);
+      window.removeEventListener("storage", clearVarCache);
       recovery.detach();
       document.removeEventListener("visibilitychange", onVisibility);
     };

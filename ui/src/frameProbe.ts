@@ -92,7 +92,7 @@ export function governedFps(msPerFrame: number | null, maxFps: number): number {
 }
 
 /** Time before the first pass, so the mount storm is not part of the measurement. */
-export const PROBE_WARMUP_MS = 500;
+export const PROBE_WARMUP_MS = 750;
 
 /** Time after a pass's last frame for the renderers to composite it and be read. */
 export const PROBE_SETTLE_MS = 120;

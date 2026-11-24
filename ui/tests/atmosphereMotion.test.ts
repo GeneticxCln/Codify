@@ -232,3 +232,70 @@ test("a loop that fell behind starts over instead of releasing a burst", () => {
   assert.ok(back !== null && Math.abs(back - (1500 + frameMs)) < 1e-9, "the clock tried to catch up");
   assert.equal(releaseAt(back, 1500 + 5, frameMs), null, "a second frame was released at once");
 });
+
+test("useAtmosphereCanvas caches CSS custom properties across frames and invalidates on theme change", async () => {
+  await withDom(async (dom) => {
+    let propReads = 0;
+    let currentColor = "#00e5ff";
+    const win = dom.window as unknown as Record<string, unknown>;
+    const origGetComputed = dom.window.getComputedStyle.bind(dom.window);
+    const wrappedComputed = ((el: Element) => {
+      const base = origGetComputed(el);
+      if (el !== dom.window.document.documentElement) return base;
+      return new Proxy(base, {
+        get(target, prop) {
+          if (prop === "getPropertyValue") {
+            return (name: string) => {
+              if (name === "--cyber-cyan") {
+                propReads += 1;
+                return currentColor;
+              }
+              return target.getPropertyValue(name);
+            };
+          }
+          return Reflect.get(target, prop, target);
+        },
+      });
+    }) as typeof dom.window.getComputedStyle;
+    win.getComputedStyle = wrappedComputed;
+    (globalThis as unknown as Record<string, unknown>).getComputedStyle = wrappedComputed;
+
+    const rafSlot: { current: ((t: number) => void) | null } = { current: null };
+    const raf = (cb: (t: number) => void): number => {
+      rafSlot.current = cb;
+      return 1;
+    };
+    for (const target of [globalThis, win] as unknown as Record<string, unknown>[]) {
+      Object.defineProperty(target, "requestAnimationFrame", { value: raf, configurable: true, writable: true });
+    }
+    const seenColors: string[] = [];
+    (dom.window.HTMLCanvasElement.prototype as unknown as Record<string, unknown>).getContext = () => {
+      const ctx = quietContext();
+      return new Proxy(ctx, {
+        set(t, k, v) {
+          if (k === "strokeStyle" && typeof v === "string") seenColors.push(v);
+          return Reflect.set(t, k, v);
+        },
+      });
+    };
+
+    const React = (await import("react")).default;
+    const { CyberGrid } = await import("../src/components/ui/CyberGrid.tsx");
+    await dom.render(React.createElement(CyberGrid, { animated: true, fps: 60 }));
+    const readsAfterMount = propReads;
+    assert.ok(readsAfterMount >= 1, "initial draw must resolve --cyber-cyan");
+
+    // Advance 5 frames without any theme change: cached value must be reused (0 extra getPropertyValue calls).
+    for (let i = 1; i <= 5; i += 1) {
+      rafSlot.current?.(i * 20);
+    }
+    assert.equal(propReads, readsAfterMount, "steady frames must not re-query getComputedStyle every frame");
+
+    // Theme change event invalidates the cache so the very next frame picks up the new colour.
+    currentColor = "#ff00aa";
+    dom.window.dispatchEvent(new dom.window.Event("codify:theme-changed"));
+    rafSlot.current?.(200);
+    assert.equal(propReads, readsAfterMount + 1, "theme change must invalidate cached custom properties");
+    assert.ok(seenColors.some((c) => c.includes("255, 0, 170")), "next frame must paint with updated colour");
+  });
+});
