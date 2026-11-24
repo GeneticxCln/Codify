@@ -225,7 +225,22 @@ class CatalogWatch:
             return {}
         current = ids_by_provider(catalog.get("models") or [])
         current_health = health_by_provider(catalog.get("providers") or [])
-        changes = catalog_changes(self._last, current)
+        # Providers paused by offline mode were never queried: exclude them from catalog
+        # diffs so toggling offline mode neither reports remote models as removed nor
+        # re-announces them as newly added when coming back online.
+        offline_now = {slug for slug, h in current_health.items() if h.get("offline_skipped")}
+        offline_prev = {
+            slug for slug, h in (self._last_health or {}).items() if h.get("offline_skipped")
+        }
+        for slug in offline_now:
+            if self._last is not None and slug in self._last:
+                current[slug] = list(self._last[slug])
+        raw_changes = catalog_changes(self._last, current)
+        changes = {
+            provider: diff
+            for provider, diff in raw_changes.items()
+            if provider not in offline_now and provider not in offline_prev
+        }
         down, recovered = provider_health_transitions(self._last_health, current_health)
         baseline = self._last is None
         self._last = current

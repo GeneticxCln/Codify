@@ -129,6 +129,55 @@ class TestProviderHealth(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(health_frames), 2)
         self.assertEqual([r["provider"] for r in health_frames[1]["payload"]["recovered"]], ["ollama"])
 
+    async def test_toggling_offline_mode_does_not_emit_false_catalog_removals_or_additions(self) -> None:
+        # Preserve the v1.9.0 bug: turning offline mode on emitted `model_catalog_changed`
+        # claiming every remote model was removed, and turning it off claimed they were all added.
+        offline = {"on": False}
+        local_models = {"ids": ["m1"]}
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            if request.url.path.endswith("/api/tags"):
+                return httpx.Response(
+                    200,
+                    json={"models": [{"name": m} for m in local_models["ids"]]},
+                )
+            return httpx.Response(200, json={"data": [{"id": "gpt-4o"}]})
+
+        catalog = ModelCatalogService(
+            _StubRegistry(),
+            _StubKeychain({"openai": "sk-live"}),
+            transport=httpx.MockTransport(handler),
+            is_offline=lambda: offline["on"],
+        )
+        sent: list[dict[str, Any]] = []
+        watch = CatalogWatch(catalog, publish=sent.append)
+        watch.subscribe()
+
+        # 1. Online baseline.
+        await watch.sweep()
+        sent.clear()
+
+        # 2. Switch offline mode ON: openai is offline_skipped, must NOT emit removed models or health down.
+        offline["on"] = True
+        changes_off = await watch.sweep()
+        self.assertEqual({}, changes_off)
+        self.assertEqual([], [f for f in sent if f["type"] == "model_catalog_changed"])
+        self.assertEqual([], [f for f in sent if f["type"] == "provider_health_changed"])
+
+        # 3. Local model changes while offline must still be announced.
+        sent.clear()
+        local_models["ids"] = ["m1", "m2"]
+        changes_local = await watch.sweep()
+        self.assertEqual({"ollama": {"added": ["m2"], "removed": []}}, changes_local)
+
+        # 4. Switch offline mode OFF: openai returns unchanged, must NOT emit false added models.
+        sent.clear()
+        offline["on"] = False
+        changes_back = await watch.sweep()
+        self.assertEqual({}, changes_back)
+        self.assertEqual([], [f for f in sent if f["type"] == "model_catalog_changed"])
+        self.assertEqual([], [f for f in sent if f["type"] == "provider_health_changed"])
+
 
 if __name__ == "__main__":
     unittest.main()
