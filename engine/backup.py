@@ -127,6 +127,20 @@ def validate_backup_file(path: Path, *, max_schema_version: int) -> None:
                 "invalid_backup",
                 f"SQLite file is missing Codify tables ({', '.join(missing)})",
             )
+        # Codify's store is tables and indexes, nothing else. A trigger or a view is SQL that runs inside the engine
+        # on every matching write: a "backup" carrying one passed every check above, survived the swap, and re-pointed
+        # every role at another endpoint on each new turn, which is agent configuration written by something other
+        # than the settings routes (docs/00 §6.2). A restore brings back data, never behaviour.
+        foreign = conn.execute(
+            "SELECT type, name FROM sqlite_master WHERE type NOT IN ('table', 'index') ORDER BY type, name"
+        ).fetchall()
+        if foreign:
+            named = ", ".join(f"{kind} {name!r}" for kind, name in foreign[:5])
+            raise ApiError(
+                422,
+                "invalid_backup",
+                f"backup contains database code Codify never creates ({named}); it was not restored",
+            )
         check_row = conn.execute("PRAGMA quick_check(1)").fetchone()
         verdict = str(check_row[0]) if check_row else ""
         if verdict.lower() != "ok":

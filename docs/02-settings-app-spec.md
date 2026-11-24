@@ -307,7 +307,7 @@ The tab also holds **Backup and restore** (`StateBackupCard.tsx`, `engine/backup
 *Back up* writes a consistent online snapshot of `codify.db` into `<state_dir>/backups/` with SQLite's
 own backup API; a saved snapshot can be downloaded or staged for restore, and an uploaded `.db` can be
 staged instead. A restore is validated (SQLite header, integrity, required Codify tables, schema
-version) and swapped in at the start of the next engine launch, never under live connections;
+version, and no trigger or view: a restore brings back data, never behaviour) and swapped in at the start of the next engine launch, never under live connections;
 *Cancel restore* removes the staged file. API keys are not in the database and are neither copied nor
 replaced. Snapshots are kept until a person removes them, and *Delete all history* does not delete them.
 

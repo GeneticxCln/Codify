@@ -148,7 +148,8 @@ Tracked in execution order (`0 → 10`), one change per PR, under three standing
   `apply_pending_restore` in `engine/db.py`, `ui/src/components/StateBackupCard.tsx` in Settings → Sessions).
 - Online backups use `sqlite3.Connection.backup` so a snapshot taken while the engine is serving WAL writes is
   point-in-time consistent and stored mode `0600` under `<state_dir>/backups/`.
-- Restores validate SQLite header, integrity (`PRAGMA quick_check`), required Codify tables and `SCHEMA_VERSION`, stage
+- Restores validate SQLite header, integrity (`PRAGMA quick_check`), required Codify tables, `SCHEMA_VERSION` and that
+  the file holds no trigger or view (docs/04 §8.3), stage
   `<db_path>.restore`, and swap in at the start of the next `db.connect` after clearing stale `-wal`/`-shm` sidecars.
   Keyring / `secrets.json` credentials are never included or overwritten.
 - Snapshots are manual and retained until a person removes them; the engine does not prune them, and `POST /history/clear`
