@@ -57,7 +57,60 @@ CATALOG_WATCH_INTERVAL_S = 60.0
 #: The frames this channel carries. A union, not a string, so the engine and the
 #: UI name the same closed set and adding a member is a decision in two files
 #: rather than a typo in one.
-EngineEventType = Literal["model_catalog_changed", "model_catalog_checked"]
+EngineEventType = Literal["model_catalog_changed", "model_catalog_checked", "provider_health_changed"]
+
+
+def health_by_provider(providers: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    """Index `catalog['providers']` by provider slug with the health fields needed for transition diffs."""
+    out: dict[str, dict[str, Any]] = {}
+    for row in providers:
+        slug = str(row.get("provider") or "")
+        if not slug:
+            continue
+        out[slug] = {
+            "provider": slug,
+            "ok": bool(row.get("ok")),
+            "reachable": bool(row.get("reachable", row.get("ok"))),
+            "auth_ok": row.get("auth_ok"),
+            "latency_ms": row.get("latency_ms"),
+            "error": row.get("error"),
+            "offline_skipped": bool(row.get("offline_skipped")),
+        }
+    return out
+
+
+def provider_health_transitions(
+    previous: dict[str, dict[str, Any]] | None,
+    current: dict[str, dict[str, Any]],
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Providers that moved from healthy to down, or recovered, between two sweeps.
+
+    Baseline (`previous is None`) reports nothing, and transitions caused by offline mode
+    (`offline_skipped=True`) are ignored so turning offline mode on never cries wolf.
+    """
+    if previous is None:
+        return [], []
+    down: list[dict[str, Any]] = []
+    recovered: list[dict[str, Any]] = []
+    for slug in sorted(set(previous) & set(current)):
+        before = previous[slug]
+        after = current[slug]
+        if before.get("offline_skipped") or after.get("offline_skipped"):
+            continue
+        if before.get("ok") and not after.get("ok"):
+            down.append({
+                "provider": slug,
+                "reachable": bool(after.get("reachable")),
+                "auth_ok": after.get("auth_ok"),
+                "error": after.get("error"),
+                "latency_ms": after.get("latency_ms"),
+            })
+        elif not before.get("ok") and after.get("ok"):
+            recovered.append({
+                "provider": slug,
+                "latency_ms": after.get("latency_ms"),
+            })
+    return down, recovered
 
 
 def catalog_changes(
@@ -134,6 +187,7 @@ class CatalogWatch:
         # Dropped when the last subscriber leaves, so the reconnecting client's
         # first sweep is a baseline rather than an hour of accumulated "news".
         self._last: dict[str, list[str]] | None = None
+        self._last_health: dict[str, dict[str, Any]] | None = None
 
     @property
     def subscribers(self) -> int:
@@ -146,6 +200,7 @@ class CatalogWatch:
         self._subscribers = max(0, self._subscribers - 1)
         if self._subscribers == 0:
             self._last = None
+            self._last_health = None
 
     async def sweep(self) -> dict[str, dict[str, list[str]]]:
         """One pass: ask, diff, announce. Returns the change it announced.
@@ -169,10 +224,24 @@ class CatalogWatch:
             # `_last` cleared so the next subscriber gets a silent baseline.
             return {}
         current = ids_by_provider(catalog.get("models") or [])
+        current_health = health_by_provider(catalog.get("providers") or [])
         changes = catalog_changes(self._last, current)
+        down, recovered = provider_health_transitions(self._last_health, current_health)
         baseline = self._last is None
         self._last = current
+        self._last_health = current_health
         fetched_at = catalog.get("fetched_at") or time.time()
+        if not baseline and (down or recovered):
+            self._publish(
+                {
+                    "type": "provider_health_changed",
+                    "payload": {
+                        "down": down,
+                        "recovered": recovered,
+                        "fetched_at": fetched_at,
+                    },
+                }
+            )
         if baseline or not changes:
             # Nothing moved. The client is still owed the *time*: its list is
             # seconds old, and that is a fact worth carrying on a channel this
