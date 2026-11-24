@@ -310,6 +310,10 @@ staged instead. A restore is validated (SQLite header, integrity, required Codif
 version) and swapped in at the start of the next engine launch, never under live connections;
 *Cancel restore* removes the staged file. API keys are not in the database and are neither copied nor
 replaced. Snapshots are kept until a person removes them, and *Delete all history* does not delete them.
+The *Delete all history* card says so in words before anything is deleted and again in its result: how many saved
+backups still hold the history and the folder they are in (`backupsNote`, read from `GET /state/backup` when the card
+opens and when it is armed). It used to promise every thread and message "permanently" removed while those copies
+stayed on disk.
 
 ### 3.2b The MCP tab
 

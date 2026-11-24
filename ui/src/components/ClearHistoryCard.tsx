@@ -1,8 +1,8 @@
-import React, { useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { AlertCircle, Check, Trash2 } from "lucide-react";
 
-import { clearAllHistory, HISTORY_CLEAR_PHRASE } from "../api.ts";
-import type { ClearedHistory } from "../types.ts";
+import { clearAllHistory, fetchStateBackupStatus, HISTORY_CLEAR_PHRASE } from "../api.ts";
+import type { ClearedHistory, StateBackupStatus } from "../types.ts";
 import { readRejection } from "../rejection.ts";
 import { Button } from "./ui/Button";
 
@@ -30,6 +30,25 @@ function formatSummary(result: ClearedHistory): string {
 }
 
 /**
+ * What the card says about saved backups, which `POST /history/clear` does not delete (docs/04 §8.3).
+ *
+ * The card promised every thread and message "permanently" removed, while each snapshot in `backups/` still held
+ * the history from when it was made: a person who asked for a clean profile kept copies of it on disk and was never
+ * told. With the count unknown (the status read failed, or this engine has no backups) the sentence still says so.
+ */
+export function backupsNote(status: Pick<StateBackupStatus, "backups" | "backups_dir"> | null): string {
+  const n = status?.backups.length ?? 0;
+  if (!status || n === 0) {
+    return "Saved backups (Backup and restore, above) are not deleted by this.";
+  }
+  return (
+    `Saved backups are not deleted: ${n} ${n === 1 ? "backup" : "backups"} in ${status.backups_dir} still ` +
+    `${n === 1 ? "holds" : "hold"} the history from when ${n === 1 ? "it was" : "each was"} made. Delete ` +
+    `${n === 1 ? "that file" : "those files"} to remove it everywhere.`
+  );
+}
+
+/**
  * Settings → Sessions: delete every thread, run and derived record with a typed confirmation phrase.
  *
  * Both this card and `POST /history/clear` check `HISTORY_CLEAR_PHRASE`, so neither an accidental click nor a bare
@@ -42,6 +61,17 @@ export const ClearHistoryCard: React.FC<ClearHistoryCardProps> = ({ onCleared })
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<string | null>(null);
+  const [backups, setBackups] = useState<StateBackupStatus | null>(null);
+
+  // Read again when the person arms the card, so the count is the one true at the moment they delete.
+  const readBackups = useCallback(() => {
+    fetchStateBackupStatus()
+      .then(setBackups)
+      .catch(() => setBackups(null));
+  }, []);
+  useEffect(() => {
+    readBackups();
+  }, [readBackups]);
 
   const matches = draft.trim().toLowerCase() === HISTORY_CLEAR_PHRASE;
 
@@ -62,7 +92,9 @@ export const ClearHistoryCard: React.FC<ClearHistoryCardProps> = ({ onCleared })
       const result = await clearAllHistory(draft);
       setArmed(false);
       setDraft("");
-      setSummary(formatSummary(result));
+      setSummary(
+        (backups?.backups.length ?? 0) > 0 ? `${formatSummary(result)} ${backupsNote(backups)}` : formatSummary(result),
+      );
       onCleared?.(result);
     } catch (err) {
       setError(readRejection(err, "Could not delete history"));
@@ -86,6 +118,7 @@ export const ClearHistoryCard: React.FC<ClearHistoryCardProps> = ({ onCleared })
               touched.
             </span>
           </p>
+          <p className="text-xs text-codify-secondary mt-1 leading-relaxed">{backupsNote(backups)}</p>
         </div>
       </div>
 
@@ -97,6 +130,7 @@ export const ClearHistoryCard: React.FC<ClearHistoryCardProps> = ({ onCleared })
               setArmed(true);
               setError(null);
               setSummary(null);
+              readBackups();
             }}
           >
             Delete all history…

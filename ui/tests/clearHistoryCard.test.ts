@@ -48,6 +48,8 @@ const CLEARED_REPLY = {
 async function withSessionsPane(
   postClear: (body: unknown) => Response,
   run: (dom: Dom, calls: Call[], clearedCount: () => number) => Promise<void>,
+  backupStatus: () => Response = () =>
+    json({ db_path: "/tmp/codify.db", db_bytes: 0, backups_dir: "/tmp/backups", backups: [], pending_restore: null }),
 ): Promise<void> {
   await withDom(async (dom) => {
     const calls: Call[] = [];
@@ -58,9 +60,7 @@ async function withSessionsPane(
       const parsed = typeof init?.body === "string" ? JSON.parse(init.body) : null;
       calls.push({ method, path: url.pathname, body: parsed });
       if (method === "GET" && url.pathname === "/settings/engine") return json(SESSION_SETTINGS);
-      if (method === "GET" && url.pathname === "/state/backup") {
-        return json({ db_path: "/tmp/codify.db", db_bytes: 0, backups_dir: "/tmp/backups", backups: [], pending_restore: null });
-      }
+      if (method === "GET" && url.pathname === "/state/backup") return backupStatus();
       if (method === "POST" && url.pathname === "/history/clear") return postClear(parsed);
       throw new Error(`unexpected ${method} ${url.pathname}`);
     }) as typeof fetch;
@@ -187,4 +187,65 @@ test("clearAllConversations detaches chat tabs onto clean slates and leaves non-
   assert.equal(next.tabs[1], state.tabs[1]);
   assert.equal(next.tabs[2], state.tabs[2]);
   assert.equal(clearAllConversations(next), next, "already-clean state returns the same reference");
+});
+
+// ── saved backups keep the history, and the card says so ────────────────────
+//
+// `POST /history/clear` does not touch `<state_dir>/backups/` (docs/04 §8.3), but the card promised everything
+// "permanently" removed: a person asking for a clean profile kept full copies of it on disk and was never told.
+
+const TWO_BACKUPS = () =>
+  json({
+    db_path: "/tmp/codify.db",
+    db_bytes: 0,
+    backups_dir: "/home/me/.codify/backups",
+    backups: [
+      { filename: "codify-backup-20261101-120000.db", path: "/home/me/.codify/backups/a.db", size_bytes: 1, created_at: 1 },
+      { filename: "codify-backup-20261110-120000.db", path: "/home/me/.codify/backups/b.db", size_bytes: 1, created_at: 2 },
+    ],
+    pending_restore: null,
+  });
+
+const clearWithPhrase = async (dom: Dom): Promise<void> => {
+  const openBtn = Array.from(dom.container.querySelectorAll("button")).find((b) =>
+    b.textContent?.includes("Delete all history…"),
+  ) as HTMLButtonElement;
+  await dom.click(openBtn);
+  await dom.settle();
+  await dom.fill(dom.container.querySelector('input[placeholder="delete all history"]') as HTMLInputElement, "delete all history");
+  await dom.settle();
+  const submitBtn = Array.from(dom.container.querySelectorAll("button")).find((b) =>
+    b.textContent?.includes("Permanently delete history"),
+  ) as HTMLButtonElement;
+  await dom.click(submitBtn);
+  await dom.settle();
+};
+
+test("with saved backups, the card says how many still hold the history and where, before and after", async () => {
+  await withSessionsPane(
+    () => json(CLEARED_REPLY),
+    async (dom) => {
+      const before = dom.text();
+      assert.match(before, /Saved backups are not deleted: 2 backups in \/home\/me\/\.codify\/backups still hold the history/);
+      await clearWithPhrase(dom);
+      const after = dom.text();
+      assert.match(after, /Deleted 3 threads/);
+      assert.ok(
+        (after.match(/2 backups in \/home\/me\/\.codify\/backups still hold the history/g) ?? []).length >= 2,
+        "the result does not repeat that the backups still hold the history",
+      );
+    },
+    TWO_BACKUPS,
+  );
+});
+
+test("with no backups, or no answer about them, the card still says backups are not deleted", async () => {
+  for (const status of [
+    () => json({ db_path: "/tmp/codify.db", db_bytes: 0, backups_dir: "/tmp/backups", backups: [], pending_restore: null }),
+    () => json({ code: "workspace_unavailable", message: "down" }, 503),
+  ]) {
+    await withSessionsPane(() => json(CLEARED_REPLY), async (dom) => {
+      assert.match(dom.text(), /Saved backups \(Backup and restore, above\) are not deleted by this\./);
+    }, status);
+  }
 });
