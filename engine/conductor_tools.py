@@ -205,6 +205,10 @@ class _StepState:
     #: Original pre-step file content per touched path, captured before the first write in this step,
     #: so multi-pass writes recompute the full cumulative diff for review lenses, critic, and scribe.
     baselines: dict[str, str | None] = field(default_factory=dict)
+    #: Unified diff recovered from an earlier run before pause/resume, when the original pre-run-1
+    #: disk baseline is no longer on disk. Kept separate so run-2 writes compose run 1 + run 2 diffs
+    #: instead of letting post-run-1 disk contents overwrite run 1's diff.
+    recovered_diffs: dict[str, str] = field(default_factory=dict)
 
     def summaries(self) -> list[dict[str, Any]]:
         return list(self.files.values())
@@ -225,12 +229,13 @@ class _StepState:
                 continue
             updated = dict(entry)
             if earlier is not None:
+                recovered = self.recovered_diffs.get(path, "").rstrip("\n")
                 if path in self.baselines and fs is not None and not dry_run:
                     orig = self.baselines[path]
                     after = None if updated.get("action") == "delete" else fs.read_text_or_none(path)
                     before_text = orig or ""
                     after_text = after or ""
-                    updated["unified_diff"] = (
+                    latest_diff = (
                         ""
                         if before_text == after_text
                         else "".join(
@@ -242,11 +247,21 @@ class _StepState:
                             )
                         )
                     )
-                    updated["changed"] = (
-                        (orig is not None) if updated.get("action") == "delete" else (orig != after)
-                    )
-                    if orig is None and updated.get("action") in ("edit", "update"):
-                        updated["action"] = "create"
+                    if recovered:
+                        latest_clean = latest_diff.lstrip("\n")
+                        updated["unified_diff"] = (
+                            f"{recovered}\n{latest_clean}"
+                            if latest_clean and latest_clean != recovered
+                            else recovered
+                        )
+                        updated["changed"] = True
+                    else:
+                        updated["unified_diff"] = latest_diff
+                        updated["changed"] = (
+                            (orig is not None) if updated.get("action") == "delete" else (orig != after)
+                        )
+                        if orig is None and updated.get("action") in ("edit", "update"):
+                            updated["action"] = "create"
                 elif earlier.get("unified_diff") and updated.get("unified_diff"):
                     earlier_diff = str(earlier["unified_diff"]).rstrip("\n")
                     latest_diff = str(updated["unified_diff"]).lstrip("\n")
@@ -387,12 +402,18 @@ class ConductorTools:
                 continue
             payload = event.payload or {}
             if payload.get("path"):
-                latest[str(payload["path"])] = {
-                    "path": str(payload["path"]),
+                rel = str(payload["path"])
+                diff = str(payload.get("unified_diff") or "")
+                latest[rel] = {
+                    "path": rel,
                     "action": "written earlier",
-                    "unified_diff": str(payload.get("unified_diff") or ""),
+                    "unified_diff": diff,
                     "changed": True,
                 }
+                if diff:
+                    prev = state.recovered_diffs.get(rel, "").rstrip("\n")
+                    cur = diff.lstrip("\n")
+                    state.recovered_diffs[rel] = f"{prev}\n{cur}" if prev and prev != cur else diff
         state.files.update(latest)
 
     def step_for(self, step_id: str) -> PlanStep | str:
@@ -658,7 +679,11 @@ class ConductorTools:
         # that runs git rather than in a table here that could drift from it.
         # A thread, because git is a subprocess: a `log` over a long history
         # used to hold the event loop behind it.
-        return await asyncio.to_thread(self.git.read_only, self.root, args.get("args") or [])
+        return await self.service._to_thread_drain(
+            self.goal_id,
+            self.git.read_only, self.root, args.get("args") or [],
+            cancel=self.service.cancel_signal(self.goal_id),
+        )
 
     async def read_ci(self, args: dict[str, Any]) -> str:
         """GitHub's checks for this workspace's current commit, read-only and tokenless.
@@ -734,7 +759,8 @@ class ConductorTools:
                         "Nothing was run: the goal's approval was taken back while this command waited its turn "
                         f"({why.removeprefix('Nothing was written. ')}"
                     )
-            result = await asyncio.to_thread(
+            result = await self.service._to_thread_drain(
+                self.goal_id,
                 self.service.sandbox.run_command, self.root, argv,
                 mode="test" if approved else "read_only",
                 cancel=self.service.cancel_signal(self.goal_id),

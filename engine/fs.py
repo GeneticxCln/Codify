@@ -845,13 +845,18 @@ class FileSystemService:
                 else:
                     bases[target] = None
             if expected is not None and target in expected and target not in virtual:
-                # `""` and None both mean "the path did not exist" (a create proposal stores `""`;
-                # an absent file's version is None). An existing >1 MB file has a real SHA-256 in `bases[target]`,
-                # so it never matches `""`.
-                if (bases.get(target) or "") != (expected[target] or ""):
-                    # Its own class: a malformed proposal and a file that moved are different answers. A
-                    # fresh run asks the fixer once more with the current bytes; a replay fails the step.
-                    raise FileMovedUnderProposalError(rel)
+                expected_version = expected[target]
+                if expected_version is not None:
+                    # `""` means "the path did not exist" (a create proposal stores `""`;
+                    # an absent file's version in `bases` is None). `None` in `expected` means
+                    # "version unknown / unreadable" (e.g. an OSError when building context) and
+                    # skips the comparison rather than falsely treating an existing file as absent.
+                    # An existing >1 MB file has a real SHA-256 in `bases[target]`, so it never
+                    # matches `""`.
+                    if (bases.get(target) or "") != expected_version:
+                        # Its own class: a malformed proposal and a file that moved are different answers. A
+                        # fresh run asks the fixer once more with the current bytes; a replay fails the step.
+                        raise FileMovedUnderProposalError(rel)
             if action == "edit" and not item.get("edits"):
                 # An edit with no ops used to resolve to "the file unchanged" — except for a binary, non-UTF-8
                 # or over-the-limit file, where the unresolved `before` is "" and the result truncated it while

@@ -32,7 +32,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from typing import Annotated, Any
 
@@ -172,9 +172,14 @@ class SurfaceBridge:
         self._closed = False
 
     def close(self) -> None:
-        """Unblock every active `/surfaces/next` long-poll immediately so shutdown does not stall."""
+        """Unblock every active `/surfaces/next` long-poll and fail pending asks immediately."""
         self._closed = True
         self._wake.set()
+        for pending in list(self._pending.values()):
+            if not pending.future.done():
+                pending.future.set_exception(SurfaceRefused("The engine is shutting down."))
+        self._pending.clear()
+        self._handed.clear()
 
     # ── the engine's side ──────────────────────────────────────────────────
 
@@ -185,6 +190,8 @@ class SurfaceBridge:
         a refusal from the window, or silence) or `SurfaceUnavailable` (no window is polling). Every caller is a tool
         dispatcher, whose contract is to turn either into a sentence the model is shown.
         """
+        if self._closed:
+            raise SurfaceRefused("The engine is shutting down.")
         spec = self._surfaces.get(surface, {}).get(op)
         if spec is None:
             raise SurfaceRefused(f"There is no {op!r} on the {surface!r} surface.")
@@ -264,26 +271,41 @@ class SurfaceBridge:
             return True
         return False
 
-    async def next_request(self, wait_s: float = POLL_WAIT_S) -> dict[str, Any] | None:
+    async def next_request(
+        self,
+        wait_s: float = POLL_WAIT_S,
+        *,
+        is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    ) -> dict[str, Any] | None:
         """The oldest question not yet handed out, or None if none arrives in time."""
+        if is_disconnected is not None and await is_disconnected():
+            return None
         self.note_ui()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, wait_s)
+        poll_slice = 0.5 if is_disconnected is not None else POLL_WAIT_S
         handed_id: str | None = None
         try:
             while True:
                 if self._closed:
                     return None
+                if is_disconnected is not None and await is_disconnected():
+                    return None
                 item = self._oldest()
                 if item is not None:
                     result = self._hand_out(item)
                     handed_id = item.id
+                    if is_disconnected is not None and await is_disconnected():
+                        self.release(item.id)
+                        handed_id = None
+                        return None
                     self.note_ui()
                     handed_id = None
                     return result
                 remaining = deadline - loop.time()
                 if remaining <= 0:
-                    self.note_ui()
+                    if is_disconnected is None or not await is_disconnected():
+                        self.note_ui()
                     return None
                 # Cleared before the re-check, never after: a question asked between the check and the clear would set
                 # the event, the wait would eat the set, and the question would sit until the poll expired.
@@ -292,13 +314,19 @@ class SurfaceBridge:
                 if item is not None:
                     result = self._hand_out(item)
                     handed_id = item.id
+                    if is_disconnected is not None and await is_disconnected():
+                        self.release(item.id)
+                        handed_id = None
+                        return None
                     self.note_ui()
                     handed_id = None
                     return result
-                step = min(remaining, POLL_WAIT_S)
+                step = min(remaining, poll_slice)
                 try:
                     await asyncio.wait_for(self._wake.wait(), step)
                 except asyncio.TimeoutError:
+                    if is_disconnected is not None and await is_disconnected():
+                        return None
                     self.note_ui()
                     if deadline - loop.time() <= 0:
                         return None

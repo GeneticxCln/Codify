@@ -897,6 +897,15 @@ class SandboxService:
         if jail_argv is not None:
             child_argv = jail_argv
             env.update(_jail_env(jail_argv))
+        if cancel is not None and cancel.is_set():
+            return {
+                "argv": argv,
+                "exit_code": CANCELLED_EXIT_CODE,
+                "stdout": "",
+                "stderr": "[stopped: the goal was cancelled before the command started]",
+                "isolation": isolation,
+                "isolation_warning": isolation_warning,
+            }
         try:
             proc = subprocess.Popen(  # noqa: S603 — the argv passed `validate_argv` above; guarded, own session, no shell
                 # One process deeper than the command itself: the guard leads the new

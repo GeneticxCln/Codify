@@ -2107,12 +2107,15 @@ class TestPlannerConsult(unittest.IsolatedAsyncioTestCase):
         self._script_planner([
             {"consult": {"reads": ["src/core.py"]}},
             {"consult": {"reads": ["src/core.py"]}},
+            # The repair re-ask after the refused second consult still tries to consult.
+            {"consult": {"reads": ["src/core.py"]}},
         ])
 
         await self.executor.run_planning(self.goal.id)
 
         planner_calls = self._planner_prompts()
-        self.assertEqual(len(planner_calls), 2, "initial + one granted consult")
+        self.assertEqual(len(planner_calls), 3, "initial + one granted consult + one repair re-ask")
+        self.assertEqual(len(self._events("plan_consult")), 1, "only one consult may be served")
         self.assertEqual(self.goals.get(self.goal.id).status, "FAILED")
         errors = [e.payload for e in self._events("error")]
         self.assertTrue(any("last allowed follow-up" in str(e.get("message")) for e in errors))

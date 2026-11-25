@@ -204,10 +204,15 @@ class _Plan(_Design):
             while True:
                 round_no += 1
                 cancelled = False
+                allow_consult = consults_left > 0
+
+                def _accept_plan(reply: Any, _allow: bool = allow_consult) -> None:
+                    self._accept_plan_reply(reply, allow_consult=_allow)
+
                 async with self._stage(goal_id, "planner", "planner", ordinal=round_no) as plan_stage:
                     out = await self.orchestrator.run_agent(
                         "planner", goal_id, None, prompt,
-                        accept=self._accept_plan_reply,
+                        accept=_accept_plan,
                     )
                     # A cancel that landed while the planner was thinking must
                     # win: a goal the user cancelled must not reappear as PENDING

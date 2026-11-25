@@ -57,16 +57,62 @@ class _ReplayedGate(LayaService):
         return self._verdict
 
 
+class _BoundReplayProvider(BaseProvider):
+    """Per-call view of a shared `ReplayProvider` with isolated role, `usage_sink`, and `on_delta`."""
+
+    def __init__(self, provider: ReplayProvider, role: str) -> None:
+        self._provider = provider
+        self.current_role: str | None = role
+        self.usage_sink = None
+        self.on_delta = None
+
+    @property
+    def supports_tools(self) -> bool:
+        return self._provider.supports_tools
+
+    async def complete(
+        self, system_prompt: str, user_prompt: str, model: str,
+        temperature: float, max_tokens: int,
+        *, num_ctx: int | None = None, keep_alive: str | None = None,
+        json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
+        json_mode: bool = True,
+    ) -> str:
+        return await self._provider.complete(
+            system_prompt, user_prompt, model, temperature, max_tokens,
+            num_ctx=num_ctx, keep_alive=keep_alive, json_schema=json_schema,
+            thinking_effort=thinking_effort, json_mode=json_mode, _role=self.current_role,
+        )
+
+    async def complete_with_tools(
+        self,
+        system_prompt: str,
+        messages: list[dict[str, Any]],
+        tools: list[Any],
+        model: str,
+        temperature: float,
+        max_tokens: int,
+        *,
+        num_ctx: int | None = None,
+        keep_alive: str | None = None,
+        cache_prefix: bool = False,
+        thinking_effort: str | None = None,
+    ) -> Any:
+        return await self._provider.complete_with_tools(
+            system_prompt, messages, tools, model, temperature, max_tokens,
+            num_ctx=num_ctx, keep_alive=keep_alive, cache_prefix=cache_prefix,
+            thinking_effort=thinking_effort,
+        )
+
+
 class _ReplayFactory(ProviderFactory):
-    """Hands every role the one provider that answers from the recording."""
+    """Hands every role an isolated per-call view backed by the one recording."""
 
     def __init__(self, provider: ReplayProvider, keychain: Keychain | None = None) -> None:
         super().__init__(keychain if keychain is not None else Keychain())
         self.provider = provider
 
     def build(self, config: AgentConfig) -> BaseProvider:
-        self.provider.current_role = config.role
-        return self.provider
+        return _BoundReplayProvider(self.provider, config.role)
 
 
 def _ignore_special_files(directory: str, names: list[str]) -> set[str]:
@@ -107,11 +153,20 @@ def _gate_verdict(events: list[Any]) -> LayaDecision:
         if event.type != "laya_decision":
             continue
         payload = dict(event.payload)
+        answers = payload.get("answers")
+        routing = payload.get("routing")
+        warnings = payload.get("warnings")
         return LayaDecision(
             engine=str(payload.get("engine") or "skipped"),
+            answers=dict(answers) if isinstance(answers, dict) else {},
+            routing=dict(routing) if isinstance(routing, dict) else {},
             blocked=bool(payload.get("blocked")),
             block_reason=payload.get("block_reason"),
+            warnings=[str(w) for w in warnings] if isinstance(warnings, list) else [],
             skipped_reason=payload.get("skipped_reason"),
+            unavailable=bool(payload.get("unavailable")),
+            provider=payload.get("provider"),
+            model=payload.get("model"),
         )
     return LayaDecision(engine="skipped", skipped_reason="replay: gate did not run")
 

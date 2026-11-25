@@ -111,7 +111,7 @@ from engine.models import (
     WorkspacePush,
     loads_payload,
 )
-from engine.providers import Keychain, ProviderError, ProviderFactory
+from engine.providers import Keychain, ProviderError, ProviderFactory, close_http_clients
 from engine.sandbox import ISOLATION_MODES, SandboxService
 from engine.skills import NAME_RE, load_skills
 from engine.services import (
@@ -484,6 +484,10 @@ async def _serve(app: FastAPI, keychain: Keychain, conn: sqlite3.Connection) -> 
                 )
             except Exception:
                 pass
+        try:
+            await close_http_clients()
+        except Exception:
+            pass
         if state_lock is not None:
             try:
                 fcntl.flock(state_lock, fcntl.LOCK_UN)
@@ -903,8 +907,12 @@ async def surfaces_next(
     engine learns a window is there, and one that never arrives again is how it learns the window is gone. The window
     answers with `POST /surfaces/answer`.
     """
-    pending = await _surfaces(request).next_request(wait_s=wait)
+    bridge = _surfaces(request)
+    pending = await bridge.next_request(wait_s=wait, is_disconnected=request.is_disconnected)
     if pending is None:
+        return {"id": None}
+    if await request.is_disconnected():
+        bridge.release(str(pending["id"]))
         return {"id": None}
     return pending
 
@@ -944,8 +952,12 @@ async def bridge_next(
     bridge's idea of when a shell was last seen, and one that never arrives
     again is how the engine learns the desktop app is gone.
     """
-    pending = await _bridge(request).next_request(wait_s=wait)
+    bridge = _bridge(request)
+    pending = await bridge.next_request(wait_s=wait, is_disconnected=request.is_disconnected)
     if pending is None:
+        return {"id": None}
+    if await request.is_disconnected():
+        bridge.release(str(pending["id"]))
         return {"id": None}
     return pending
 
@@ -1682,7 +1694,7 @@ async def probe_mcp_server(server_id: str, request: Request) -> dict[str, Any]:
     return await _mcp_service(request).probe(server_id)
 
 
-@app.put("/settings/mcp/{server_id}/tools/{tool_name}")
+@app.put("/settings/mcp/{server_id}/tools/{tool_name:path}")
 async def update_mcp_tool(
     server_id: str, tool_name: str, body: McpToolUpdate, request: Request
 ) -> dict[str, Any]:
@@ -3844,7 +3856,7 @@ async def _retry_and_drive(app: FastAPI, goal_id: str, step_id: str) -> None:
     """Run the retried step, then drive whatever is left, holding the driver `begin_retry` claimed."""
     executor = app.state.executor
     try:
-        if executor.conductor_can_drive(goal_id):
+        if executor._stored_proposals(goal_id) is None and executor.conductor_can_drive(goal_id):
             # The conductor owns every step it is given, a retried one included: it resumes at the step the
             # person named and carries on through whatever is still open, pausing the goal with a reason if it
             # cannot finish one. Running the recipe's `run_step` here would be the second pipeline the
@@ -3890,6 +3902,13 @@ async def _run_steps_locked(app: FastAPI, goal_id: str) -> None:
     # finished, and a Cancel that landed during that step used to be followed by a full
     # conductor run — model spend on a goal the user had stopped.
     if app.state.goals.get(goal_id).status != "RUNNING":
+        return
+    # A paused dry-run Apply cleared `dry_run=False` before replaying reviewed proposals;
+    # resuming via Start must continue replaying those stored proposals instead of dropping
+    # them and invoking the live conductor or fixer LLM.
+    stored = executor._stored_proposals(goal_id)
+    if stored is not None:
+        await executor._drive_replay_steps(goal_id, *stored)
         return
     # An approved plan is driven by the conductor when this install has one, and
     # by the engine's own sequence when it does not. The choice lives here rather
@@ -4147,7 +4166,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str, after: int = 0) -> None:
     receiver = asyncio.create_task(websocket.receive_text())
     # A reconnect may name the last sequence it saw (`?after=42`) instead of replaying the goal's whole
     # log; without it every dropped socket redelivered every event the goal had ever produced.
-    after = max(0, after)
+    after = max(0, min(after, SQLITE_INT_MAX))
     try:
         while True:
             try:
@@ -4180,7 +4199,7 @@ async def ws_goal(websocket: WebSocket, goal_id: str, after: int = 0) -> None:
             # A frame from the client: this channel is one-directional and has no use for it, but a
             # client that can send one can still receive, so read on.
             receiver = asyncio.create_task(websocket.receive_text())
-    except WebSocketDisconnect:
+    except (WebSocketDisconnect, RuntimeError, ConnectionError):
         pass
     finally:
         # Retrieved either way: an unretrieved exception from a cancelled `receive` is printed by

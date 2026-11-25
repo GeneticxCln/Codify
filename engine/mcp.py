@@ -1038,9 +1038,12 @@ class McpService:
         if count is not None and int(count["n"]) >= MAX_SERVERS:
             raise ApiError(409, "mcp_limit", f"at most {MAX_SERVERS} MCP servers may be added")
         try:
-            target, _ = await resolve_target(body.url, self._resolve)
-        except McpError as exc:
-            raise ApiError(400, exc.code, str(exc)) from exc
+            target, _ = await _within(
+                resolve_target(body.url, self._resolve),
+                PROBE_TOTAL_TIMEOUT_S, "DNS resolution",
+            )
+        except (McpError, FetchRefused) as exc:
+            raise ApiError(400, getattr(exc, "code", "mcp_resolve_failed"), str(exc)) from exc
         auth_header, secret = self._check_auth(body.auth_kind, body.auth_header, body.secret)
         server_id = str(uuid.uuid4())
         api_key_ref = f"mcp/{server_id}" if body.auth_kind != "none" else ""
@@ -1077,9 +1080,12 @@ class McpService:
         moved = False
         if url != current["url"]:
             try:
-                target, _ = await resolve_target(url, self._resolve)
-            except McpError as exc:
-                raise ApiError(400, exc.code, str(exc)) from exc
+                target, _ = await _within(
+                    resolve_target(url, self._resolve),
+                    PROBE_TOTAL_TIMEOUT_S, "DNS resolution",
+                )
+            except (McpError, FetchRefused) as exc:
+                raise ApiError(400, getattr(exc, "code", "mcp_resolve_failed"), str(exc)) from exc
             url = target.url
             # A server is its address. The tools a person admitted were admitted on the old one, and the stored
             # credential was given to it: a changed address starts both over.
@@ -1125,33 +1131,49 @@ class McpService:
         now = time.time()
         api_key_ref = str(row["api_key_ref"] or "")
         secret = self._keychain.get(api_key_ref) if api_key_ref else ""
-        try:
+        async def _resolve_and_probe() -> Any:
             target, addresses = await resolve_target(str(row["url"]), self._resolve)
-            result = await _within(
-                probe_server(
-                    target, addresses,
-                    auth_kind=str(row["auth_kind"]),
-                    auth_header=str(row["auth_header"]),
-                    secret=secret,
-                    transport=self._transport,
-                ),
-                PROBE_TOTAL_TIMEOUT_S, "the probe",
+            return await probe_server(
+                target, addresses,
+                auth_kind=str(row["auth_kind"]),
+                auth_header=str(row["auth_header"]),
+                secret=secret,
+                transport=self._transport,
             )
+
+        try:
+            result = await _within(_resolve_and_probe(), PROBE_TOTAL_TIMEOUT_S, "the probe")
         except (McpError, FetchRefused) as exc:
             message = str(exc)
-            self._db.execute(
-                "UPDATE mcp_servers SET last_probe_at = ?, last_probe_error = ?, updated_at = ? WHERE id = ?",
-                (now, message, now, server_id),
-            )
-            self._db.commit()
+            try:
+                self._db.execute(
+                    "UPDATE mcp_servers SET last_probe_at = ?, last_probe_error = ?, updated_at = ? WHERE id = ?",
+                    (now, message, now, server_id),
+                )
+                self._db.commit()
+            except Exception:
+                self._db.rollback()
+                raise
             raise ApiError(502, getattr(exc, "code", "mcp_probe_failed"), message) from exc
-        self._replace_tools(server_id, result.tools, now)
-        self._db.execute(
-            "UPDATE mcp_servers SET protocol_version = ?, server_name = ?, last_probe_at = ?, "
-            "last_probe_error = NULL, updated_at = ? WHERE id = ?",
-            (result.protocol_version, result.server_name, now, now, server_id),
-        )
-        self._db.commit()
+        try:
+            self._replace_tools(server_id, result.tools, now)
+            cur = self._db.execute(
+                "UPDATE mcp_servers SET protocol_version = ?, server_name = ?, last_probe_at = ?, "
+                "last_probe_error = NULL, updated_at = ? WHERE id = ?",
+                (result.protocol_version, result.server_name, now, now, server_id),
+            )
+            if cur.rowcount != 1:
+                self._db.rollback()
+                raise ApiError(404, "unknown_mcp_server", "MCP server not found")
+            self._db.commit()
+        except sqlite3.IntegrityError as exc:
+            self._db.rollback()
+            raise ApiError(404, "unknown_mcp_server", "MCP server not found") from exc
+        except ApiError:
+            raise
+        except Exception:
+            self._db.rollback()
+            raise
         return self.get(server_id)
 
     def _replace_tools(self, server_id: str, tools: list[dict[str, Any]], now: float) -> None:

@@ -269,6 +269,14 @@ def _balanced_end(text: str, start: int) -> int | None:
         if ch in "\"'":
             i = _skip_string(text, i)
             continue
+        if text.startswith("//", i):
+            while i < len(text) and text[i] != "\n":
+                i += 1
+            continue
+        if text.startswith("/*", i):
+            close = text.find("*/", i + 2)
+            i = len(text) if close == -1 else close + 2
+            continue
         if ch in "{[":
             depth += 1
         elif ch in "}]":
@@ -543,7 +551,16 @@ def extract_json(raw: str, expect: Sequence[str] = (), *, repair_truncation: boo
         end_at = _balanced_end(stripped, i)
         if end_at is None:
             repaired = _repaired_problem(stripped[i:])
-            where, ran_out = repaired if repaired is not None else (problem, True)
+            if repaired is None:
+                # `_repaired_problem` returned None because the repaired form actually parsed
+                # cleanly — do not misclassify it as truncated.
+                try:
+                    found.append(_load_repaired(stripped[i:]))
+                    break
+                except (ValueError, RecursionError):
+                    where, ran_out = problem, True
+            else:
+                where, ran_out = repaired
             if ran_out:
                 # It never closes and is syntactically valid up to EOF: genuinely
                 # truncated JSON starting here. Do not advance into its interior

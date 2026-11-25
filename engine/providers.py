@@ -999,7 +999,7 @@ def _thinking_budget(effort: str | None, max_tokens: int) -> int | None:
     setting is left out: a budget the API will not accept is not a setting, and the caller still
     gets an answer instead of a failure caused by a field the model did not need.
     """
-    if effort is None:
+    if effort is None or effort not in _THINKING_BUDGETS:
         return None
     # Half the reply's cap, not the cap itself: thinking and the answer share `max_tokens`, and a
     # budget at the cap leaves no room for the JSON the role exists to produce.
@@ -1199,23 +1199,14 @@ class OpenAICompatProvider(BaseProvider):
             # SSE streaming (`stream: true`): each chunk carries a delta to
             # append; the final chunk (finish_reason set) carries the usage
             # block when the server includes it. A server that rejects the
-            # streaming request itself (4xx) is retried once the blocking way
-            # — the reply matters more than the delivery.
+            # streaming request itself (4xx) falls through to the blocking
+            # request below without mutating `self.on_delta` (safe under
+            # concurrent calls on a shared provider).
             try:
                 return await self._complete_streaming(payload, headers)
             except ProviderError as exc:
                 if not refused_the_request(exc):
                     raise
-                saved = self.on_delta
-                self.on_delta = None
-                try:
-                    return await self.complete(
-                        system_prompt, user_prompt, model, temperature, max_tokens,
-                        num_ctx=num_ctx, keep_alive=keep_alive, json_schema=json_schema,
-                        thinking_effort=thinking_effort, json_mode=json_mode,
-                    )
-                finally:
-                    self.on_delta = saved
         async with _http_client(self._base_url, timeout=120) as client:
             while True:
                 try:
@@ -1629,8 +1620,8 @@ class GoogleProvider(BaseProvider):
                     },
                     "generationConfig": {
                         "maxOutputTokens": max_tokens,
-                        # The budget `complete` sends. The thought signatures this turns on already ride back on
-                        # each function call (`ToolCall.signature`), which is what a multi-step turn needs.
+                        # The budget `complete` sends. Same key, same table — Gemini's thinking is not tied
+                        # to a reply format, and its thoughtSignature rides back on each functionCall part.
                         **_google_thinking(thinking_effort, max_tokens),
                     },
                 },
@@ -1717,6 +1708,7 @@ ENV_KEY_MAP: dict[str, list[str]] = {
     "deepseek": ["DEEPSEEK_API_KEY"],
     "openrouter": ["OPENROUTER_API_KEY"],
     "groq": ["GROQ_API_KEY"],
+    "nvidia": ["NVIDIA_API_KEY"],
     "opencode": ["OPENCODE_API_KEY"],
     "kilo": ["KILO_API_KEY", "KILOCODE_API_KEY"],
     "axforge": ["AXFORGE_API_KEY"],

@@ -5,6 +5,7 @@ import shutil
 import signal
 import stat
 import subprocess
+import threading
 import time
 from collections.abc import Mapping
 from pathlib import Path
@@ -21,6 +22,7 @@ from urllib.parse import urlsplit, urlunsplit
 from engine import git_readonly
 from engine.fs import FileSystemService
 from engine.sandbox import (
+    CANCEL_POLL_S,
     READ_ONLY_GIT_SUBCOMMANDS,
     CommandNotAllowed,
     SandboxService,
@@ -29,6 +31,10 @@ from engine.sandbox import (
     validate_argv,
 )
 from engine.spawn_guard import guarded_argv, guarded_env
+
+
+class GitCancelledError(RuntimeError):
+    """Raised when a git subprocess is cancelled via a goal's cancel signal."""
 
 # Commands that can start a repository's clean/smudge filter themselves. `git status` and
 # `git diff` compare the worktree through `filter.<name>.clean`, so the UI's status poll
@@ -478,6 +484,7 @@ class GitService:
         capped: bool = False,
         hardened: bool = True,
         check_filters: bool = True,
+        cancel: threading.Event | None = None,
     ) -> subprocess.CompletedProcess[bytes]:
         """Run one git command under the guard, capturing raw output.
 
@@ -507,6 +514,8 @@ class GitService:
         is for the person's own push: its `pre-push` hook is theirs to run, exactly as it is
         in their terminal, and a push runs no filter.
         """
+        if cancel is not None and cancel.is_set():
+            raise GitCancelledError("git command cancelled before start")
         if check_filters and args and args[0] in _FILTER_RUNNING_SUBCOMMANDS and self.is_git_repo(cwd):
             reason = self._untrusted_config_reason(cwd, args[0])
             if reason is not None:
@@ -531,17 +540,29 @@ class GitService:
         if capped:
             drains = (_Drain(proc.stdout), _Drain(proc.stderr))
             deadline = time.monotonic() + (timeout if timeout is not None else 1e9)
+            cancelled = False
+            timed_out = False
             try:
-                settled = _settle(proc, drains, deadline)
+                while not _settle(
+                    proc, drains, deadline if cancel is None else min(deadline, time.monotonic() + CANCEL_POLL_S),
+                ):
+                    if cancel is not None and cancel.is_set():
+                        cancelled = True
+                        break
+                    if time.monotonic() >= deadline:
+                        timed_out = True
+                        break
             except BaseException:
                 SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
                 _settle(proc, drains, time.monotonic() + 5)
                 raise
-            if not settled:
+            if cancelled or timed_out:
                 SandboxService._kill_group(proc.pid)
                 if not _settle(proc, drains, time.monotonic() + 5):
                     SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
                     _settle(proc, drains, time.monotonic() + 5)
+                if cancelled:
+                    raise GitCancelledError("git command cancelled")
                 raise subprocess.TimeoutExpired(proc.args, timeout or 0.0)
             marker = b"\n\xe2\x80\xa6 (output truncated)"
             with drains[0]._lock:
@@ -552,6 +573,72 @@ class GitService:
                 proc.args, proc.returncode,
                 out_raw + (marker if out_trunc else b""),
                 err_raw + (marker if err_trunc else b""),
+            )
+        if cancel is not None:
+            out_buf: list[bytes] = []
+            err_buf: list[bytes] = []
+
+            def _read_all(stream: Any, dest: list[bytes]) -> None:
+                if stream is None:
+                    return
+                try:
+                    dest.append(stream.read())
+                except (OSError, ValueError):
+                    pass
+                finally:
+                    try:
+                        stream.close()
+                    except OSError:
+                        pass
+
+            t_out = threading.Thread(target=_read_all, args=(proc.stdout, out_buf), daemon=True)
+            t_err = threading.Thread(target=_read_all, args=(proc.stderr, err_buf), daemon=True)
+            t_out.start()
+            t_err.start()
+            deadline = time.monotonic() + (timeout if timeout is not None else 1e9)
+            cancelled = False
+            timed_out = False
+            try:
+                while proc.poll() is None:
+                    if cancel.is_set():
+                        cancelled = True
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        timed_out = True
+                        break
+                    try:
+                        proc.wait(timeout=min(CANCEL_POLL_S, remaining))
+                    except subprocess.TimeoutExpired:
+                        continue
+            except BaseException:
+                SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    pass
+                t_out.join(timeout=2)
+                t_err.join(timeout=2)
+                raise
+            if cancelled or timed_out:
+                SandboxService._kill_group(proc.pid)
+                try:
+                    proc.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    SandboxService._kill_group(proc.pid, sig=signal.SIGKILL)
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        pass
+                t_out.join(timeout=2)
+                t_err.join(timeout=2)
+                if cancelled:
+                    raise GitCancelledError("git command cancelled")
+                raise subprocess.TimeoutExpired(proc.args, timeout or 0.0)
+            t_out.join(timeout=5)
+            t_err.join(timeout=5)
+            return subprocess.CompletedProcess(
+                proc.args, proc.returncode, b"".join(out_buf), b"".join(err_buf),
             )
         try:
             stdout, stderr = proc.communicate(timeout=timeout)
@@ -587,6 +674,7 @@ class GitService:
         capped: bool = False,
         hardened: bool = True,
         check_filters: bool = True,
+        cancel: threading.Event | None = None,
     ) -> subprocess.CompletedProcess[str]:
         """Same, as text — deliberately decoding UTF-8 with replacement.
 
@@ -597,7 +685,7 @@ class GitService:
         """
         res = self._run_bytes(
             args, cwd=cwd, env=env, timeout=timeout, capped=capped,
-            hardened=hardened, check_filters=check_filters,
+            hardened=hardened, check_filters=check_filters, cancel=cancel,
         )
         return subprocess.CompletedProcess(
             res.args,
@@ -613,11 +701,13 @@ class GitService:
         except (OSError, subprocess.SubprocessError):
             return False
 
-    def _tracked_files(self, cwd: str, env: dict[str, str]) -> list[str]:
+    def _tracked_files(
+        self, cwd: str, env: dict[str, str], *, cancel: threading.Event | None = None,
+    ) -> list[str]:
         """Workspace-relative paths git already knows about (used for deletions)."""
         try:
             res = self._run_bytes(
-                ["ls-files", "-z"], cwd=cwd, env=env, timeout=self.commit_timeout_s,
+                ["ls-files", "-z"], cwd=cwd, env=env, timeout=self.commit_timeout_s, cancel=cancel,
             )
         except (subprocess.TimeoutExpired, OSError):
             return []
@@ -639,7 +729,9 @@ class GitService:
     # `branch` and `tag` to a model, and `git branch NAME` creates a ref.
     READ_ONLY_ARGV: tuple[str, ...] = tuple(sorted(READ_ONLY_GIT_SUBCOMMANDS))
 
-    def read_only(self, root_path: str, args: list[str]) -> str:
+    def read_only(
+        self, root_path: str, args: list[str], *, cancel: threading.Event | None = None,
+    ) -> str:
         """Run one read-only git subcommand and return its output.
 
         The public door for the conductor's `git_history` tool, and the reason
@@ -683,7 +775,10 @@ class GitService:
                 env=git_readonly.runner_env(os.environ, root_path),
                 timeout=self.read_only_timeout_s,
                 capped=True,
+                cancel=cancel,
             )
+        except GitCancelledError:
+            return f"git {' '.join(args)} was stopped because the goal was cancelled."
         except subprocess.TimeoutExpired:
             return (
                 f"git {' '.join(args)} did not finish in {self.read_only_timeout_s:g}s and "
@@ -703,10 +798,12 @@ class GitService:
         author_email: str = "codify@local",
         *,
         allow_root: bool = False,
+        cancel: threading.Event | None = None,
     ) -> str | None:
         """The commit's hash, or None. Same contract as ever; see `commit_with_reason`."""
         return self.commit_with_reason(
-            root_path, message, paths, author_name, author_email, allow_root=allow_root
+            root_path, message, paths, author_name, author_email,
+            allow_root=allow_root, cancel=cancel,
         )[0]
 
     def commit_with_reason(
@@ -718,6 +815,7 @@ class GitService:
         author_email: str = "codify@local",
         *,
         allow_root: bool = False,
+        cancel: threading.Event | None = None,
     ) -> tuple[str | None, str | None]:
         """Commit exactly `paths`, and say why when git refused.
 
@@ -735,6 +833,8 @@ class GitService:
         step actually touched, and a step that touched nothing must not commit at
         all — including whatever the user happened to have staged themselves.
         """
+        if cancel is not None and cancel.is_set():
+            return None, "cancelled"
         if not self.is_git_repo(root_path):
             return None, None
         # Nothing changed in this run: not our commit to make.
@@ -756,7 +856,10 @@ class GitService:
         # path that is inside the workspace and either on disk, or known to git (a
         # deletion has no file, but it does have an index entry).
         root = Path(cwd)
-        tracked = set(self._tracked_files(cwd, env))
+        try:
+            tracked = set(self._tracked_files(cwd, env, cancel=cancel))
+        except GitCancelledError:
+            return None, "cancelled"
         stageable: list[str] = []
         seen_stageable: set[str] = set()
         for p in paths:
@@ -792,8 +895,10 @@ class GitService:
         try:
             listed = self._run_text(
                 ["ls-files", "--others", "--ignored", "--exclude-standard", "-z", "--", *stageable],
-                cwd=cwd, env=env, timeout=self.commit_timeout_s,
+                cwd=cwd, env=env, timeout=self.commit_timeout_s, cancel=cancel,
             )
+        except GitCancelledError:
+            return None, "cancelled"
         except subprocess.TimeoutExpired:
             return None, f"git ls-files did not finish in {self.commit_timeout_s:g}s"
         except OSError as exc:
@@ -811,14 +916,18 @@ class GitService:
         reason = self._untrusted_config_reason(cwd, "commit")
         if reason is not None:
             return None, reason
+        if cancel is not None and cancel.is_set():
+            return None, "cancelled"
 
         # New paths must be known to git before a pathspec commit can name them;
         # `-A` also records deletions. Only these paths are touched in the index.
         try:
             added = self._run_text(
                 ["add", "-A", "--", *stageable], cwd=cwd, env=env,
-                timeout=self.commit_timeout_s, check_filters=False,
+                timeout=self.commit_timeout_s, check_filters=False, cancel=cancel,
             )
+        except GitCancelledError:
+            return None, "cancelled"
         except subprocess.TimeoutExpired:
             return None, f"git add did not finish in {self.commit_timeout_s:g}s"
         except OSError as exc:
@@ -826,6 +935,8 @@ class GitService:
         if added.returncode != 0:
             said = (added.stderr or added.stdout or "").strip().splitlines()
             return None, f"git add failed: {said[0] if said else added.returncode}"
+        if cancel is not None and cancel.is_set():
+            return None, "cancelled"
 
         # Commit *with the pathspec*, so a file the user had staged for their own
         # commit stays staged instead of riding along in this one. Git takes the
@@ -837,7 +948,10 @@ class GitService:
                 env=env,
                 timeout=self.commit_timeout_s,
                 check_filters=False,
+                cancel=cancel,
             )
+        except GitCancelledError:
+            return None, "cancelled"
         except subprocess.TimeoutExpired:
             # The hook outlived its welcome. `_run_bytes` has already killed git's
             # process group, including the hook's children; the commit may or may
@@ -860,8 +974,10 @@ class GitService:
         # Return hash
         try:
             rev = self._run_text(
-                ["rev-parse", "HEAD"], cwd=cwd, env=env, timeout=self.commit_timeout_s,
+                ["rev-parse", "HEAD"], cwd=cwd, env=env, timeout=self.commit_timeout_s, cancel=cancel,
             )
+        except GitCancelledError:
+            return None, "cancelled"
         except (subprocess.TimeoutExpired, OSError):
             return None, None
         if rev.returncode != 0:

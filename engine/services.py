@@ -734,6 +734,7 @@ class WorkspaceService:
             )
             self._db.commit()
         except Exception as exc:
+            self._db.rollback()
             if "UNIQUE constraint failed: workspaces.root_path" in str(exc):
                 raise ApiError(409, "duplicate_workspace", f"workspace already exists for {root}") from exc
             raise ApiError(409, "duplicate_workspace", "workspace could not be created (duplicate id or path)") from exc
@@ -2296,6 +2297,7 @@ class GoalService:
             (time.time(), goal_id, expected_version),
         )
         if cur.rowcount != 1:
+            self._db.rollback()
             g = self.get(goal_id)
             raise ApiError(409, "version_conflict", "version mismatch", {"current": g.model_dump()})
 
@@ -2410,6 +2412,7 @@ class GoalService:
             (int(enabled), time.time(), goal_id),
         )
         if row.rowcount != 1:
+            self._db.rollback()
             raise ApiError(404, "unknown_goal", "goal not found")
         self._db.commit()
 
@@ -2433,6 +2436,7 @@ class GoalService:
                 (time.time(), goal_id),
             )
         if row.rowcount != 1:
+            self._db.rollback()
             current = self._db.execute(
                 "SELECT status FROM goals WHERE id = ?", (goal_id,)
             ).fetchone()
@@ -2453,6 +2457,7 @@ class GoalService:
             (int(enabled), time.time(), goal_id),
         )
         if row.rowcount != 1:
+            self._db.rollback()
             raise ApiError(404, "unknown_goal", "goal not found")
         self._db.commit()
         return self.get(goal_id)
@@ -2495,6 +2500,7 @@ class GoalService:
             (status, now, goal_id, expected_version),
         )
         if cur.rowcount != 1:
+            self._db.rollback()
             g = self.get(goal_id)
             raise ApiError(409, "version_conflict", "version mismatch", {"current": g.model_dump()})
         self._db.commit()
@@ -2646,6 +2652,7 @@ class GoalService:
                 (goal_id,),
             ).fetchone()
         except Exception:
+            self._db.rollback()
             # SQLite < 3.35 has no UPDATE...RETURNING. Fall back to the
             # portable read-modify-write (single-writer engine, same result).
             cur = self._db.execute("SELECT event_seq FROM goals WHERE id = ?", (goal_id,)).fetchone()
@@ -2656,6 +2663,7 @@ class GoalService:
             self._db.commit()
             return nxt
         if row is None:
+            self._db.rollback()
             raise ApiError(404, "unknown_goal", "goal not found")
         self._db.commit()
         return int(row[0])

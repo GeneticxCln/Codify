@@ -1439,10 +1439,9 @@ class _Conduct(_Plan):
         override it when they are set (see `_conductor_role`).
         """
         role = self._conductor_role()
-        # The model the person picked in the command bar, when they picked one: this is the call that
-        # answers their turn, and answering it on a different model than the one on screen is the
-        # defect the pick exists to remove. The role row is only borrowed for everything else.
-        primary = self._picked_config(self.orchestrator.registry.get_config(role), goal)
+        # The model the person picked in the command bar, else the conductor's own settings,
+        # else the borrowed `scribe` role row.
+        primary = self._turn_primary_config(role, goal)
         raw = await self.orchestrator.run_agent(
             role, goal_id, None, self._turn_prompt(goal),
             system=CHAT_SYSTEM_PROMPT, raw_output=True, primary=primary,
@@ -1603,7 +1602,7 @@ class _Conduct(_Plan):
         if self.compactions is None:
             raise ApiError(503, "compaction_unavailable", "this engine has no compaction service")
         role = self._conductor_role()
-        primary = self._picked_config(self.orchestrator.registry.get_config(role), goal)
+        primary = self._turn_primary_config(role, goal)
         prompt = self.compactions.build_prompt(plan)
 
         async def ask(extra: str = "") -> str:
@@ -1630,6 +1629,15 @@ class _Conduct(_Plan):
         if not summary_is_usable(summary):
             raise ApiError(502, "compaction_failed", "the model returned no usable summary; nothing was changed")
         return summary[:MAX_SUMMARY_CHARS]
+
+    def _turn_primary_config(self, role: str, goal: Goal) -> AgentConfig | None:
+        """Effective primary config for plain replies and compaction: per-turn pick > conductor settings > borrowed role."""
+        raw = self.orchestrator.registry.get_config(role)
+        picked = self._picked_config(raw, goal)
+        if picked is not None:
+            return picked
+        configured = self._conductor_config(raw)
+        return configured if configured is not raw else None
 
     def _conductor_config(self, base: AgentConfig) -> AgentConfig:
         """The conductor's own provider/model, if the settings name one.

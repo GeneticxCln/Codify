@@ -14,8 +14,8 @@ import os
 import threading
 import time
 import uuid
-from collections.abc import AsyncIterator
-from typing import Any
+from collections.abc import AsyncIterator, Callable
+from typing import Any, TypeVar
 
 from engine.agent_orchestrator import AgentOrchestrator
 from engine.compaction import CompactionService
@@ -29,6 +29,8 @@ from engine.sandbox import SandboxService
 from engine.services import AgentRegistryService, ApiError, GoalService, WorkspaceService
 from engine.surfaces import SurfaceBridge
 from engine.webview_bridge import WebviewBridge
+
+_T = TypeVar("_T")
 
 if TYPE_CHECKING:
     from engine.mcp import McpService
@@ -408,6 +410,31 @@ class _ExecutorCore:
     def forget_in_flight(self, goal_id: str) -> None:
         """Drop the goal's signal once nothing of it is running, so the table holds only live goals."""
         self._cancel_signals.pop(goal_id, None)
+
+    async def _to_thread_drain(
+        self, goal_id: str, fn: Callable[..., _T], *args: Any, **kwargs: Any,
+    ) -> _T:
+        """Run `fn` on a worker thread and drain it on cancellation before returning.
+
+        Cancelling `await asyncio.to_thread(...)` normally unwinds immediately,
+        releasing `sandbox_lock`, `_git_lock`, and the goal driver while the
+        worker thread is still killing its subprocess group or holding git's
+        index lock. On `CancelledError`, this sets `goal_id`'s cancel signal
+        and waits for the worker thread to finish exiting before re-raising.
+        """
+        fut: asyncio.Task[_T] = asyncio.ensure_future(asyncio.to_thread(fn, *args, **kwargs))
+        try:
+            return await asyncio.shield(fut)
+        except asyncio.CancelledError:
+            self.stop_in_flight(goal_id)
+            while not fut.done():
+                try:
+                    await asyncio.shield(fut)
+                except asyncio.CancelledError:
+                    continue
+                except BaseException:
+                    break
+            raise
 
     def _preflight_roles(self, goal_id: str) -> None:
         """Name, once, every role that cannot be called — before the first call.

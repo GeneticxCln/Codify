@@ -329,8 +329,9 @@ class ReplayProvider(BaseProvider):
         *, num_ctx: int | None = None, keep_alive: str | None = None,
         json_schema: dict[str, Any] | None = None, thinking_effort: str | None = None,
         json_mode: bool = True,
+        _role: str | None = None,
     ) -> str:
-        role = self.current_role or "unknown"
+        role = _role or self.current_role or "unknown"
         digest = prompt_digest(system_prompt, user_prompt)
         for idx, call in enumerate(self._calls):
             if idx in self._served or call["role"] != role or call["prompt_hash"] != digest:
@@ -356,6 +357,8 @@ class ReplayProvider(BaseProvider):
         cache_prefix: bool = False,
         thinking_effort: str | None = None,
     ) -> ToolReply:
+        if len(messages) < self._conductor_seen:
+            self._conductor_seen = 0
         shown = list(messages[self._conductor_seen:])
         user_prompt = json.dumps([_conductor_message_json(m) for m in shown], default=str)
         digest = prompt_digest(system_prompt, user_prompt)

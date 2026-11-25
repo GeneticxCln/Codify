@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import time
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Any
 
@@ -196,9 +197,14 @@ class WebviewBridge:
         self._closed = False
 
     def close(self) -> None:
-        """Unblock every active `/bridge/next` long-poll immediately so shutdown does not stall."""
+        """Unblock every active `/bridge/next` long-poll and fail pending asks immediately."""
         self._closed = True
         self._wake.set()
+        for pending in list(self._pending.values()):
+            if not pending.future.done():
+                pending.future.set_exception(BridgeRefused("The engine is shutting down."))
+        self._pending.clear()
+        self._handed.clear()
 
     # ── the engine's side ──────────────────────────────────────────────────
 
@@ -331,6 +337,8 @@ class WebviewBridge:
         silence. And one operation at a time is a fact about the user's one
         visible page, not about this process's capacity to queue.
         """
+        if self._closed:
+            raise BridgeRefused("The engine is shutting down.")
         if not self.attached:
             raise BridgeUnavailable(
                 "There is no browser attached to this engine. The desktop app "
@@ -357,6 +365,8 @@ class WebviewBridge:
         text: str | None = None,
     ) -> dict[str, Any]:
         """Enqueue one question and block until the shell answers it."""
+        if self._closed:
+            raise BridgeRefused("The engine is shutting down.")
         loop = asyncio.get_running_loop()
         pending = _Pending(
             id=uuid.uuid4().hex,
@@ -419,38 +429,87 @@ class WebviewBridge:
         """
         self._last_seen = time.monotonic()
 
-    async def next_request(self, wait_s: float = POLL_WAIT_S) -> dict[str, Any] | None:
+    def release(self, request_id: str) -> bool:
+        """Return a handed-out question to the queue so another poll can pick it up."""
+        if request_id in self._handed and request_id in self._pending:
+            self._handed.discard(request_id)
+            self._wake.set()
+            return True
+        return False
+
+    async def next_request(
+        self,
+        wait_s: float = POLL_WAIT_S,
+        *,
+        is_disconnected: Callable[[], Awaitable[bool]] | None = None,
+    ) -> dict[str, Any] | None:
         """The oldest unanswered question, or None if none arrives in time.
 
         Long-poll rather than a socket: this is the whole reason the bridge is
         not a WebSocket. A poll that returns nothing is indistinguishable from
         an idle engine, and neither can interleave with a goal's event stream.
         """
+        if is_disconnected is not None and await is_disconnected():
+            return None
         self.note_shell()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + max(0.0, wait_s)
-        while True:
-            if self._closed:
-                return None
-            item = self._oldest()
-            if item is not None:
-                return self._hand_out(item)
-            remaining = deadline - loop.time()
-            if remaining <= 0:
-                return None
-            # Cleared *before* the re-check, never after: a question asked
-            # between the check and the clear would set the event, the wait
-            # would consume the set, and the question would sit until the next
-            # poll expired — the lost-wakeup that makes a bridge look broken
-            # for exactly one poll interval.
-            self._wake.clear()
-            item = self._oldest()
-            if item is not None:
-                return self._hand_out(item)
-            try:
-                await asyncio.wait_for(self._wake.wait(), remaining)
-            except asyncio.TimeoutError:
-                return None
+        poll_slice = 0.5 if is_disconnected is not None else POLL_WAIT_S
+        handed_id: str | None = None
+        try:
+            while True:
+                if self._closed:
+                    return None
+                if is_disconnected is not None and await is_disconnected():
+                    return None
+                item = self._oldest()
+                if item is not None:
+                    result = self._hand_out(item)
+                    handed_id = item.id
+                    if is_disconnected is not None and await is_disconnected():
+                        self.release(item.id)
+                        handed_id = None
+                        return None
+                    self.note_shell()
+                    handed_id = None
+                    return result
+                remaining = deadline - loop.time()
+                if remaining <= 0:
+                    if is_disconnected is None or not await is_disconnected():
+                        self.note_shell()
+                    return None
+                # Cleared *before* the re-check, never after: a question asked
+                # between the check and the clear would set the event, the wait
+                # would consume the set, and the question would sit until the next
+                # poll expired — the lost-wakeup that makes a bridge look broken
+                # for exactly one poll interval.
+                self._wake.clear()
+                item = self._oldest()
+                if item is not None:
+                    result = self._hand_out(item)
+                    handed_id = item.id
+                    if is_disconnected is not None and await is_disconnected():
+                        self.release(item.id)
+                        handed_id = None
+                        return None
+                    self.note_shell()
+                    handed_id = None
+                    return result
+                step = min(remaining, poll_slice)
+                try:
+                    await asyncio.wait_for(self._wake.wait(), step)
+                except asyncio.TimeoutError:
+                    if is_disconnected is not None and await is_disconnected():
+                        return None
+                    self.note_shell()
+                    if deadline - loop.time() <= 0:
+                        return None
+        except BaseException:
+            if handed_id is not None:
+                self._handed.discard(handed_id)
+            if self._oldest() is not None:
+                self._wake.set()
+            raise
 
     def answer(self, request_id: str, ok: bool, payload: Any) -> bool:
         """Land an answer on a waiting question. False if it is not waiting.

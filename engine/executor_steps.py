@@ -1264,7 +1264,8 @@ class _Steps(_Design):
                         withdrawn = still_approved()
                         if withdrawn:
                             raise RunWithdrawn(withdrawn)
-                    result = await asyncio.to_thread(
+                    result = await self._to_thread_drain(
+                        goal_id,
                         self.sandbox.run_command, ws.root_path, proposed, timeout_s=timeout_s,
                         cancel=self.cancel_signal(goal_id),
                         network=self.goals.get(goal_id).allow_network or self._sandbox_network(),
@@ -1448,6 +1449,7 @@ class _Steps(_Design):
         if self._review_deep():
             base_prompt += await self._review_lenses(goal_id, step, diffs, ws_root)
         commands_left = MAX_CRITIC_COMMANDS
+        inspections: list[str] = []
         prompt = base_prompt
 
         def accept(reply: Any) -> None:
@@ -1483,7 +1485,8 @@ class _Steps(_Design):
                     # Same shared-sandbox rule as the verifier: serialized so a
                     # concurrent step's writes cannot move under a read-only probe.
                     async with self.sandbox_lock(ws_root):
-                        result = await asyncio.to_thread(
+                        result = await self._to_thread_drain(
+                            goal_id,
                             self.sandbox.run_command,
                             ws_root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
                             cancel=self.cancel_signal(goal_id), network=False,
@@ -1512,7 +1515,12 @@ class _Steps(_Design):
                     if commands_left > 0
                     else "That was your last allowed command — give your decision now."
                 )
-                prompt = f"{base_prompt}\n\n--- Your requested inspection round ---\n{output}\n\nNow give your decision. {tail}"
+                inspections.append(f"Round {len(inspections) + 1} (`{' '.join(argv)}`):\n{output}")
+                joined = "\n\n".join(inspections)
+                prompt = (
+                    f"{base_prompt}\n\n--- Your requested inspection rounds ---\n"
+                    f"{joined}\n\nNow give your decision. {tail}"
+                )
                 continue
             if decision == "approve":
                 # An approval supersedes the notes of an earlier rejection: they were acted on, and a run
@@ -1750,8 +1758,16 @@ class _Steps(_Design):
         # would otherwise interleave their staged paths.
         paths = list(dict.fromkeys(d["path"] for d in diffs))
         async with self._git_lock:
-            commit_hash, refused = await asyncio.to_thread(
+            if self._cancelled(goal_id):
+                self._log(
+                    goal_id, step.id, "info",
+                    f"{self._why_stopped(goal_id)} — skipping the commit for this step",
+                )
+                return "cancelled"
+            commit_hash, refused = await self._to_thread_drain(
+                goal_id,
                 self.git.commit_with_reason, root_path, commit_message, paths,
+                cancel=self.cancel_signal(goal_id),
             )
         if commit_hash:
             self._set_step(goal_id, step, "IN_PROGRESS", commit_message=commit_message)

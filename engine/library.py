@@ -676,12 +676,14 @@ class LibraryService:
         if regex:
             return self._search_regex(needle, glob, cancel)
         if mode == "keyword":
-            return self._search_keyword(needle, glob)
+            return self._search_keyword(needle, glob, cancel)
         if mode is not None:
             raise ValueError(f"unknown search mode: {mode!r}")
-        return self._search_substring(needle, glob)
+        return self._search_substring(needle, glob, cancel)
 
-    def _search_substring(self, needle: str, glob: str | None) -> dict[str, Any]:
+    def _search_substring(
+        self, needle: str, glob: str | None, cancel: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """Literal case-insensitive substring: the original search, unchanged.
 
         Its result shape is load-bearing — the evidence checker reads
@@ -701,11 +703,19 @@ class LibraryService:
         root = Path(self.root).resolve()
 
         for dirpath, dirnames, filenames in os.walk(self.root):
+            if cancel is not None and cancel.is_set():
+                truncated = True
+                stopped = "cancelled"
+                break
             dirnames[:] = _walkable(dirnames, pruned)
             odd_names += sum(not is_text_name(d) for d in dirnames)
             dirnames[:] = [d for d in dirnames if is_text_name(d)]
             dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
             for name in sorted(filenames):
+                if cancel is not None and cancel.is_set():
+                    truncated = True
+                    stopped = "cancelled"
+                    break
                 if not is_text_name(name):
                     odd_names += 1
                     continue
@@ -773,7 +783,9 @@ class LibraryService:
             result["byte_capped"] = byte_capped
         return result
 
-    def _search_keyword(self, query: str, glob: str | None) -> dict[str, Any]:
+    def _search_keyword(
+        self, query: str, glob: str | None, cancel: threading.Event | None = None,
+    ) -> dict[str, Any]:
         """BM25-ranked keyword search over an in-memory FTS5 index.
 
         One walk under the same caps as the substring strategy, each scanned
@@ -792,7 +804,7 @@ class LibraryService:
         import sqlite3 as _sqlite3
 
         if not fts5_available():
-            result = self._search_substring(query, glob)
+            result = self._search_substring(query, glob, cancel)
             result["strategy"] = "substring_fallback"
             result["fts5"] = False
             return result
@@ -807,11 +819,19 @@ class LibraryService:
         stopped = ""
         root = Path(self.root).resolve()
         for dirpath, dirnames, filenames in os.walk(self.root):
+            if cancel is not None and cancel.is_set():
+                truncated = True
+                stopped = "cancelled"
+                break
             dirnames[:] = _walkable(dirnames, pruned)
             odd_names += sum(not is_text_name(d) for d in dirnames)
             dirnames[:] = [d for d in dirnames if is_text_name(d)]
             dirnames[:] = [d for d in dirnames if not _is_outside_symlink(root, Path(dirpath) / d)]
             for name in sorted(filenames):
+                if cancel is not None and cancel.is_set():
+                    truncated = True
+                    stopped = "cancelled"
+                    break
                 if not is_text_name(name):
                     odd_names += 1
                     continue
@@ -950,20 +970,21 @@ class LibraryService:
 
     # ── commands (through the one allowlist) ──────────────────────────────
 
-    def git(self, args: list[str]) -> dict[str, Any]:
+    def git(self, args: list[str], *, cancel: threading.Event | None = None) -> dict[str, Any]:
         """Read-only git: history, diffs, blame. Writes are refused by the sandbox."""
-        return self._command(["git", *[str(a) for a in args]])
+        return self._command(["git", *[str(a) for a in args]], cancel=cancel)
 
-    def run(self, argv: list[str]) -> dict[str, Any]:
+    def run(self, argv: list[str], *, cancel: threading.Event | None = None) -> dict[str, Any]:
         """A read-only inspect command (ls, wc, read-only git)."""
-        return self._command([str(a) for a in argv])
+        return self._command([str(a) for a in argv], cancel=cancel)
 
-    def _command(self, argv: list[str]) -> dict[str, Any]:
+    def _command(self, argv: list[str], *, cancel: threading.Event | None = None) -> dict[str, Any]:
         # Raises CommandNotAllowed; the caller records the refusal and moves on
         # rather than failing the goal, exactly like the verifier's refusals.
         sandbox = self._sandbox if self._sandbox is not None else SandboxService(settings=self.settings)
         return sandbox.run_command(
-            self.root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only", network=False,
+            self.root, argv, timeout_s=READ_ONLY_TIMEOUT_S, mode="read_only",
+            cancel=cancel, network=False,
         )
 
 

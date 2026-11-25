@@ -540,6 +540,9 @@ class Conductor:
         self.ended: EndTurn | None = None
         # (kept, asked for) when the last reply asked for more calls than `MAX_CALLS_PER_REPLY`, until `run` has said so.
         self._dropped_calls: tuple[int, int] | None = None
+        # Set when `_swap_to_fallback` moves mid-loop onto a different provider protocol (e.g. OpenAI -> Anthropic
+        # or Google), so `_call` omits `thinking_effort` if prior tool turns lack that protocol's reasoning/signature.
+        self._swapped_protocol: bool = False
 
     def _swap_to_fallback(self, exc: ProviderError) -> bool:
         """Move the loop onto its fallback target, once. True when it moved.
@@ -550,12 +553,36 @@ class Conductor:
         """
         if self._fallback is None:
             return False
+        prev_provider = self.provider
         provider, model = self._fallback
         self._fallback = None
+        if type(prev_provider) is not type(provider):
+            self._swapped_protocol = True
         self.provider, self.model = provider, model
         if self.on_fallback is not None:
             self.on_fallback(exc, provider, model)
         return True
+
+    def _effective_thinking_effort(self, messages: list[dict[str, Any]]) -> str | None:
+        """Thinking effort for the current call, disabled on cross-provider fallback with incompatible history."""
+        effort = self.thinking_effort
+        if not effort or not self._swapped_protocol:
+            return effort
+        from engine.providers import AnthropicProvider, GoogleProvider
+
+        if isinstance(self.provider, AnthropicProvider) and any(
+            m.get("role") == "assistant" and m.get("tool_calls") and not m.get("reasoning")
+            for m in messages
+        ):
+            return None
+        if isinstance(self.provider, GoogleProvider) and any(
+            m.get("role") == "assistant"
+            and m.get("tool_calls")
+            and not any(getattr(tc, "signature", None) for tc in m["tool_calls"])
+            for m in messages
+        ):
+            return None
+        return effort
 
     async def _call(self, messages: list[dict[str, Any]]) -> ToolReply:
         """One model call, on the fallback target if the primary cannot serve it.
@@ -573,7 +600,8 @@ class Conductor:
         than be run a second time somewhere it might succeed by luck.
         """
         while True:
-            max_tokens = CALL_MAX_TOKENS + thinking_headroom(self.thinking_effort)
+            effort = self._effective_thinking_effort(messages)
+            max_tokens = CALL_MAX_TOKENS + thinking_headroom(effort)
             books = (
                 self._ledger.open(ToolCallRequest(
                     self.provider, self.model, self.system_prompt, messages,
@@ -591,7 +619,7 @@ class Conductor:
                     # field for it acts on this (Anthropic's `cache_control`); every other provider ignores it,
                     # and a one-shot role call never asks.
                     cache_prefix=True,
-                    **({"thinking_effort": self.thinking_effort} if self.thinking_effort else {}),
+                    **({"thinking_effort": effort} if effort else {}),
                 )
             except ProviderError as exc:
                 if books is not None:

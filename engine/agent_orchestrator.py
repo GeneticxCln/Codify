@@ -693,7 +693,11 @@ class AgentOrchestrator:
             self._trace_call(goal_id, step_id, role, target, model_name, system, user_prompt, raw, books)
             if raw_output:
                 return raw
-            expect = REPLY_KEYS.get(role, ())
+            if custom_system or not isinstance(json_schema, _UnsetType):
+                props = effective_schema.get("properties") if isinstance(effective_schema, dict) else None
+                expect: tuple[str, ...] = tuple(str(k) for k in props) if isinstance(props, dict) else ()
+            else:
+                expect = REPLY_KEYS.get(role, ())
             tolerate_cut = role in REPLY_TOLERATES_TRUNCATION
             what = "non-JSON output"
             try:

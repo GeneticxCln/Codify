@@ -583,14 +583,32 @@ class _PerThreadConnection(sqlite3.Connection):
         else:
             self._other_thread_connection().rollback()
 
+    def __enter__(self) -> _PerThreadConnection:
+        if self._created_here():
+            super().__enter__()
+        else:
+            self._other_thread_connection().__enter__()
+        return self
+
+    def __exit__(self, exc_type: Any, exc_val: Any, exc_tb: Any) -> Any:
+        if self._created_here():
+            return super().__exit__(exc_type, exc_val, exc_tb)
+        return self._other_thread_connection().__exit__(exc_type, exc_val, exc_tb)
+
     def close(self) -> None:
         with self._opened_lock:
             self._closed = True
             opened = [conn for _thread, conn in self._opened.values()]
             self._opened.clear()
         for connection in opened:
-            connection.close()
-        super().close()
+            try:
+                connection.close()
+            except Exception:
+                pass
+        try:
+            super().close()
+        except Exception:
+            pass
 
     def events_for_goals(
         self,

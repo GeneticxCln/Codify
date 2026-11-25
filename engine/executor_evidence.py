@@ -5,7 +5,7 @@ The second layer of `ExecutorService` (see `engine/executor.py`); it calls only 
 
 from __future__ import annotations
 
-import asyncio
+import inspect
 from pathlib import Path
 from typing import Any
 
@@ -22,6 +22,16 @@ from engine.library import (
 from engine.models import Goal
 from engine.sandbox import CommandNotAllowed
 from engine.executor_core import _ExecutorCore
+
+
+def _accepts_cancel(fn: Any) -> bool:
+    try:
+        sig = inspect.signature(fn)
+    except (TypeError, ValueError):
+        return False
+    return "cancel" in sig.parameters or any(
+        p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+    )
 
 
 # Reconnaissance bounds. The librarian answers in rounds: it asks for material,
@@ -145,11 +155,13 @@ class _Evidence(_ExecutorCore):
         rounds_used = 0
         capped = False
         for round_no in range(1, MAX_LIBRARY_ROUNDS + 1):
+            if self._is_cancelled(goal_id):
+                break
             rounds_used = round_no
             out = await self.orchestrator.run_agent("librarian", goal_id, None, prompt)
             last = out if isinstance(out, dict) else {}
             requests = self._library_requests(last)
-            if last.get("enough") is True or not requests:
+            if last.get("enough") is True or not requests or self._is_cancelled(goal_id):
                 break
             if round_no == MAX_LIBRARY_ROUNDS:
                 self._log(
@@ -255,7 +267,10 @@ class _Evidence(_ExecutorCore):
         refused = 0
         budget = MAX_ROUND_CHARS
 
+        cancel = self.cancel_signal(goal_id)
         for kind, item in requests:
+            if cancel.is_set():
+                break
             if budget <= 0:
                 chunks.append("… (this round's material budget is spent — ask again next round)")
                 break
@@ -276,20 +291,25 @@ class _Evidence(_ExecutorCore):
                     text = format_read(res)
                 elif kind == "searches" and isinstance(item, dict):
                     # Structured search: {query, regex, glob}.
-                    res = await asyncio.to_thread(
-                        lib.search, item["query"],
-                        glob=item.get("glob"), regex=bool(item.get("regex")),
-                    )
+                    search_kw: dict[str, Any] = {
+                        "glob": item.get("glob"),
+                        "regex": bool(item.get("regex")),
+                    }
+                    if _accepts_cancel(lib.search):
+                        search_kw["cancel"] = cancel
+                    res = await self._to_thread_drain(goal_id, lib.search, item["query"], **search_kw)
                     matched.update(m["path"] for m in res["matches"])
                     text = format_search(res)
                 elif kind == "searches":
-                    res = await asyncio.to_thread(lib.search, label)
+                    search_kw = {"cancel": cancel} if _accepts_cancel(lib.search) else {}
+                    res = await self._to_thread_drain(goal_id, lib.search, label, **search_kw)
                     matched.update(m["path"] for m in res["matches"])
                     text = format_search(res)
                 else:
                     args = [str(a) for a in item] if isinstance(item, list) else [str(item)]
                     run = lib.git if kind == "git" else lib.run
-                    res = await asyncio.to_thread(run, args)
+                    run_kw: dict[str, Any] = {"cancel": cancel} if _accepts_cancel(run) else {}
+                    res = await self._to_thread_drain(goal_id, run, args, **run_kw)
                     text = format_command(res)
             except (PathEscapeError, CommandNotAllowed) as exc:
                 refused += 1

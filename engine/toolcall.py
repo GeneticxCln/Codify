@@ -172,6 +172,8 @@ def _schema_problems(schema: Any, path: str, upper: bool) -> list[str]:
         if not isinstance(properties, dict):
             problems.append(f"{path}: properties must be an object")
             properties = {}
+        if upper and path != "parameters" and not properties:
+            problems.append(f"{path}: Google rejects an OBJECT schema with empty properties")
         for key, spec in properties.items():
             problems.extend(_schema_problems(spec, f"{path}.{key}", upper))
         required = schema.get("required", [])
@@ -467,17 +469,27 @@ def _google_schema(schema: dict[str, Any]) -> dict[str, Any]:
         out["items"] = _google_schema(items) if isinstance(items, dict) else {"type": "STRING"}
     if json_type == "object":
         properties = schema.get("properties")
-        if isinstance(properties, dict):
-            google_props = {
+        google_props = (
+            {
                 key: _google_schema(spec)
                 for key, spec in properties.items()
                 if isinstance(spec, dict)
             }
-            if google_props:
-                out["properties"] = google_props
-                required = schema.get("required")
-                if isinstance(required, list):
-                    out["required"] = [key for key in required if key in google_props]
+            if isinstance(properties, dict)
+            else {}
+        )
+        if google_props:
+            out["properties"] = google_props
+            required = schema.get("required")
+            if isinstance(required, list):
+                out["required"] = [key for key in required if key in google_props]
+        else:
+            # Gemini v1beta rejects nested OBJECT schemas without non-empty `properties` (HTTP 400).
+            # Encode free-form objects (such as CALL_MCP's `arguments`) as a JSON STRING; `coerce_arguments`
+            # parses JSON object strings back into dicts whenever the source ToolSpec declares `type: "object"`.
+            out["type"] = "STRING"
+            desc = out.get("description", "")
+            out["description"] = f"{desc} (JSON object string)".strip() if desc else "JSON object string"
     return out
 
 

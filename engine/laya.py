@@ -298,8 +298,10 @@ def evaluate_policy(answers: dict[str, Any]) -> tuple[bool, str | None, list[str
 
 
 def _extract_json(raw: str) -> dict[str, Any]:
-    """Pull the first JSON object out of a model reply (fences/prose tolerated)."""
-    text = raw.strip()
+    """Pull the first JSON object out of a model reply (reasoning tags/fences/prose tolerated)."""
+    text = re.sub(
+        r"<(think|thinking|reasoning)\b[^>]*>.*?</\1>", "", raw, flags=re.IGNORECASE | re.DOTALL,
+    ).strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?\s*|\s*```$", "", text, flags=re.MULTILINE).strip()
     try:
