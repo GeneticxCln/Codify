@@ -59,14 +59,23 @@ async function withPane(
 
 const ON_TOXIC_LAB = { "codify.theme": "toxic-lab" };
 
+/** Open a themed ColorPicker swatch and enter a hex colour inside its dialog. */
+async function pickColour(dom: Dom, roleLabel: string, hex: string): Promise<void> {
+  const trigger = dom.byLabel(`${roleLabel} colour`);
+  if (trigger.getAttribute("aria-expanded") !== "true") {
+    await dom.click(trigger);
+  }
+  const input = dom.byLabel(`${roleLabel} hex value`) as HTMLInputElement;
+  await dom.fill(input, hex);
+}
+
 // ─────────────────────────────────────────────────────────────────────────────
 // The colour wells
 // ─────────────────────────────────────────────────────────────────────────────
 
 test("dragging a colour well records the colour, on screen and in storage", async () => {
   await withPane(ON_TOXIC_LAB, async (dom) => {
-    const well = dom.byLabel("Bubble body colour") as HTMLInputElement;
-    await dom.fill(well, "#8b1e2d");
+    await pickColour(dom, "Bubble body", "#8b1e2d");
 
     // Three places, because the failure this replaces was a control that
     // rendered perfectly and reached none of them.
@@ -91,7 +100,7 @@ test("a pick is guarded on the way in, not stored raw", async () => {
   // checked the storage value would pass with the guard removed, and a user
   // would get a transcript they cannot read.
   await withPane(ON_TOXIC_LAB, async (dom) => {
-    await dom.fill(dom.byLabel("Bubble body colour") as HTMLInputElement, "#8b1e2d");
+    await pickColour(dom, "Bubble body", "#8b1e2d");
     assert.equal(store()["toxic-lab"]?.["--reagent"], "#8b1e2d", "the proposal was resolved on the way in");
     assert.notEqual(
       wearing("--reagent"),
@@ -103,8 +112,8 @@ test("a pick is guarded on the way in, not stored raw", async () => {
 
 test("per-row Reset takes one colour back and leaves the others", async () => {
   await withPane(ON_TOXIC_LAB, async (dom) => {
-    await dom.fill(dom.byLabel("Bubble body colour") as HTMLInputElement, "#8b1e2d");
-    await dom.fill(dom.byLabel("Interface accent colour") as HTMLInputElement, "#ff9f43");
+    await pickColour(dom, "Bubble body", "#8b1e2d");
+    await pickColour(dom, "Interface accent", "#ff9f43");
     assert.equal(Object.keys(store()["toxic-lab"] ?? {}).length, 2);
 
     await dom.click(dom.byLabel("Reset Bubble body"));
@@ -128,7 +137,7 @@ test("Undo appears after a pick, names it, and puts it back", async () => {
       "Undo is offered before anything has happened",
     );
 
-    await dom.fill(dom.byLabel("Bubble body colour") as HTMLInputElement, "#8b1e2d");
+    await pickColour(dom, "Bubble body", "#8b1e2d");
     const undo = dom.byLabel("Undo Bubble body on Toxic Lab");
     assert.equal(undo.hasAttribute("disabled"), false, "Undo is still disabled after a pick");
 
@@ -147,9 +156,10 @@ test("a burst of picks from one drag is a single Undo, and it goes all the way b
   // drag fires a change event per step, and an Undo that took one step back per
   // event would leave the colour almost where it was.
   await withPane(ON_TOXIC_LAB, async (dom) => {
-    const well = dom.byLabel("Bubble body colour") as HTMLInputElement;
+    await dom.click(dom.byLabel("Bubble body colour"));
+    const hexInput = dom.byLabel("Bubble body hex value") as HTMLInputElement;
     for (let i = 0; i < 30; i++) {
-      await dom.fill(well, `#${i.toString(16).padStart(2, "0")}3080`);
+      await dom.fill(hexInput, `#${i.toString(16).padStart(2, "0")}3080`);
     }
     // By label, not by text: the button's *visible* text is "Undo", and its name
     // is the `aria-label`. Reading `dom.text()` for this is the exact mistake
@@ -167,7 +177,7 @@ test("a burst of picks from one drag is a single Undo, and it goes all the way b
 
 test("an import is one Undo, and undoing it puts every theme back", async () => {
   await withPane(ON_TOXIC_LAB, async (dom) => {
-    await dom.fill(dom.byLabel("Bubble body colour") as HTMLInputElement, "#8b1e2d");
+    await pickColour(dom, "Bubble body", "#8b1e2d");
     const before = JSON.stringify(store());
 
     await dom.click(dom.byLabel("Import…"));
@@ -280,7 +290,7 @@ test("choosing the same file twice applies it twice, not once and then silently 
 
 test("a file that is not a scheme says so, and changes nothing", async () => {
   await withPane(ON_TOXIC_LAB, async (dom) => {
-    await dom.fill(dom.byLabel("Bubble body colour") as HTMLInputElement, "#8b1e2d");
+    await pickColour(dom, "Bubble body", "#8b1e2d");
     const before = JSON.stringify(store());
 
     await dom.click(dom.byLabel("Import…"));

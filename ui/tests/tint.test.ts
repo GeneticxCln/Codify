@@ -630,17 +630,17 @@ test("the picker is on screen for the theme you are wearing, and only that one",
   localStorage.setItem("codify.theme", "toxic-lab");
   const out = pane();
   assert.match(out, /Custom colours/, "the active theme has no picker");
-  const wells = out.match(/type="color"/g) ?? [];
+  const wells = out.match(/data-color-well="true"/g) ?? [];
   assert.equal(
     wells.length,
     tintableVars(themeById("toxic-lab")).length,
     "the picker did not offer one well per tintable variable",
   );
 
-  // Every well is a bare input, so every one needs an accessible name; an
-  // unnamed colour well is a control a screen reader announces as "colour
-  // picker" with nothing said about what it colours.
-  for (const match of out.matchAll(/<input[^>]*type="color"[^>]*>/g)) {
+  // Every well is a swatch button, so every one needs an accessible name; an
+  // unnamed colour well is a control a screen reader announces with nothing
+  // said about what it colours.
+  for (const match of out.matchAll(/<button[^>]*data-color-well="true"[^>]*>/g)) {
     assert.match(
       match[0],
       /aria-label="[^"]+"/,
@@ -750,7 +750,7 @@ test("a theme with no weather offers its accent alone, and nothing to reset", ()
   localStorage.setItem("codify.theme", "codify-dark");
   const out = pane();
   assert.equal(
-    (out.match(/type="color"/g) ?? []).length,
+    (out.match(/data-color-well="true"/g) ?? []).length,
     1,
     "codify-dark publishes no weather, so it should offer exactly its accent",
   );

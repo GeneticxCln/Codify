@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from "react";
 import { Check, ClipboardPaste, Copy, FileDown, FileUp, Palette, RotateCcw, Undo2 } from "lucide-react";
 import { Checkbox } from "./ui/Checkbox";
+import { ColorPicker } from "./ColorPicker";
 import { Panel } from "./ui/Panel";
 import { UiScalePanel } from "./UiScalePanel";
 import { MatrixRain } from "./ui/MatrixRain";
@@ -689,13 +690,10 @@ const TintRow: React.FC<{
   const label = TINT_ROLES[name] ?? name.replace(/^--/, "");
   return (
     <li className="flex items-center gap-2">
-      <input
-        type="color"
-        aria-label={`${label} colour`}
-        title={`${label} — ${shown}`}
+      <ColorPicker
+        label={label}
         value={shown}
-        onChange={(event) => onPick(name, event.target.value)}
-        className="w-7 h-7 rounded-sm border border-codify-border bg-transparent p-0 cursor-pointer shrink-0"
+        onChange={(hex) => onPick(name, hex)}
       />
       <span className="min-w-0 flex-1">
         <span className="block text-2xs text-codify-secondary truncate">{label}</span>
@@ -880,7 +878,7 @@ const SchemeBar: React.FC<{
           </h4>
           <p className="text-2xs text-codify-muted mt-0.5 leading-relaxed">
             {empty
-              ? "Nothing customised yet — pick a colour below and it turns up here."
+              ? "Nothing customised yet — pick a colour above and it turns up here."
               : `One file with ${scheme.themes.length} tinted theme${
                   scheme.themes.length === 1 ? "" : "s"
                 }: ${scheme.themes.map((t) => t.label).join(", ")}.`}

@@ -299,3 +299,17 @@ test("no component renders a native select: its list cannot follow the theme", (
       "`SelectMenu` from components/SelectMenu.tsx, which draws its list from `--codify-*` tokens.",
   );
 });
+
+test("no component renders a native colour input: its GTK dialog cannot follow the theme", () => {
+  // WebKitGTK delegates `<input type="color">` to GTK3's GtkColorChooserDialog, which renders
+  // blank/broken on dark Wayland sessions and ignores `--codify-*` tokens.
+  const offenders = tsxFiles(SRC)
+    .filter((file) => /type="color"/.test(readFileSync(file, "utf8")))
+    .map((file) => file.slice(SRC.length + 1));
+  assert.deepEqual(
+    offenders,
+    [],
+    "a native `<input type=\"color\">` is back. Use `ColorPicker` from components/ColorPicker.tsx, " +
+      "which draws its popover from `--codify-*` tokens.",
+  );
+});
