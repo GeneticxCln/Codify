@@ -1718,6 +1718,7 @@ ENV_KEY_MAP: dict[str, list[str]] = {
     "openrouter": ["OPENROUTER_API_KEY"],
     "groq": ["GROQ_API_KEY"],
     "opencode": ["OPENCODE_API_KEY"],
+    "kilo": ["KILO_API_KEY", "KILOCODE_API_KEY"],
 }
 
 

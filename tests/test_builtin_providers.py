@@ -153,5 +153,21 @@ class OpenCodeProvider(unittest.TestCase):
         self.assertEqual(ENV_KEY_MAP["opencode"], ["OPENCODE_API_KEY"])
 
 
+class KiloGatewayProvider(unittest.TestCase):
+    """Kilo Code's hosted AI Gateway: OpenAI-compatible multi-vendor endpoint."""
+
+    def test_kilo_is_a_builtin_openai_compatible_provider_that_needs_a_key(self) -> None:
+        meta = BUILTIN_PROVIDERS["kilo"]
+        self.assertEqual(meta["protocol"], "openai_compat")
+        self.assertEqual(meta["base_url"], "https://ai-gateway.kilo.ai/api/v1")
+        self.assertTrue(meta["needs_key"])
+        self.assertFalse(meta["local_only"])
+
+    def test_its_key_can_come_from_kilo_env_vars(self) -> None:
+        from engine.providers import ENV_KEY_MAP
+
+        self.assertEqual(ENV_KEY_MAP["kilo"], ["KILO_API_KEY", "KILOCODE_API_KEY"])
+
+
 if __name__ == "__main__":
     unittest.main()

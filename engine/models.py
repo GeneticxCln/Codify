@@ -224,6 +224,15 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_key": True,
         "local_only": False,
     },
+    # Kilo Code's hosted AI Gateway: one key, hundreds of models across providers.
+    # Speaks standard OpenAI-compatible `/models` (with `context_length` and
+    # `supported_parameters`) and `/chat/completions`.
+    "kilo": {
+        "protocol": "openai_compat",
+        "base_url": "https://ai-gateway.kilo.ai/api/v1",
+        "needs_key": True,
+        "local_only": False,
+    },
 }
 
 

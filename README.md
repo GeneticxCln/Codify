@@ -52,8 +52,8 @@ committed on its own with only the files it wrote, and every stage streams live 
 - **Scoped commits.** A step commits *only* the paths it wrote. The engine never runs a bare `git add -A`.
 - **Local-first.** The engine binds `127.0.0.1` behind a boot token, and API keys never reach SQLite or an API
   response. Run it on a local model, or point any role at a hosted one.
-- **Your models, discovered live.** Nine providers are built in (Anthropic, OpenAI, Google, DeepSeek, OpenRouter,
-  Groq, NVIDIA, OpenCode and Ollama), any OpenAI-compatible or Ollama-style endpoint can be added, and Codify ships no model list.
+- **Your models, discovered live.** Ten providers are built in (Anthropic, OpenAI, Google, DeepSeek, OpenRouter,
+  Groq, NVIDIA, OpenCode, Kilo Gateway and Ollama), any OpenAI-compatible or Ollama-style endpoint can be added, and Codify ships no model list.
 - **Nineteen themes**, shown in the [slideshow below](#-appearance) and swapped at runtime with no rebuild.
 
 Everything below is specified in [`docs/`](docs/00-codify-architecture-overview.md). That set is the source of

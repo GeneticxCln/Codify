@@ -7,7 +7,7 @@ Provider wire formats: `04`.
 
 `BUILTIN_PROVIDERS` (`engine/models.py`) is the one place the *provider* list is
 defined, and it is served verbatim by `GET /settings/providers`: `anthropic`,
-`openai`, `deepseek`, `ollama`, `google`, `openrouter`, `groq`, `nvidia`, `opencode`. That
+`openai`, `deepseek`, `ollama`, `google`, `openrouter`, `groq`, `nvidia`, `opencode`, `kilo`. That
 table holds endpoints and dialects, never models — a provider entry says which
 URL to call and which wire format to speak, and nothing about what is behind it.
 
@@ -30,7 +30,7 @@ Two design consequences follow:
 | Protocol | Endpoint | Credential | Notes |
 |---|---|---|---|
 | `ollama` | `GET {base}/api/tags`, then `POST {base}/api/show` per model for its window (§2.1) | none | reports size/parameter count; **no capability metadata** |
-| `openai_compat` | `GET {base}/models` | `Authorization: Bearer <key>` | OpenAI, DeepSeek, Groq, OpenRouter, OpenCode, any compatible endpoint; a row's `api` map, where it has one, sets `supports_chat` (rule 2) |
+| `openai_compat` | `GET {base}/models` | `Authorization: Bearer <key>` | OpenAI, DeepSeek, Groq, OpenRouter, OpenCode, Kilo Gateway, any compatible endpoint; a row's `api` map, where it has one, sets `supports_chat` (rule 2) |
 | `anthropic` | `GET {base}/v1/models?limit=…` | `x-api-key` + `anthropic-version` | uses `display_name`; the default page size is small, so `limit` is set explicitly |
 | `google` | `GET {base}/models?key=…` | query key | follows `nextPageToken` (≤5 pages) and **strips the `models/` resource prefix** |
 
