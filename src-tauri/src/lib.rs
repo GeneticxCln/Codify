@@ -497,15 +497,17 @@ pub mod render_watchdog {
     /// per core-second (`CLK_TCK` on Linux). The reading can cover more than one
     /// thread, so a fraction over one core is possible and is not clamped here.
     pub const SAMPLE_TICKS: u64 = 100;
-    /// How much of a core, held across the window, is starvation: ~0.35. It
-    /// used to be 0.55, and that missed the measured shape of this app: the
-    /// wordmark's text-clipped gradient holds ~45% of a core on a
-    /// software-composited window, which is already losing input, and the
-    /// watchdog never fired — so the sweep the page could have stopped kept
-    /// running and the banner never appeared. A third of a core is the point at
-    /// which a decoration is no longer free; below it a busy repaint is
-    /// uncomfortable but the main loop still has most of its time.
-    pub const STARVE_NUMERATOR: u64 = 35;
+    /// How much of a core, held by either the shell main thread or the main
+    /// window's WebKit web process across the window, is starvation: 65%.
+    ///
+    /// It used to be 35% to catch an older text-clipped wordmark gradient
+    /// (~45% on software compositing), which has since been moved to a
+    /// once-after-watchdog composited transform. On GPU-composited maximised
+    /// 4K/HiDPI Wayland windows, normal smooth 30–60 FPS compositing can sit
+    /// around 20–45% with plenty of input headroom, whereas genuine software
+    /// compositing saturates either the GTK main thread (~85–100%) or the
+    /// WebKit web process (~98% under `WEBKIT_DISABLE_DMABUF_RENDERER=1`).
+    pub const STARVE_NUMERATOR: u64 = 65;
     /// The burn must be sustained, but software rasterisation arrives in
     /// *bursts* — measured on the machine that froze, the render work alternated
     /// ~3 s at ~90% of a core with ~3 s at ~34%, so a consecutive-streak rule
@@ -570,6 +572,25 @@ pub mod render_watchdog {
         }
     }
 
+    /// Judge one interval across the shell main thread and the WebKit web
+    /// process separately, taking the hotter of the two.
+    ///
+    /// The UI process and web process run in parallel on separate CPU cores, so
+    /// 20% in each is 20% per core (80% idle), not 40% starving input. Genuine
+    /// software rasterisation saturates one of them (~85–100% in the shell main
+    /// thread or ~98% in the web process), which this catches without false
+    /// alarms on GPU-composited HiDPI windows.
+    pub fn sample_processes(
+        prev_shell: u64,
+        now_shell: u64,
+        prev_web: u64,
+        now_web: u64,
+    ) -> Sample {
+        let shell_delta = now_shell.saturating_sub(prev_shell);
+        let web_delta = now_web.saturating_sub(prev_web);
+        sample(0, shell_delta.max(web_delta))
+    }
+
     /// Kernel ticks as milliseconds, for the page's frame probe.
     ///
     /// [`SAMPLE_TICKS`] is 100 per second, so one tick is 10 ms. Saturating
@@ -627,7 +648,7 @@ fn watch_render_starvation(app: tauri::AppHandle) {
     const WINDOW_SAMPLES: usize = 30;
     tauri::async_runtime::spawn(async move {
         let mut verdict = render_watchdog::Verdict::default();
-        let mut previous: Option<u64> = None;
+        let mut previous: Option<(u64, u64)> = None;
         // The first samples of a boot are the app starting — layout, the mount
         // storm, the engine handshake — and are not evidence of anything. The
         // verdict arms only after this long.
@@ -648,7 +669,7 @@ fn watch_render_starvation(app: tauri::AppHandle) {
             if !quiet {
                 counted += 1;
             }
-            let Some(ticks) = tauri::async_runtime::spawn_blocking(render_cpu_ticks)
+            let Some(ticks) = tauri::async_runtime::spawn_blocking(render_cpu_parts)
                 .await
                 .ok()
                 .flatten()
@@ -673,7 +694,7 @@ fn watch_render_starvation(app: tauri::AppHandle) {
                 .get_window("main")
                 .and_then(|w| w.is_visible().ok())
                 .unwrap_or(true);
-            let read = render_watchdog::sample(prev, ticks);
+            let read = render_watchdog::sample_processes(prev.0, ticks.0, prev.1, ticks.1);
             let hot = visible && read.hot;
             if verdict.observe(hot) {
                 println!(
@@ -864,17 +885,23 @@ fn web_process_cpu_ticks(parent: u32) -> u64 {
     process_cpu_ticks(oldest)
 }
 
+/// Separate CPU ticks for `(shell_main_thread, main_webkit_web_process)`.
+fn render_cpu_parts() -> Option<(u64, u64)> {
+    let shell = main_thread_cpu_ticks()?;
+    let web = web_process_cpu_ticks(std::process::id());
+    Some((shell, web))
+}
+
 /// What this window's rendering costs, in CPU ticks: the shell's main thread
 /// plus the main window's WebKit web process.
 ///
-/// The watchdog and the boot probe both read this, so they cannot disagree
-/// about which process pays. It is deliberately not the whole process tree: the
+/// The boot probe reads this sum so it can budget total decoration CPU across
+/// both render processes. It is deliberately not the whole process tree: the
 /// engine is a child too, and an engine waiting on a provider or hashing a file
 /// is not a decoration starving the window. Browser tabs are children too, and
 /// are not this window's decoration either.
 fn render_cpu_ticks() -> Option<u64> {
-    let shell = main_thread_cpu_ticks()?;
-    let web = web_process_cpu_ticks(std::process::id());
+    let (shell, web) = render_cpu_parts()?;
     Some(shell.saturating_add(web))
 }
 
@@ -3299,18 +3326,42 @@ mod tests {
     }
 
     #[test]
-    fn the_hot_threshold_is_just_over_a_third_of_a_core() {
+    fn the_hot_threshold_is_sustained_core_saturation() {
         // Named numbers, so the calibration is visible in a test rather than
-        // buried in a loop: 34 ticks in a second is busy-but-below, 35 is the
-        // verdict, and a clock (100 ticks) is exactly the edge.
-        assert!(!render_watchdog::sample(0, 34).hot);
-        assert!(render_watchdog::sample(0, 35).hot);
+        // buried in a loop: 64 ticks in a second is busy-but-below, 65 is the
+        // verdict, and a full core (100 ticks) is clearly hot.
+        assert!(!render_watchdog::sample(0, 64).hot);
+        assert!(render_watchdog::sample(0, 65).hot);
         assert!(render_watchdog::sample(0, 100).hot);
         assert_eq!(render_watchdog::sample(0, 100).fraction_x100, 100);
         // And a quiet second is nowhere near it, including after wrap-free
         // subtraction of a larger previous reading (saturating, never negative).
         assert!(!render_watchdog::sample(900, 910).hot);
         assert_eq!(render_watchdog::sample(950, 900).fraction_x100, 0);
+    }
+
+    #[test]
+    fn split_parallel_render_load_is_not_starvation_but_single_process_saturation_is() {
+        // Two independent processes each spending 20-40% on separate cores are
+        // not starving input; summing them used to false-trigger on GPU-composited
+        // 4K/HiDPI Wayland windows.
+        let gpu_hidpi = render_watchdog::sample_processes(100, 122, 200, 222);
+        assert!(!gpu_hidpi.hot);
+        assert_eq!(gpu_hidpi.fraction_x100, 22);
+
+        let busy_parallel = render_watchdog::sample_processes(0, 40, 0, 40);
+        assert!(!busy_parallel.hot);
+        assert_eq!(busy_parallel.fraction_x100, 40);
+
+        // Genuine software compositing saturates either the GTK main thread or
+        // the WebKit web process; both shapes still trigger immediately.
+        let software_gtk = render_watchdog::sample_processes(0, 88, 0, 6);
+        assert!(software_gtk.hot);
+        assert_eq!(software_gtk.fraction_x100, 88);
+
+        let software_webkit = render_watchdog::sample_processes(0, 6, 0, 95);
+        assert!(software_webkit.hot);
+        assert_eq!(software_webkit.fraction_x100, 95);
     }
 
     #[test]

@@ -1032,7 +1032,7 @@ to survive it deliberately:
   pass's per-frame cost twice. **Starved or not** is judged at the 30 FPS base interval
   (`BASE_FPS`) against the whole interval (`FRAME_BUDGET_PERCENT`, 100%: the probe runs during
   boot, and a one-shot false alarm costs the session its backdrop, so it refuses only a frame
-  with no headroom; the watchdog's sustained 35% catches the rest). This paragraph used to say
+  with no headroom; the watchdog's sustained 65% catches the rest). This paragraph used to say
   the probe judged against 35%; the code never did. A starved frame records the same verdict the
   watchdog would have reached, and the loop never arms. **How fast** is the governor
   (`governedFps`): the fastest of 60, 30, 20, 15 and 10 FPS at which the measured frame holds at
@@ -1085,8 +1085,10 @@ to survive it deliberately:
   painting is a rounding error. That is the UI-process shape. On the dma-buf-disabled path
   the shares invert: measured on the same app, the **web process** held ~98% of a core while
   the shell sat at ~6%, and a watchdog that watched only the shell called the window
-  affordable and let the animation run. The reading is therefore the sum, not the shell's
-  own thread, and both shapes cross the same 35% line.
+  affordable and let the animation run. The watchdog therefore monitors both processes and
+  judges the hotter of the two against the same 65% line (so parallel 20–40% GPU compositing
+  across two cores is never misread as single-core starvation, while either software path
+  crosses it immediately).
 
   **The kept rate scales with the window.** "Animate anyway" keeps the backdrop but not the
   rate it was measured at: one composited frame is a full-window blend, so its cost tracks
