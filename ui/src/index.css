@@ -310,6 +310,15 @@ body {
   stroke-width: 1;
 }
 
+.codify-logo-rail {
+  stroke: var(--codify-border-strong);
+  opacity: 0.7;
+}
+
+.codify-logo-dot {
+  fill: var(--codify-accent);
+}
+
 .codify-logo-mark {
   stroke: var(--codify-success);
 }

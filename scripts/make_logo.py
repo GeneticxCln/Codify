@@ -80,10 +80,6 @@ PNG_PATHS = [
 # Geometry is a 24×24 unit grid, scaled to the render size. One scale, so the
 # mark at 32px is the mark at 256px — never a re-layout per size.
 GRID = 24
-# The chevron `>`, as three 2-unit strokes in the left half.
-CHEVRON = [((4, 5), (11, 12)), ((11, 12), (4, 19)), ((4, 5), (4, 19))]
-# The block caret, the thing the animation blinks.
-CARET = (14, 6, 18, 18)
 
 # 160ms per blink step, 550ms on the trailing bright frame: the pacing of a
 # blink, not of a spinner.
@@ -93,40 +89,89 @@ STATIC_PHASE = 9  # not an animation phase — the resting pose for the stills
 
 
 def _draw_frame(size: int, phase: int) -> Image.Image:
-    """One animation frame. `phase` 0/1/2 is the loop; 9 is the static pose."""
+    """One animation frame. `phase` 0/1/2 is the loop; 9 is the static pose.
+
+    Redesigned Codify mark on the 24×24 grid:
+    - Rounded obsidian tile with subtle inner architectural corner brackets
+      and a top-right agent status node.
+    - Bold open terminal chevron (`>`) paired with a crisp horizontal baseline
+      caret (`_`) that blinks solid → hollow → bright streaming white.
+    """
     s = size / GRID
     img = Image.new("RGB", (size, size), BG)
     d = ImageDraw.Draw(img)
 
-    # Frame border: the mark is a control, and controls carry `border`.
-    d.rectangle([0, 0, size - 1, size - 1], outline=BORDER, width=max(1, round(s)))
+    # Outer rounded badge frame (1px border token at 24px scale)
+    pad = max(1, round(0.75 * s))
+    radius = max(3, round(5.5 * s))
+    border_w = max(1, round(1.1 * s))
+    d.rounded_rectangle(
+        [pad, pad, size - 1 - pad, size - 1 - pad],
+        radius=radius,
+        fill=BG,
+        outline=BORDER,
+        width=border_w,
+    )
 
-    def line(p0: tuple[int, int], p1: tuple[int, int]) -> None:
-        d.line(
-            [(round(p0[0] * s), round(p0[1] * s)), (round(p1[0] * s), round(p1[1] * s))],
-            fill=GREEN,
-            width=max(1, round(2 * s)),
-        )
+    # Subtle inner geometric code-bracket rails (top-left & bottom-right),
+    # drawn as crisp rectangles so corner joints have zero miter notch.
+    if size >= 64:
+        rail_w = max(1, round(0.75 * s))
+        # Top-left L-bracket
+        x0, y0 = round(3.4 * s), round(3.4 * s)
+        arm = round(3.4 * s)
+        d.rectangle([x0, y0, x0 + arm, y0 + rail_w], fill=BORDER)
+        d.rectangle([x0, y0, x0 + rail_w, y0 + arm], fill=BORDER)
+        # Bottom-right L-bracket
+        x1, y1 = size - 1 - x0, size - 1 - y0
+        d.rectangle([x1 - arm, y1 - rail_w, x1, y1], fill=BORDER)
+        d.rectangle([x1 - rail_w, y1 - arm, x1, y1], fill=BORDER)
 
-    for p0, p1 in CHEVRON:
-        line(p0, p1)
+    # Bold open chevron `>` with clean bevelled joints (drawn as a filled polygon
+    # so strokes stay razor-sharp with zero jagged Pillow miter artifacts).
+    def pt(x: float, y: float) -> tuple[int, int]:
+        return (round(x * s), round(y * s))
 
-    x0, y0, x1, y1 = CARET
-    box = [round(x0 * s), round(y0 * s), round(x1 * s), round(y1 * s)]
+    # Crisp geometric chevron polygon on the 24×24 grid
+    chevron_poly = [
+        pt(6.2, 7.0),
+        pt(8.3, 7.0),
+        pt(13.2, 12.0),
+        pt(8.3, 17.0),
+        pt(6.2, 17.0),
+        pt(10.8, 12.0),
+    ]
+    d.polygon(chevron_poly, fill=GREEN)
+
+    # Secondary subtle accent echo behind the chevron (multi-agent motif)
+    if size >= 64:
+        echo_poly = [
+            pt(4.5, 9.2),
+            pt(5.8, 9.2),
+            pt(8.4, 12.0),
+            pt(5.8, 14.8),
+            pt(4.5, 14.8),
+            pt(6.9, 12.0),
+        ]
+        d.polygon(echo_poly, fill=BORDER)
+
+    # Agent status spark node in the upper-right inner corner
+    node_r = max(1, round(1.15 * s))
+    nx, ny = pt(18.0, 6.2)
+    node_fill = PRIMARY if phase == 2 else (BORDER if phase == 1 else GREEN)
+    d.ellipse([nx - node_r, ny - node_r, nx + node_r, ny + node_r], fill=node_fill)
+
+    # Baseline terminal caret bar `_` (the animated prompt response)
+    caret_box = [round(13.0 * s), round(14.6 * s), round(19.0 * s), round(17.0 * s)]
+    caret_r = max(1, round(0.9 * s))
     if phase == 0:
-        # The caret, solid — the "ready" frame.
-        d.rectangle(box, fill=GREEN)
+        d.rounded_rectangle(caret_box, radius=caret_r, fill=GREEN)
     elif phase == 1:
-        # Half-blink: the caret hollow, its outline still visible so the loop
-        # reads as a blink rather than a pop.
-        d.rectangle(box, outline=GREEN, width=max(1, round(s)))
+        d.rounded_rectangle(caret_box, radius=caret_r, outline=GREEN, width=max(1, round(0.9 * s)))
     elif phase == 2:
-        # Streaming: the caret in the text tone — the moment the transcript
-        # already shows as `▍`. The static pose is the solid green caret, so a
-        # frozen page still reads as the prompt it is.
-        d.rectangle(box, fill=PRIMARY)
+        d.rounded_rectangle(caret_box, radius=caret_r, fill=PRIMARY)
     else:
-        d.rectangle(box, fill=GREEN)
+        d.rounded_rectangle(caret_box, radius=caret_r, fill=GREEN)
     return img
 
 

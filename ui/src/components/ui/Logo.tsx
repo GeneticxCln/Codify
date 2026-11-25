@@ -67,27 +67,43 @@ export const Logo: React.FC<LogoProps> = ({
           of the surface rather than a sticker on it. `fill` not `background`:
           a background would cover the rounded corners the clip gives. */}
       <rect
-        x="0"
-        y="0"
-        width="24"
-        height="24"
+        x="0.5"
+        y="0.5"
+        width="23"
+        height="23"
         rx="6"
         className="codify-logo-tile"
       />
-      {/* Chevron: the ask. */}
+      {/* Subtle inner multi-agent echo & architectural corner rails */}
       <path
-        d="M7 9.5 L10.5 12 L7 14.5"
+        d="M4.2 6.8 V4.2 H6.8 M19.8 17.2 V19.8 H17.2"
         fill="none"
-        strokeWidth="2"
+        strokeWidth="1.1"
+        strokeLinecap="round"
+        strokeLinejoin="round"
+        className="codify-logo-rail"
+      />
+      {/* Bold open terminal chevron: the ask. */}
+      <path
+        d="M6.8 8 L11.4 12 L6.8 16"
+        fill="none"
+        strokeWidth="2.1"
         strokeLinecap="round"
         strokeLinejoin="round"
         className="codify-logo-mark"
       />
+      {/* Agent status spark node in the upper-right corner. */}
+      <circle
+        cx="17.8"
+        cy="6.4"
+        r="1.25"
+        className="codify-logo-dot"
+      />
       {/* Caret: the answer, and the only part that moves. */}
       <path
-        d="M12.5 15 H17"
+        d="M13 15.8 H18.2"
         fill="none"
-        strokeWidth="2"
+        strokeWidth="2.2"
         strokeLinecap="round"
         className={`codify-logo-mark codify-logo-caret${live ? " codify-logo-caret-live" : ""}`}
       />
