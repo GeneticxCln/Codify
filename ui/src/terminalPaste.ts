@@ -39,10 +39,15 @@ const HAS_NEWLINE = /[\r\n]/;
 // eslint-disable-next-line no-control-regex -- intentionally stripping terminal escape/control sequences from pasted clipboard text
 const UNSAFE_PASTE_CONTROLS = /(?:\x1b\[20[01]~|\x9b20[01]~|[\x00-\x08\x0b\x0c\x0e-\x1f\x7f\x80-\x9f])/g;
 
+/** Strip bracketed-paste breakouts and raw C0/C1 controls other than Tab/LF/CR. */
+export function sanitizeTerminalPaste(text: string): string {
+  return text.replace(UNSAFE_PASTE_CONTROLS, "");
+}
+
 export function pasteInto(surface: PasteSurface, text: string, exited: boolean): PasteOutcome {
   if (exited) return "exited";
   if (HAS_NEWLINE.test(text) && !surface.modes.bracketedPasteMode) return "needs-bracketed-paste";
-  const safe = text.replace(UNSAFE_PASTE_CONTROLS, "");
+  const safe = sanitizeTerminalPaste(text);
   surface.paste(safe);
   surface.focus();
   return "pasted";

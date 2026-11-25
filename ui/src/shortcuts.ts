@@ -162,7 +162,7 @@ export const SHORTCUT_HELP: readonly ShortcutHelp[] = [
   { keys: "Ctrl+K", does: "Command palette", probe: ctrlKey("k", "KeyK"), action: "toggle-palette" },
   {
     keys: "Ctrl+B",
-    does: "Hide or show the left panel (a terminal keeps Ctrl+B for itself)",
+    does: "Hide or show the left panel (a terminal or machine keeps Ctrl+B for itself)",
     probe: ctrlKey("b", "KeyB"),
     action: "toggle-sidebar",
   },

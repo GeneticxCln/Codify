@@ -3044,11 +3044,11 @@ export const App: React.FC = () => {
         case "toggle-palette":
           setPaletteOpen((v) => !v);
           break;
-        // Ctrl+B is also tmux's prefix and readline's back-a-character, so with a terminal in front
-        // it is the shell's, not ours: the key goes through untouched (no `preventDefault` below),
+        // Ctrl+B is also tmux's prefix and readline's back-a-character, so with a terminal or machine
+        // in front it is the shell's, not ours: the key goes through untouched (no `preventDefault` below),
         // and the header button still reaches the panel.
         case "toggle-sidebar":
-          if (activeTabKind === "terminal") return;
+          if (activeTabKind === "terminal" || activeTabKind === "machine") return;
           toggleSidebar();
           break;
         // Ctrl+. is the same from every view, a terminal's included (`shortcuts.ts` says why it is not Ctrl+\).

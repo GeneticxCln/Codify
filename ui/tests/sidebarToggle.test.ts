@@ -148,3 +148,27 @@ test("with a terminal in front, Ctrl+B is the terminal's own (tmux, readline) an
     assert.ok(!hasPanel(ctx));
   });
 });
+
+test("with a machine in front, Ctrl+B also belongs to the jailed shell and passes through", async () => {
+  await withApp(
+    {
+      shellAnswers: {
+        codify_machine_open: () => ({ id: "mach-1", copy_on_write: true, note: null }),
+        codify_machine_resize: () => null,
+        codify_machine_close: () => null,
+      },
+    },
+    async (ctx) => {
+      if (!(globalThis as Record<string, unknown>).self) {
+        (globalThis as Record<string, unknown>).self = ctx.dom.window;
+      }
+      const machine = ctx.dom.container.querySelector('button[title^="Machine"]') as HTMLElement;
+      await ctx.dom.click(machine);
+      await ctx.settle();
+      assert.ok(ctx.dom.container.querySelector('section[aria-label="Machine"]') !== null);
+
+      assert.equal(await ctrl(ctx, "b", "KeyB"), false, "Ctrl+B was taken from the machine shell");
+      assert.ok(hasPanel(ctx), "the panel hid under a focused machine");
+    },
+  );
+});

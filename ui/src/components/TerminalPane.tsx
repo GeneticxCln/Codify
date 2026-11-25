@@ -245,12 +245,13 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
       track(exitSub);
 
       if (disposed) return;
-      const [, , { Terminal }, { FitAddon }] = await Promise.all([
+      const [, , { loadTerminalRuntime }] = await Promise.all([
         outputSub.catch(() => () => {}),
         exitSub.catch(() => () => {}),
-        import("@xterm/xterm"),
-        import("@xterm/addon-fit"),
+        import("../terminalClipboard"),
       ]);
+      if (disposed) return;
+      const { Terminal, attachFitAndKeys } = await loadTerminalRuntime();
       if (disposed || !hostRef.current) return;
 
       // Read workspace tail BEFORE claiming and filing this session's backlog so
@@ -277,8 +278,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // two that draw rain behind it. See `ui/src/terminalTheme.ts`.
         theme: xtermThemeFromDocument(),
       });
-      const fit = new FitAddon();
-      term.loadAddon(fit);
+      const fit = attachFitAndKeys(term, () => exitedRef.current);
       term.open(hostRef.current);
       // Not awaited, on purpose: the replay and the live subscription below must follow with no
       // yield between them. The terminal draws through the DOM renderer until the canvas one is in,

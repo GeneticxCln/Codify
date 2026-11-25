@@ -106,7 +106,9 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
     let told = "";
 
     void (async () => {
-      const [{ Terminal }, { FitAddon }] = await Promise.all([import("@xterm/xterm"), import("@xterm/addon-fit")]);
+      const { loadTerminalRuntime } = await import("../terminalClipboard");
+      if (disposed) return;
+      const { Terminal, attachFitAndKeys } = await loadTerminalRuntime();
       if (disposed || !hostRef.current) return;
 
       term = new Terminal({
@@ -119,8 +121,7 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
         theme: xtermThemeFromDocument(),
       });
       termRef.current = term;
-      const fit = new FitAddon();
-      term.loadAddon(fit);
+      const fit = attachFitAndKeys(term, () => exitedRef.current);
       term.open(hostRef.current);
       // Not awaited: the replay and the follow below must not be separated by a yield. The canvas renderer
       // measures a cell a little differently from the DOM one, so a switch re-fits (`settle`, below, tells the
