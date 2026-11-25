@@ -233,6 +233,14 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_key": True,
         "local_only": False,
     },
+    # AxForge: EU-hosted OpenAI-compatible inference gateway (Stockholm).
+    # Speaks standard `/v1/models` and `/v1/chat/completions` with Bearer auth.
+    "axforge": {
+        "protocol": "openai_compat",
+        "base_url": "https://api.axforge.ai/v1",
+        "needs_key": True,
+        "local_only": False,
+    },
 }
 
 

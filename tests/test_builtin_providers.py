@@ -169,5 +169,21 @@ class KiloGatewayProvider(unittest.TestCase):
         self.assertEqual(ENV_KEY_MAP["kilo"], ["KILO_API_KEY", "KILOCODE_API_KEY"])
 
 
+class AxForgeProvider(unittest.TestCase):
+    """AxForge EU-hosted OpenAI-compatible inference gateway."""
+
+    def test_axforge_is_a_builtin_openai_compatible_provider_that_needs_a_key(self) -> None:
+        meta = BUILTIN_PROVIDERS["axforge"]
+        self.assertEqual(meta["protocol"], "openai_compat")
+        self.assertEqual(meta["base_url"], "https://api.axforge.ai/v1")
+        self.assertTrue(meta["needs_key"])
+        self.assertFalse(meta["local_only"])
+
+    def test_its_key_can_come_from_axforge_env_var(self) -> None:
+        from engine.providers import ENV_KEY_MAP
+
+        self.assertEqual(ENV_KEY_MAP["axforge"], ["AXFORGE_API_KEY"])
+
+
 if __name__ == "__main__":
     unittest.main()

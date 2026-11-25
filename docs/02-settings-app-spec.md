@@ -465,10 +465,10 @@ or 175%, **125% by default**. It is client-side display state, like the theme: i
 * **Providers are read by name, not by slug.** The Provider Keys row printed the slug through CSS
   `capitalize` ("Openai", "Nvidia") and the protocol as the raw tag `openai_compat`, and the provider
   select printed every slug in capitals. `ui/src/providerLabels.ts` supplies the words (OpenAI,
-  OpenRouter, DeepSeek, NVIDIA, OpenCode, Kilo Gateway, Groq, Google, Anthropic, Ollama; any other slug title-cased) and the
+  OpenRouter, DeepSeek, NVIDIA, OpenCode, Kilo Gateway, AxForge, Groq, Google, Anthropic, Ollama; any other slug title-cased) and the
   protocol's name ("OpenAI-compatible"; the choice list keeps its endpoint). The slug stays the
   identifier everywhere: it is the name's tooltip and what every request carries. The table is a
-  spelling guide for ten names and is not a catalogue (`docs/06` §1): which providers exist, and every
+  spelling guide for eleven names and is not a catalogue (`docs/06` §1): which providers exist, and every
   model, still come from the engine and from live discovery.
 * **What does not follow a root font size is handled where it lives.** The xterm terminal draws its own
   canvas, so `TerminalPane` sets its font size from the scale and re-fits when it changes, and the
