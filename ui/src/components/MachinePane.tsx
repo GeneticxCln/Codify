@@ -82,11 +82,13 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
   const exitedRef = useRef(exited);
   const autoFocusRef = useRef(autoFocus);
   const screensRef = useRef(screens);
+  const termRef = useRef<import("@xterm/xterm").Terminal | undefined>(undefined);
   useEffect(() => {
     idRef.current = machineId;
   }, [machineId]);
   useEffect(() => {
     exitedRef.current = exited;
+    if (termRef.current) termRef.current.options.disableStdin = exited;
   }, [exited]);
   useEffect(() => {
     autoFocusRef.current = autoFocus;
@@ -110,11 +112,13 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
       term = new Terminal({
         cursorBlink: false,
         convertEol: false,
+        disableStdin: exitedRef.current,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: terminalFontSize(),
         scrollback: 5000,
         theme: xtermThemeFromDocument(),
       });
+      termRef.current = term;
       const fit = new FitAddon();
       term.loadAddon(fit);
       term.open(hostRef.current);
@@ -158,8 +162,9 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
         if (key === told) return;
         told = key;
         // The PTY first, the screen after: both in the order the machine will see them, so a resize between two chunks of
-        // output lands between them on the screen as it does in the shell.
+        // output lands between them on the screen as it does in the shell. Skip the PTY IPC once the shell has exited.
         screensRef.current.resize(idRef.current, grid.cols, grid.rows);
+        if (exitedRef.current) return;
         void resizeMachine(idRef.current, grid.cols, grid.rows).catch((err: unknown) =>
           setFailed(readRejection(err, "Could not resize that machine")),
         );
@@ -188,6 +193,7 @@ export const MachinePane: React.FC<MachinePaneProps> = ({
       for (const off of unsubscribes) off();
       unsubscribes.length = 0;
       observer?.disconnect();
+      termRef.current = undefined;
       term?.dispose();
     };
   }, []);

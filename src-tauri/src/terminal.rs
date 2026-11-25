@@ -73,11 +73,15 @@ impl Session {
     }
 
     /// Resize the PTY, which is what makes `ls` wrap at the pane's width.
+    ///
+    /// A resize for a session that has already exited (`master` released by
+    /// [`try_reap_on_exit`]) is a clean no-op: the pane stays mounted so the
+    /// user can read its scrollback, and layout changes (including the exited
+    /// status banner appearing above xterm) fire `ResizeObserver`.
     pub(crate) fn resize(&self, cols: u16, rows: u16) -> Result<(), String> {
-        let master = self
-            .master
-            .as_ref()
-            .ok_or_else(|| "resize failed: session has already exited".to_string())?;
+        let Some(master) = self.master.as_ref() else {
+            return Ok(());
+        };
         master
             .resize(PtySize {
                 rows,
@@ -1641,6 +1645,17 @@ mod tests {
         assert!(
             !proc_entry.exists(),
             "the exited process must be reaped immediately on EOF, not left as a zombie"
+        );
+        // Resizing an exited pane (e.g. when the exited status banner mounts above xterm or the
+        // window resizes while reading scrollback) must be a clean no-op, while writing still fails.
+        assert_eq!(
+            session.resize(100, 40),
+            Ok(()),
+            "resize on an exited session must be a clean no-op"
+        );
+        assert!(
+            Session::send_to(&session.writer, "hi\n").is_err(),
+            "write on an exited session must still fail"
         );
     }
 

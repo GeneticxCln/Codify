@@ -186,6 +186,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
     const publish = (grid: Grid): void => {
       if (!gridChanged(current, grid)) return;
       current = grid;
+      if (exitedRef.current) return;
       onResizeRef.current?.(terminalIdRef.current, grid);
     };
 
@@ -266,6 +267,7 @@ export const TerminalPane: React.FC<TerminalPaneProps> = ({
         // being turned into a carriage return the shell did not send.
         cursorBlink: false,
         convertEol: false,
+        disableStdin: exitedRef.current,
         fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
         fontSize: terminalFontSize(),
         scrollback: 5000,

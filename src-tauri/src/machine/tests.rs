@@ -1269,3 +1269,27 @@ fn hard_resource_limits_are_enforced_inside_the_jail_and_cannot_be_raised() {
         "jailed process was able to raise a hard ulimit: {said}"
     );
 }
+
+#[test]
+fn resizing_an_exited_machine_is_a_clean_noop() {
+    let ws = tempfile_dir("exited-resize");
+    let jail = Jail::start(recipe(&ws, false, None));
+    write(&jail.machines, &jail.id, "exit\r").unwrap();
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !jail.exited.load(Ordering::SeqCst) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(
+        jail.exited.load(Ordering::SeqCst),
+        "machine shell did not exit in time"
+    );
+    assert_eq!(
+        resize(&jail.machines, &jail.id, 100, 40),
+        Ok(()),
+        "resizing an exited machine must be a clean no-op"
+    );
+    assert!(
+        write(&jail.machines, &jail.id, "echo hi\r").is_err(),
+        "writing to an exited machine must still fail"
+    );
+}

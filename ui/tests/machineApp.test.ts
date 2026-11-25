@@ -779,6 +779,36 @@ test("Ctrl+W on a machine's tab closes its jail like the tab's own button does",
     await ctx.settle();
 
     assert.deepEqual(commands(ctx, "codify_machine_close"), [{ machineId: "mach-1" }]);
-    assert.equal(machinePane(ctx, "mach-1"), null);
+    assert.ok(machinePane(ctx, "mach-1") === null);
+  });
+});
+
+test("exiting a machine does not send resize IPCs or surface an alert when layout changes", async () => {
+  const s = shell(["mach-1"]);
+  let rejectResize = false;
+  s.answers.codify_machine_resize = () => {
+    if (rejectResize) throw new Error("resize failed: session has already exited");
+    return null;
+  };
+  await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
+    await openMachine(ctx);
+    await ctx.settle();
+    const resizesBefore = commands(ctx, "codify_machine_resize").length;
+
+    rejectResize = true;
+    await ctx.emit("machine-exit", { id: "mach-1" });
+    await ctx.settle();
+    // Switch away and back so MachinePane mounts in the exited state and runs settle().
+    await openThread(ctx, "c1");
+    await click(ctx, tabNamed(ctx, "Machine"));
+    await ctx.settle();
+    await beat(40);
+
+    assert.equal(
+      commands(ctx, "codify_machine_resize").length,
+      resizesBefore,
+      "an exited machine pane must not send resize IPCs",
+    );
+    assert.ok(ctx.dom.container.querySelector('[role="alert"]') === null, "unexpected alert on exited machine");
   });
 });
