@@ -302,8 +302,10 @@ export function useAtmosphereCanvas(
 
     const styles = getComputedStyle(document.documentElement);
     const varCache = new Map<string, string>();
+    let onRestyle: (() => void) | null = null;
     const clearVarCache = (): void => {
       varCache.clear();
+      onRestyle?.();
     };
     const read = (name: string): string => {
       const hit = varCache.get(name);
@@ -484,6 +486,12 @@ export function useAtmosphereCanvas(
     // The static frame. Drawn before the loop is armed so that a reduced-motion
     // user and a screenshot taken in the first millisecond see the same thing.
     paint();
+    onRestyle = (): void => {
+      // When the loop is not running (reduced motion, starved-stopped, or
+      // awaiting probe), repaint the static frame immediately so live colour
+      // customisations take effect without reopening or un-reducing motion.
+      if (!cancelled && raf === 0 && !recovery.isLost()) paint();
+    };
     const start = (): void => {
       if (!cancelled) raf = requestAnimationFrame(loop);
     };

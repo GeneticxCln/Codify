@@ -62,3 +62,27 @@ test("ColorPicker opens a themed dialog, accepts presets and hex edits, and clos
     assert.equal(parentSawEscape, false, "Escape leaked out to the parent modal");
   });
 });
+
+test("ColorPicker hue slider lifts pure black/grey into a visible tint immediately", async () => {
+  await withDom(async (dom) => {
+    const picked: string[] = [];
+    const Host: React.FC = () => {
+      const [hex, setHex] = React.useState("#000000");
+      return React.createElement(ColorPicker, {
+        label: "Window background",
+        value: hex,
+        onChange: (next) => {
+          setHex(next);
+          picked.push(next);
+        },
+      });
+    };
+
+    await dom.render(React.createElement(Host));
+    await dom.click(dom.byLabel("Window background colour"));
+    const hue = dom.byLabel("Window background hue");
+    await dom.press(hue, "ArrowRight");
+    assert.ok(picked.length > 0, "Hue arrow key did not emit a colour");
+    assert.notEqual(picked.at(-1), "#000000", "Hue change on pure black stayed stuck on #000000");
+  });
+});

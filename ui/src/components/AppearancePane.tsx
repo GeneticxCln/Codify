@@ -103,6 +103,8 @@ export const AppearancePane: React.FC = () => {
   const [selected, setSelected] = useState<string>(() => readStoredThemeId());
   const [hovered, setHovered] = useState<string | null>(null);
   const [tints, setTints] = useState<TintStore>(() => loadTints());
+  const tintsRef = useRef<TintStore>(tints);
+  tintsRef.current = tints;
   const [history, setHistory] = useState<TintHistory>(() => []);
   const rows = useRef<Array<HTMLButtonElement | null>>([]);
 
@@ -133,6 +135,7 @@ export const AppearancePane: React.FC = () => {
    * side effect that happens twice, to two different results.
    */
   const commitTints = (themeId: string, next: TintStore): void => {
+    tintsRef.current = next;
     setTints(next);
     saveTints(undefined, next);
     applyTintedTheme(themeId);
@@ -154,24 +157,27 @@ export const AppearancePane: React.FC = () => {
     label: string,
     burst?: string,
   ): void => {
-    setHistory((history) => record(history, { store: tints, label, burst, at: Date.now() }));
+    const before = tintsRef.current;
+    setHistory((history) => record(history, { store: before, label, burst, at: Date.now() }));
     commitTints(themeId, next);
   };
 
   const pickTint = (themeId: string, name: string, hex: string): void => {
     const theme = themeById(themeId);
+    const cur = tintsRef.current;
     commit(
       themeId,
-      { ...tints, [themeId]: { ...(tints[themeId] ?? {}), [name]: hex } },
+      { ...cur, [themeId]: { ...(cur[themeId] ?? {}), [name]: hex } },
       `${TINT_ROLES[name] ?? name} on ${theme.label}`,
       `${themeId}:${name}`,
     );
   };
 
   const clearTint = (themeId: string, name: string): void => {
-    const map = { ...(tints[themeId] ?? {}) };
+    const cur = tintsRef.current;
+    const map = { ...(cur[themeId] ?? {}) };
     delete map[name];
-    const next: Record<string, TintMap> = { ...tints };
+    const next: Record<string, TintMap> = { ...cur };
     // A theme with no tints left is *absent* from the store, not present and
     // empty, so `saveTints` writes `codify.tints` down rather than leaving a
     // key that says nothing.
@@ -181,7 +187,7 @@ export const AppearancePane: React.FC = () => {
   };
 
   const resetTints = (themeId: string): void => {
-    const next: Record<string, TintMap> = { ...tints };
+    const next: Record<string, TintMap> = { ...tintsRef.current };
     delete next[themeId];
     commit(themeId, next, `Reset all colours on ${themeById(themeId).label}`);
   };
@@ -282,6 +288,7 @@ export const AppearancePane: React.FC = () => {
               <ThemeRow
                 key={theme.id}
                 theme={theme}
+                tints={tints[theme.id]}
                 isActive={theme.id === selected}
                 isShown={theme.id === shown.id}
                 onSelect={() => select(theme)}
@@ -329,12 +336,13 @@ export const AppearancePane: React.FC = () => {
  */
 const ThemeRow: React.FC<{
   theme: AppearanceTheme;
+  tints?: TintMap;
   isActive: boolean;
   isShown: boolean;
   onSelect: () => void;
   onHover: (id: string | null) => void;
   onRegister: (el: HTMLButtonElement | null) => void;
-}> = ({ theme, isActive, isShown, onSelect, onHover, onRegister }) => (
+}> = ({ theme, tints, isActive, isShown, onSelect, onHover, onRegister }) => (
   <button
     type="button"
     role="radio"
@@ -354,7 +362,7 @@ const ThemeRow: React.FC<{
           : "border-codify-border hover:bg-codify-raised/60")
     }
   >
-    <ThemeChip theme={theme} />
+    <ThemeChip theme={theme} tints={tints} />
     <span className="min-w-0 flex-1">
       <span className="flex items-center gap-1.5">
         <span className="text-sm font-medium text-codify-primary truncate">{theme.label}</span>
@@ -375,8 +383,10 @@ const ThemeRow: React.FC<{
  * eight rows are affordable: the old card spent a live canvas on this and got
  * the same information out of three painted boxes.
  */
-const ThemeChip: React.FC<{ theme: AppearanceTheme }> = ({ theme }) => {
-  const varOf = (name: string): string => theme.tokens[name as keyof typeof theme.tokens] ?? "";
+const ThemeChip: React.FC<{ theme: AppearanceTheme; tints?: TintMap }> = ({ theme, tints }) => {
+  const resolved = tints ? resolveTints(theme, tints) : {};
+  const varOf = (name: string): string =>
+    resolved[name] ?? theme.tokens[name as keyof typeof theme.tokens] ?? "";
   return (
     <div
       className="w-11 h-8 rounded-md border shrink-0 overflow-hidden flex items-center gap-0.5 p-1"

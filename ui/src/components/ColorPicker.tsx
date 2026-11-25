@@ -83,19 +83,28 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
   const safeValue = normalizeHex(value) ?? "#808080";
   const [open, setOpen] = useState(false);
   const [flipUp, setFlipUp] = useState(false);
+  const [alignRight, setAlignRight] = useState(false);
   const [hsv, setHsv] = useState<[number, number, number]>(() => hexToHsv(safeValue));
   const [hexDraft, setHexDraft] = useState(safeValue);
+  const hsvRef = useRef<[number, number, number]>(hsv);
+  hsvRef.current = hsv;
+  const draggingRef = useRef<"pad" | "hue" | null>(null);
   const rootRef = useRef<HTMLDivElement | null>(null);
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   const padRef = useRef<HTMLDivElement | null>(null);
   const hueRef = useRef<HTMLDivElement | null>(null);
 
   // Sync external updates (Reset, Undo, theme switch, contrast clamp) while keeping hue steady on greys.
+  // Skip resetting the live HSV cursor while the user is actively dragging so contrast clamping never
+  // fights their pointer mid-gesture.
   useEffect(() => {
     setHexDraft(safeValue);
+    if (draggingRef.current !== null) return;
     setHsv((prev) => {
       const [h, s, v] = hexToHsv(safeValue);
-      return [s === 0 || v === 0 ? prev[0] : h, s, v];
+      const next: [number, number, number] = [s === 0 || v === 0 ? prev[0] : h, s, v];
+      hsvRef.current = next;
+      return next;
     });
   }, [safeValue]);
 
@@ -126,16 +135,27 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
     if (!open && triggerRef.current && typeof window !== "undefined") {
       const rect = triggerRef.current.getBoundingClientRect();
       setFlipUp(window.innerHeight - rect.bottom < 280 && rect.top > 280);
+      setAlignRight(window.innerWidth - rect.left < 252 && rect.right > 252);
     }
     setOpen((prev) => !prev);
   };
 
   const emitHsv = (h: number, s: number, v: number): void => {
     const next: [number, number, number] = [clamp(h, 0, 360), clamp(s, 0, 100), clamp(v, 0, 100)];
+    hsvRef.current = next;
     setHsv(next);
     const hex = hsvToHex(next[0], next[1], next[2]);
     setHexDraft(hex);
     onChange(hex);
+  };
+
+  const endDrag = (): void => {
+    if (draggingRef.current === null) return;
+    draggingRef.current = null;
+    const [h, s, v] = hexToHsv(safeValue);
+    const next: [number, number, number] = [s === 0 || v === 0 ? hsvRef.current[0] : h, s, v];
+    hsvRef.current = next;
+    setHsv(next);
   };
 
   const pickFromPad = (clientX: number, clientY: number): void => {
@@ -145,7 +165,7 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
     if (!(rect.width > 0 && rect.height > 0)) return;
     const s = clamp(((clientX - rect.left) / rect.width) * 100, 0, 100);
     const v = clamp((1 - (clientY - rect.top) / rect.height) * 100, 0, 100);
-    emitHsv(hsv[0], s, v);
+    emitHsv(hsvRef.current[0], s, v);
   };
 
   const pickFromHue = (clientX: number): void => {
@@ -154,7 +174,13 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
     const rect = el.getBoundingClientRect();
     if (!(rect.width > 0)) return;
     const h = clamp(((clientX - rect.left) / rect.width) * 360, 0, 360);
-    emitHsv(h, hsv[1], hsv[2]);
+    // Starting from pure black, white, or neutral grey (`s < 5` or `v < 5`),
+    // rotating hue alone would keep emitting the exact same grey/black hex and
+    // appear broken; lift chroma/value into a visible tint immediately.
+    const [, curS, curV] = hsvRef.current;
+    const s = curS < 5 ? 70 : curS;
+    const v = curV < 5 ? 55 : curV;
+    emitHsv(h, s, v);
   };
 
   const onHexInput = (raw: string): void => {
@@ -162,7 +188,11 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
     const parsed = normalizeHex(raw);
     if (!parsed) return;
     const [h, s, v] = hexToHsv(parsed);
-    setHsv((prev) => [s === 0 || v === 0 ? prev[0] : h, s, v]);
+    setHsv((prev) => {
+      const next: [number, number, number] = [s === 0 || v === 0 ? prev[0] : h, s, v];
+      hsvRef.current = next;
+      return next;
+    });
     onChange(parsed);
   };
 
@@ -186,7 +216,8 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
           role="dialog"
           aria-label={`${label} colour picker`}
           className={
-            "absolute left-0 z-50 w-60 rounded-xl border border-codify-border-strong bg-codify-surface p-2.5 shadow-xl space-y-2.5 " +
+            "absolute z-50 w-60 rounded-xl border border-codify-border-strong bg-codify-surface p-2.5 shadow-xl space-y-2.5 " +
+            (alignRight ? "right-0 " : "left-0 ") +
             (flipUp ? "bottom-full mb-1.5" : "top-full mt-1.5")
           }
         >
@@ -200,12 +231,18 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
             ref={padRef}
             data-color-pad="true"
             onPointerDown={(e) => {
+              draggingRef.current = "pad";
               e.currentTarget.setPointerCapture?.(e.pointerId);
               pickFromPad(e.clientX, e.clientY);
             }}
             onPointerMove={(e) => {
-              if (e.buttons === 1) pickFromPad(e.clientX, e.clientY);
+              if (draggingRef.current === "pad" || (e.buttons & 1) === 1) {
+                pickFromPad(e.clientX, e.clientY);
+              }
             }}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            onLostPointerCapture={endDrag}
             className="relative h-28 w-full rounded-lg border border-codify-border overflow-hidden cursor-crosshair select-none touch-none"
             style={{ backgroundColor: `hsl(${Math.round(hsv[0])} 100% 50%)` }}
           >
@@ -239,19 +276,27 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
             aria-valuemax={360}
             aria-valuenow={Math.round(hsv[0])}
             onPointerDown={(e) => {
+              draggingRef.current = "hue";
               e.currentTarget.setPointerCapture?.(e.pointerId);
               pickFromHue(e.clientX);
             }}
             onPointerMove={(e) => {
-              if (e.buttons === 1) pickFromHue(e.clientX);
+              if (draggingRef.current === "hue" || (e.buttons & 1) === 1) {
+                pickFromHue(e.clientX);
+              }
             }}
+            onPointerUp={endDrag}
+            onPointerCancel={endDrag}
+            onLostPointerCapture={endDrag}
             onKeyDown={(e) => {
               if (e.key === "ArrowRight" || e.key === "ArrowUp") {
                 e.preventDefault();
-                emitHsv((hsv[0] + 6) % 360, hsv[1], hsv[2]);
+                const [h, curS, curV] = hsvRef.current;
+                emitHsv((h + 6) % 360, curS < 5 ? 70 : curS, curV < 5 ? 55 : curV);
               } else if (e.key === "ArrowLeft" || e.key === "ArrowDown") {
                 e.preventDefault();
-                emitHsv((hsv[0] + 354) % 360, hsv[1], hsv[2]);
+                const [h, curS, curV] = hsvRef.current;
+                emitHsv((h + 354) % 360, curS < 5 ? 70 : curS, curV < 5 ? 55 : curV);
               }
             }}
             className="relative h-3.5 w-full rounded-full border border-codify-border cursor-ew-resize select-none touch-none"

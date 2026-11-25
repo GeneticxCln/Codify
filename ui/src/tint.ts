@@ -180,6 +180,21 @@ export function resolveTint(
   }
   const clamped = clampForContrast(clean, against, floor);
   if (clamped === null) {
+    // When a user customises one surface to a light or mid colour while leaving
+    // another dark, no single colour can satisfy `floor` against every surface
+    // simultaneously (`#000000` and `#ffffff` both fail). Falling back to the
+    // stock value there would silently lock out every foreground and backdrop
+    // picker. Instead: accept `clean` if it already clears `floor` on at least
+    // one effective surface; otherwise clamp it against the primary surface.
+    const bestRatio = Math.max(...against.map((bg) => contrastRatio(clean, bg)));
+    if (bestRatio >= floor) {
+      return { hex: clean, proposed: clean, adjusted: false, ratio: bestRatio };
+    }
+    const primary = clampForContrast(clean, [against[0]!], floor);
+    if (primary !== null) {
+      const ratio = contrastRatio(primary, against[0]!);
+      return { hex: primary, proposed: clean, adjusted: primary.toLowerCase() !== clean, ratio };
+    }
     const ratio = Math.min(...against.map((bg) => contrastRatio(own, bg)));
     return { hex: own, proposed: clean, adjusted: true, ratio };
   }

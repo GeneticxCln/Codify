@@ -863,6 +863,14 @@ html[data-motion="reduced"] .codify-logo-caret-live {
 .text-codify-design\/90 { color: rgb(var(--codify-design-rgb) / 0.90); }
 .text-codify-knowledge\/80 { color: rgb(var(--codify-knowledge-rgb) / 0.80); }
 .text-codify-warning\/70 { color: rgb(var(--codify-warning-rgb) / 0.70); }
+.ring-codify-accent { --tw-ring-color: rgb(var(--codify-accent-rgb) / 1); }
+.focus\:ring-codify-accent:focus { --tw-ring-color: rgb(var(--codify-accent-rgb) / 1); }
+.focus-visible\:ring-codify-accent:focus-visible { --tw-ring-color: rgb(var(--codify-accent-rgb) / 1); }
+.focus-visible\:ring-codify-info:focus-visible { --tw-ring-color: rgb(var(--codify-info-rgb) / 1); }
+.placeholder\:text-codify-muted::placeholder { color: rgb(var(--codify-muted-rgb) / 1); }
+.file\:bg-codify-bg::file-selector-button { background-color: rgb(var(--codify-bg-rgb) / 1); }
+.file\:border-codify-border::file-selector-button { border-color: rgb(var(--codify-border-rgb) / 1); }
+.file\:text-codify-secondary::file-selector-button { color: rgb(var(--codify-secondary-rgb) / 1); }
 
 /* Keep header drawer controls inside narrow/tiled windows without clipping off the right edge. */
 @media (max-width: 1279px) {

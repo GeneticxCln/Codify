@@ -380,6 +380,22 @@ test("custom surfaces apply verbatim and foreground tints adapt to them", () => 
     contrastRatio(light["--codify-accent"]!, "#e8edf2") >= TEXT_FLOOR,
     `accent ${light["--codify-accent"]} should clamp dark on light custom surfaces`,
   );
+
+  // Mixed custom surfaces (e.g. changing only Window background to a bright/mid colour while
+  // leaving Panel/Elevated surfaces dark) must not silently lock out foreground/backdrop pickers.
+  const diablo = themeById("diablo");
+  const mixed = resolveTints(diablo, {
+    "--codify-bg": "#f8fafc",
+    "--codify-primary": "#111827",
+    "--codify-accent": "#00ff88",
+    "--hellfire-ember": "#38bdf8",
+  });
+  assert.equal(mixed["--codify-bg"], "#f8fafc");
+  assert.equal(mixed["--codify-primary"], "#111827");
+  assert.equal(mixed["--codify-accent"], "#00ff88");
+  assert.notEqual(mixed["--hellfire-ember"], diablo.tokens["--hellfire-ember"]);
+  assert.ok(contrastRatio(mixed["--hellfire-ember"]!, "#f8fafc") >= ART_FLOOR);
+  assert.ok(contrastRatio(mixed["--hellfire-ember"]!, diablo.tokens["--codify-raised"]!) >= ART_FLOOR);
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

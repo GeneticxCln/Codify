@@ -122,8 +122,10 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     // the next frame without a remount.
     const styles = getComputedStyle(document.documentElement);
     const varCache = new Map<string, string>();
+    let onRestyle: (() => void) | null = null;
     const clearVarCache = (): void => {
       varCache.clear();
+      onRestyle?.();
     };
     const readVar = (name: string, fallback: string): string => {
       const hit = varCache.get(name);
@@ -378,6 +380,15 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     let observer: ResizeObserver | undefined;
     layout();
     drawFrame(); // the static frame reduced motion gets
+    onRestyle = (): void => {
+      // Repaint immediately on live tint/theme changes when the loop is not running
+      // (reduced motion or stopped), and clear the trail seed so new rain colours
+      // cover every cell right away.
+      if (!cancelled && raf === 0 && !recovery.isLost()) {
+        seededCanvas = false;
+        drawFrame();
+      }
+    };
     const start = (): void => {
       if (!cancelled) raf = requestAnimationFrame(loop);
     };
