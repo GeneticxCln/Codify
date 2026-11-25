@@ -29,6 +29,11 @@ import {
 import { buildModelSignals } from "./modelSignals";
 import { keepPick, pickFromMenu, resolveModelChoice } from "./modelChoice";
 import { openEngineStream } from "./engineStream";
+import { confirmDialog, currentDialog, promptDialog, subscribeDialog } from "./appDialog";
+
+const AppDialogHost = lazy(() =>
+  import("./components/AppDialog").then((m) => ({ default: m.AppDialogHost })),
+);
 import {
   listWorkspaces,
   getEngineSettings,
@@ -1812,10 +1817,16 @@ export const App: React.FC = () => {
   // closing it is the one close in this window that throws work away. The assistant closing a tab it opened to no purpose
   // (`closeFile` below) goes straight to `closeTabNow`: it can only ever close an editor it made and has not changed.
   const handleCloseTab = useCallback(
-    (id: string) => {
+    async (id: string) => {
       const tab = tabState.tabs.find((t) => t.id === id);
       if (tab?.kind === "editor" && editorBuffers.get(id)?.dirty) {
-        if (!window.confirm(`${tab.title} has changes that are not saved. Close it and lose them?`)) return;
+        const ok = await confirmDialog({
+          title: `Close ${tab.title}?`,
+          message: `${tab.title} has changes that are not saved. Close it and lose them?`,
+          confirmLabel: "Close without saving",
+          tone: "danger",
+        });
+        if (!ok) return;
       }
       closeTabNow(id);
     },
@@ -2550,14 +2561,15 @@ export const App: React.FC = () => {
   );
   const handleResetMachine = useCallback(
     async (id: string) => {
-      if (
-        !window.confirm(
-          "Reset this machine?\n\nEverything running in it stops and everything it changed in the project is discarded. " +
-            "The project on your computer is not touched.",
-        )
-      ) {
-        return;
-      }
+      const ok = await confirmDialog({
+        title: "Reset this machine?",
+        message:
+          "Everything running in it stops and everything it changed in the project is discarded. " +
+          "The project on your computer is not touched.",
+        confirmLabel: "Reset machine",
+        tone: "danger",
+      });
+      if (!ok) return;
       try {
         await resetMachineTab(id);
       } catch (err: any) {
@@ -3122,7 +3134,13 @@ export const App: React.FC = () => {
 
   const handleRenameConversation = useCallback(
     async (conversationId: string, title: string) => {
-      const next = window.prompt("Name this conversation", title) ?? "";
+      const next =
+        (await promptDialog({
+          title: "Name this conversation",
+          initialValue: title,
+          placeholder: "Conversation name",
+          confirmLabel: "Save",
+        })) ?? "";
       if (!next.trim()) return;
       try {
         await nameThread(conversationId, next.trim());
@@ -3157,11 +3175,15 @@ export const App: React.FC = () => {
   /** Delete a thread and every turn in it, after the person confirms. Archive is the way to keep one. */
   const handleDeleteConversation = useCallback(
     async (conversationId: string, workspaceId: string, title: string) => {
-      const ok = window.confirm(
-        `Delete "${title}"?\n\nThe thread and every message in it will be removed for good, ` +
+      const ok = await confirmDialog({
+        title: `Delete "${title}"?`,
+        message:
+          `The thread and every message in it will be removed for good, ` +
           `and the assistant will no longer remember them. Archive keeps a thread instead.\n\n` +
           `Files in your workspace are NOT touched.`,
-      );
+        confirmLabel: "Delete thread",
+        tone: "danger",
+      });
       if (!ok) return;
       try {
         await deleteConversation(conversationId);
@@ -4147,13 +4169,25 @@ export const App: React.FC = () => {
     // Confirm names what goes. A chat message is the person's words and the reply; a run also has a plan and
     // proposals. Both are gone for good, from the transcript and from what the model is given next time.
     const conversational = isConversationalTurn(messages.find((m) => m.goal?.id === goalId)?.goal);
-    const ok = window.confirm(
+    const ok = await confirmDialog(
       conversational
-        ? `Delete this message?\n\nYour message and its reply will be removed for good, ` +
-            `and the assistant will no longer remember them.\n\nFiles in your workspace are NOT touched.`
-        : `Delete this goal?\n\n"${title}" and its full record will be removed: ` +
-            `its event log, plan steps, and any dry-run proposals.\n\n` +
-            `Files your fixer wrote in the workspace are NOT touched.`,
+        ? {
+            title: "Delete this message?",
+            message:
+              "Your message and its reply will be removed for good, " +
+              "and the assistant will no longer remember them.\n\nFiles in your workspace are NOT touched.",
+            confirmLabel: "Delete",
+            tone: "danger",
+          }
+        : {
+            title: "Delete this goal?",
+            message:
+              `"${title}" and its full record will be removed: ` +
+              `its event log, plan steps, and any dry-run proposals.\n\n` +
+              `Files your fixer wrote in the workspace are NOT touched.`,
+            confirmLabel: "Delete goal",
+            tone: "danger",
+          },
     );
     if (!ok) return;
     setError(null);
@@ -4179,14 +4213,13 @@ export const App: React.FC = () => {
   };
 
   const handleDeleteWorkspace = async (workspaceId: string, name: string) => {
-    if (
-      !window.confirm(
-        `Remove "${name}" from Codify?\n\n` +
-          `This forgets the folder. Your files stay exactly where they are.`,
-      )
-    ) {
-      return;
-    }
+    const ok = await confirmDialog({
+      title: `Remove "${name}" from Codify?`,
+      message: "This forgets the folder. Your files stay exactly where they are.",
+      confirmLabel: "Remove",
+      tone: "danger",
+    });
+    if (!ok) return;
     setError(null);
     try {
       await deleteWorkspace(workspaceId);
@@ -4205,11 +4238,15 @@ export const App: React.FC = () => {
         (err as { extra?: { goals?: number } })?.extra?.goals ?? NaN,
       );
       if (code === "workspace_not_empty" && Number.isFinite(goals)) {
-        const go = window.confirm(
-          `"${name}" has ${goals} goal${goals === 1 ? "" : "s"} recorded against it.\n\n` +
+        const go = await confirmDialog({
+          title: `Delete "${name}" and ${goals} goal${goals === 1 ? "" : "s"}?`,
+          message:
+            `"${name}" has ${goals} goal${goals === 1 ? "" : "s"} recorded against it.\n\n` +
             `Deleting the workspace deletes all ${goals} of them and their event logs too. ` +
-            `Your files are not touched.\n\nContinue?`,
-        );
+            `Your files are not touched.`,
+          confirmLabel: "Delete all",
+          tone: "danger",
+        });
         if (!go) return;
         setError(null);
         try {
@@ -5074,8 +5111,29 @@ export const App: React.FC = () => {
         onClose={() => setPaletteOpen(false)}
         onSelect={handlePaletteSelect}
       />
+      <LazyDialogMount />
     </div>
     </ClipboardRecorderContext.Provider>
   );
 };
+const LazyDialogMount: React.FC = () => {
+  const [everOpened, setEverOpened] = useState(() => currentDialog() !== null);
+  useEffect(() => {
+    if (everOpened) return;
+    if (currentDialog() !== null) {
+      setEverOpened(true);
+      return;
+    }
+    return subscribeDialog((d) => {
+      if (d !== null) setEverOpened(true);
+    });
+  }, [everOpened]);
+  if (!everOpened) return null;
+  return (
+    <Suspense fallback={null}>
+      <AppDialogHost />
+    </Suspense>
+  );
+};
+
 export default App;

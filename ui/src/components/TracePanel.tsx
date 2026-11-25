@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from "react";
 import { deleteGoalTrace, fetchGoalTrace, fetchGoalTraceCall, replayGoalTrace } from "../api";
+import { confirmDialog } from "../appDialog";
 import type { Goal, TraceCallDetail, TraceReplayReport, TraceSummary } from "../types";
 import {
   canArmTrace,
@@ -125,11 +126,14 @@ export const TracePanel: React.FC<{
 
   const handleDelete = async () => {
     if (!summary) return;
-    const sure = window.confirm(
-      `Delete this run's recording?\n\n${summary.calls} recorded model call${
+    const sure = await confirmDialog({
+      title: "Delete this run's recording?",
+      message: `${summary.calls} recorded model call${
         summary.calls === 1 ? "" : "s"
       } will be removed. The goal, its events and your files are not touched.`,
-    );
+      confirmLabel: "Delete recording",
+      tone: "danger",
+    });
     if (!sure) return;
     setBusy(true);
     try {

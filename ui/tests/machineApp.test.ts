@@ -599,17 +599,17 @@ test("Reset asks first, and a no does nothing at all", async () => {
   const s = shell(["mach-1"]);
   await withApp({ viewport: WIDE, ...SEEDED, shellAnswers: s.answers }, async (ctx) => {
     await openMachine(ctx);
-    const asked: string[] = [];
-    ctx.dom.window.confirm = (message?: string) => {
-      asked.push(String(message));
-      return false;
-    };
 
     await click(ctx, resetButton(ctx) as HTMLElement);
+    await ctx.settle();
 
-    assert.equal(asked.length, 1);
-    assert.match(asked[0], /everything running in it stops/i);
-    assert.match(asked[0], /not touched/i, "the question does not say the person's own project is safe");
+    const dialog = ctx.dom.container.querySelector('[role="alertdialog"]');
+    assert.ok(dialog, "Reset did not open a themed confirmation dialog");
+    assert.match(dialog.textContent ?? "", /everything running in it stops/i);
+    assert.match(dialog.textContent ?? "", /not touched/i, "the question does not say the person's own project is safe");
+
+    await ctx.dom.click(ctx.dom.byButton("Cancel"));
+    await ctx.settle();
     assert.equal(commands(ctx, "codify_machine_reset").length, 0, "a declined reset went ahead");
   });
 });
@@ -622,12 +622,13 @@ test("an accepted Reset starts that machine again at the pane's own size and kee
     await ctx.dom.click(paletteOption(ctx, "New machine with network") as HTMLElement);
     await ctx.settle();
     await beat(60);
-    ctx.dom.window.confirm = () => true;
     await say(ctx, "mach-1", "[machine] /work $ rm -rf *\r\njunk everywhere");
     const measured = commands(ctx, "codify_machine_resize").at(-1) as { cols: number; rows: number };
     assert.ok(measured.cols > 80, "the pane did not measure itself, so this cannot tell a size from the default");
 
     await click(ctx, resetButton(ctx) as HTMLElement);
+    await ctx.settle();
+    await ctx.dom.click(ctx.dom.byButton("Reset machine"));
     await ctx.settle();
     await say(ctx, "mach-1", "\x1bc[machine reset: a clean project, nothing from before]\r\n[machine] /work $ ");
     await beat(60);
@@ -651,9 +652,10 @@ test("Reset brings an exited machine back: the banner goes, typing reaches the s
     await beat(40);
     assert.match(machinePane(ctx, "mach-1")?.textContent ?? "", /shell has exited/);
     assert.equal((await run(ctx, { command: "ls" })).ok, false);
-    ctx.dom.window.confirm = () => true;
 
     await click(ctx, resetButton(ctx) as HTMLElement);
+    await ctx.settle();
+    await ctx.dom.click(ctx.dom.byButton("Reset machine"));
     await ctx.settle();
     await say(ctx, "mach-1", "\x1bc[machine reset: a clean project, nothing from before]\r\n[machine] /work $ ");
     await beat(60);
@@ -682,17 +684,12 @@ test("the assistant resets a machine through the surface, with no question asked
     ctxRef = ctx;
     await openMachine(ctx);
     await say(ctx, "mach-1", "[machine] /work $ junk");
-    let asked = 0;
-    ctx.dom.window.confirm = () => {
-      asked += 1;
-      return true;
-    };
 
     const reply = await ctx.surface.ask({ surface: "machine", op: "reset", workspace_id: WS, args: {} });
 
     assert.equal(reply.ok, true, reply.error ?? "");
     assert.equal(commands(ctx, "codify_machine_reset").length, 1);
-    assert.equal(asked, 0, "the assistant's reset put a question to the person: it is the person's button that asks");
+    assert.ok(ctx.dom.container.querySelector('[role="alertdialog"]') === null, "the assistant's reset put a question to the person");
     assert.deepEqual(reply.result.rows, ["[machine reset: a clean project, nothing from before]", "[machine] /work $"]);
     assert.equal(reply.result.alive, true);
     assert.equal(reply.result.copy_on_write, true);
@@ -724,9 +721,10 @@ test("a reset the shell cannot carry out says why on the window, and the machine
     { viewport: WIDE, ...SEEDED, shellAnswers: s.answers, shellFails: { codify_machine_reset: "this system will not mount an overlay without privilege" } },
     async (ctx) => {
       await openMachine(ctx);
-      ctx.dom.window.confirm = () => true;
 
       await click(ctx, resetButton(ctx) as HTMLElement);
+      await ctx.settle();
+      await ctx.dom.click(ctx.dom.byButton("Reset machine"));
       await ctx.settle();
 
       const alert = [...ctx.dom.container.querySelectorAll('[role="alert"]')].map((a) => a.textContent).join(" ");

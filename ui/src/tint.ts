@@ -82,61 +82,6 @@ export const TEXT_FLOOR = 4.5;
  */
 export const ART_FLOOR = 3;
 
-/** What each customisable variable means, for the picker's label. */
-export const TINT_ROLES: Readonly<Record<string, string>> = {
-  "--codify-accent": "Interface accent",
-  "--codify-bg": "Window background",
-  "--codify-surface": "Panel surface",
-  "--codify-raised": "Elevated surface",
-  "--codify-border": "Borders",
-  "--codify-border-strong": "Strong borders",
-  "--codify-primary": "Primary text",
-  "--codify-secondary": "Secondary text",
-  "--codify-muted": "Muted text",
-  "--codify-info": "Info tone",
-  "--codify-success": "Success tone",
-  "--codify-warning": "Warning tone",
-  "--codify-danger": "Danger tone",
-  "--codify-neutral": "Neutral badge",
-  "--cmatrix-bg": "Rain backdrop",
-  "--cmatrix-rain": "Rain",
-  "--cmatrix-text": "Rain highlight",
-  "--cyber-cyan": "Horizon cyan",
-  "--cyber-magenta": "Sun magenta",
-  "--cyber-amber": "Sun amber",
-  "--cyber-scan": "Scanline sweep",
-  "--neural-web": "Web, faintest",
-  "--neural-node": "Node cores",
-  "--neural-pulse": "Working pulse",
-  "--hud-amber": "Instrumentation",
-  "--hud-tick": "Tick ladder",
-  "--abyss-deep": "Spore halo",
-  "--abyss-spore": "Spore cores",
-  "--flare-indigo": "Stream, inner end",
-  "--flare-ultraviolet": "Stream, outer end",
-  "--snow-flake": "Near flakes",
-  "--snow-flake-2": "Far flakes",
-  "--snow-glow": "Lights",
-  "--snow-glow-2": "Second light",
-  "--sun-core": "Flare, wide stroke",
-  "--sun-edge": "Flare, bright core",
-  "--organ-node": "Node cores",
-  "--organ-tendril": "Tendrils",
-  "--void-arc": "Near side of the disc",
-  "--void-dust": "Outer orbits",
-  "--void-beam": "Working beams",
-  "--vector-line": "Every edge",
-  "--vector-lock": "Locked reticle",
-  "--fluid-crest": "Wave highlight",
-  "--fluid-trough": "Wave body",
-  "--arc-core": "Discharge channel",
-  "--arc-fork": "The spurs",
-  "--reagent": "Bubble body",
-  "--reagent-skin": "Bubble skin",
-  "--fluid-bit": "The data",
-  "--fluid-cursor": "Boundary cell",
-};
-
 /** A `#rrggbb` the picker can actually store. */
 export function isTintable(hex: string): boolean {
   return /^#[0-9a-f]{6}$/i.test(hex.trim());
@@ -145,7 +90,7 @@ export function isTintable(hex: string): boolean {
 /** Non-colour managed tokens that a colour picker cannot hold. */
 const NOT_COLOUR: ReadonlyArray<string> = ["--cmatrix-glyphs"];
 
-function weatherVars(theme: AppearanceTheme): string[] {
+export function weatherVars(theme: AppearanceTheme): string[] {
   return MANAGED_VARS.filter(
     (name) =>
       !name.startsWith("--codify-") &&
@@ -155,34 +100,17 @@ function weatherVars(theme: AppearanceTheme): string[] {
   );
 }
 
-/** One titled group of colour tokens for the Appearance customiser. */
-export interface TintGroup {
-  id: "accent" | "surfaces" | "text" | "status";
-  title: string;
-  vars: string[];
-}
-
-/** The customisable variables of `theme`, grouped for clear navigation. */
-export function tintGroups(theme: AppearanceTheme): TintGroup[] {
-  const present = (list: readonly string[]): string[] =>
-    list.filter((name) => name in theme.tokens);
-  const weather = weatherVars(theme);
-  const groups: TintGroup[] = [
-    {
-      id: "accent",
-      title: weather.length > 0 ? "Accent & backdrop" : "Accent",
-      vars: ["--codify-accent", ...weather],
-    },
-    { id: "surfaces", title: "Surfaces & borders", vars: present(SURFACE_VARS) },
-    { id: "text", title: "Text", vars: present(TEXT_VARS) },
-    { id: "status", title: "Status tones", vars: present(STATUS_VARS) },
-  ];
-  return groups.filter((g) => g.vars.length > 0);
-}
-
 /** Every colour variable a theme offers for customisation, in picker order. */
 export function tintableVars(theme: AppearanceTheme): string[] {
-  return tintGroups(theme).flatMap((g) => g.vars);
+  const present = (list: readonly string[]): string[] =>
+    list.filter((name) => name in theme.tokens);
+  return [
+    "--codify-accent",
+    ...weatherVars(theme),
+    ...present(SURFACE_VARS),
+    ...present(TEXT_VARS),
+    ...present(STATUS_VARS),
+  ];
 }
 
 /** The contrast floor and surfaces one variable is held to. */

@@ -23,12 +23,11 @@ import {
   resolveTints,
   saveTints,
   themeWithSurfaceTints,
-  tintGroups,
   tintableVars,
-  TINT_ROLES,
   type TintMap,
   type TintStore,
 } from "../tint";
+import { tintGroups, TINT_ROLES } from "../tintLabels";
 import {
   canUndo,
   record,

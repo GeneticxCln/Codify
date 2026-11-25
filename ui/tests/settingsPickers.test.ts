@@ -313,3 +313,18 @@ test("no component renders a native colour input: its GTK dialog cannot follow t
       "which draws its popover from `--codify-*` tokens.",
   );
 });
+
+test("no component calls native window.confirm, window.alert, or window.prompt", () => {
+  // WebKitGTK renders native confirm/alert/prompt as unstyled GTK dialogs titled
+  // `JavaScript - tauri://localhost` that ignore `--codify-*` tokens.
+  const nativeDialog = /\bwindow\.(?:confirm|alert|prompt)\s*\(/;
+  const offenders = tsxFiles(SRC)
+    .filter((file) => nativeDialog.test(readFileSync(file, "utf8")))
+    .map((file) => file.slice(SRC.length + 1));
+  assert.deepEqual(
+    offenders,
+    [],
+    "a native `window.confirm`/`alert`/`prompt` dialog is back. Use `confirmDialog` or " +
+      "`promptDialog` from appDialog.ts, rendered by AppDialogHost in `--codify-*` tokens.",
+  );
+});

@@ -382,13 +382,16 @@ test("deleting a workspace with live goals closes their streams before their mes
       const socket = goalSocket(ctx, "g-live");
       assert.ok(socket, "the live goal opened no stream");
 
-      dom.window.confirm = () => true;
       const picker = dom.container.querySelector('button[title="/tmp/e2e-alpha"]');
       assert.ok(picker, "the composer has no workspace picker");
       await dom.click(picker);
       const remove = dom.container.querySelector('button[aria-label="Remove workspace Alpha"]');
       assert.ok(remove, "the workspace picker has no Remove control");
       await dom.click(remove);
+      await settle();
+      await dom.click(dom.byButton("Remove"));
+      await settle();
+      await dom.click(dom.byButton("Delete all"));
       await settle();
       await settle();
 

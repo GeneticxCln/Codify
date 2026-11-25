@@ -167,18 +167,18 @@ test("closing a tab with unsaved text asks first, and declining keeps the tab an
   await withEditorApp({}, async (ctx) => {
     await openFile(ctx, "main", "src/main.py");
     await typeAtTop(ctx, "# precious\n");
-    const asked: string[] = [];
-    ctx.dom.window.confirm = (message?: string) => {
-      asked.push(String(message));
-      return false;
-    };
 
     await ctx.dom.click(ctx.dom.container.querySelector('button[aria-label="Close editor: main.py"]') as Element);
     await ctx.settle();
 
-    assert.equal(asked.length, 1);
-    assert.match(asked[0]!, /main\.py/);
-    assert.match(asked[0]!, /not saved/);
+    const dialog = ctx.dom.container.querySelector('[role="alertdialog"]');
+    assert.ok(dialog, "closing an unsaved editor did not open a themed confirmation dialog");
+    assert.match(dialog.textContent ?? "", /main\.py/);
+    assert.match(dialog.textContent ?? "", /not saved/);
+
+    await ctx.dom.click(ctx.dom.byButton("Cancel"));
+    await ctx.settle();
+
     assert.equal(editorTabs(ctx).length, 1, "the tab closed anyway");
     assert.match(cmText(ctx), /# precious/);
   });
@@ -188,9 +188,10 @@ test("closing a tab with unsaved text, and agreeing, closes it and drops the buf
   await withEditorApp({}, async (ctx) => {
     await openFile(ctx, "main", "src/main.py");
     await typeAtTop(ctx, "# gone\n");
-    ctx.dom.window.confirm = () => true;
 
     await ctx.dom.click(ctx.dom.container.querySelector('button[aria-label="Close editor: main.py"]') as Element);
+    await ctx.settle();
+    await ctx.dom.click(ctx.dom.byButton("Close without saving"));
     await beat(60);
     await ctx.settle();
 
@@ -204,16 +205,11 @@ test("closing a tab with unsaved text, and agreeing, closes it and drops the buf
 test("closing a tab with nothing unsaved does not ask", async () => {
   await withEditorApp({}, async (ctx) => {
     await openFile(ctx, "main", "src/main.py");
-    let asked = 0;
-    ctx.dom.window.confirm = () => {
-      asked += 1;
-      return true;
-    };
 
     await ctx.dom.click(ctx.dom.container.querySelector('button[aria-label="Close editor: main.py"]') as Element);
     await ctx.settle();
 
-    assert.equal(asked, 0);
+    assert.ok(ctx.dom.container.querySelector('[role="alertdialog"]') === null, "clean tab asked before closing");
     assert.equal(editorTabs(ctx).length, 0);
   });
 });
@@ -222,15 +218,13 @@ test("Ctrl+W on an editor with unsaved text asks too, because it is the same clo
   await withEditorApp({}, async (ctx) => {
     await openFile(ctx, "main", "src/main.py");
     await typeAtTop(ctx, "# precious\n");
-    let asked = 0;
-    ctx.dom.window.confirm = () => {
-      asked += 1;
-      return false;
-    };
 
     await chord(ctx, "w", "KeyW");
+    await ctx.settle();
 
-    assert.equal(asked, 1);
+    assert.ok(ctx.dom.container.querySelector('[role="alertdialog"]'), "Ctrl+W did not open confirmation dialog");
+    await ctx.dom.click(ctx.dom.byButton("Cancel"));
+    await ctx.settle();
     assert.equal(editorTabs(ctx).length, 1);
   });
 });

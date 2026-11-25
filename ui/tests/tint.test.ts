@@ -38,7 +38,6 @@ const { contrastRatio } = await import("../src/contrast.ts");
 const { applyTheme, MANAGED_VARS, THEMES, themeById } = await import("../src/appearance.ts");
 const {
   ART_FLOOR,
-  TINT_ROLES,
   TEXT_FLOOR,
   TINT_STORAGE_KEY,
   applyTintedTheme,
@@ -51,6 +50,7 @@ const {
   saveTints,
   tintableVars,
 } = await import("../src/tint.ts");
+const { TINT_ROLES } = await import("../src/tintLabels.ts");
 const { createElectricArcPainter } = await import("../src/components/ui/ElectricArc.tsx");
 const { createToxicLabPainter } = await import("../src/components/ui/ToxicLab.tsx");
 const React = (await import("react")).default;
