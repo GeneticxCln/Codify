@@ -210,6 +210,24 @@ test("the rain draws the glyphs its theme publishes, and the default set when it
   assert.ok(oled.some((g) => !hex.has(g)), "the OLED theme publishes no glyphs and should keep the default set");
 });
 
+test("MatrixRain bounds column count on wide 4K viewports and avoids redrawing full trails each steady frame", async () => {
+  await withCanvasRig({ width: 1920, height: 1080 }, async (rig) => {
+    applyTheme(CMATRIX_OLED.id, rig.dom.window.document.documentElement.style);
+    await rig.dom.render(React.createElement(MatrixRain, { maxDimension: 1024 }));
+    const initialDraws = rig.fillTexts();
+    const cols = new Set(initialDraws.map((t) => Math.round(t.x * 10)));
+    assert.ok(cols.size > 0 && cols.size <= 96, `expected <= 96 columns on 1920px viewport, got ${cols.size}`);
+
+    rig.clear();
+    rig.run(1, 1000, 34);
+    const steadyDraws = rig.fillTexts().length;
+    assert.ok(
+      steadyDraws <= cols.size * 3,
+      `steady frame drew ${steadyDraws} glyphs across ${cols.size} columns (should rely on fade veil)`,
+    );
+  });
+});
+
 test("each weather theme mounts its own effect, and the others mount nothing", () => {
   for (const id of themesWithWeather()) {
     localStorage.setItem("codify.theme", id);

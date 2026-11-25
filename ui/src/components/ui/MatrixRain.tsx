@@ -152,6 +152,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
     let fontSpec = `${Math.round(CELL * 0.82)}px monospace`;
     let columns: Column[] = [];
     let cellRows = 0;
+    let seededCanvas = false;
     let frameMs = Math.max(1, 1000 / Math.max(1, fps));
     // The fastest the boot probe found this window can afford; what was asked for until it has.
     let ceiling = fps;
@@ -179,12 +180,14 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
       if (canvas.width !== nextW) canvas.width = nextW;
       if (canvas.height !== nextH) canvas.height = nextH;
       if (changed) {
-        // Cell size in *canvas* pixels, so column count follows the cap, not
-        // the CSS box.
-        cell = CELL * dpr * scale;
+        // Cell size in *canvas* pixels, floored so column count stays bounded
+        // by the capped canvas width (<= 96 columns) rather than scaling
+        // linearly with wide/4K CSS viewports when `scale < 1`.
+        cell = Math.max(CELL * dpr * scale, canvas.width / 96);
         fontSpec = `${Math.round(cell * 0.82)}px monospace`;
         const cols = Math.max(1, Math.floor(canvas.width / cell));
         cellRows = Math.max(1, Math.floor(canvas.height / cell));
+        seededCanvas = false;
         columns = Array.from({ length: cols }, () => ({
           y: Math.floor(Math.random() * cellRows),
           // Random, not zero: a shared starting remainder would make every column
@@ -226,12 +229,30 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
         ctx.fillText(randomGlyph(glyphs), i * cell, col.y * cell);
       }
       ctx.fillStyle = rainColor;
-      for (let i = 0; i < columns.length; i++) {
-        const col = columns[i];
-        const x = i * cell;
-        for (let d = 1; d <= col.trail; d++) {
-          const ty = col.y - d * col.speed;
-          if (ty >= 0) ctx.fillText(randomGlyph(glyphs), x, ty * cell);
+      if (!paintsBlack || !seededCanvas) {
+        // Initial static frame (also reduced-motion / resize / non-black bg):
+        // populate every trail cell so the first paint shows full trails.
+        for (let i = 0; i < columns.length; i++) {
+          const col = columns[i];
+          const x = i * cell;
+          for (let d = 1; d <= col.trail; d++) {
+            const ty = col.y - d * col.speed;
+            if (ty >= 0) ctx.fillText(randomGlyph(glyphs), x, ty * cell);
+          }
+        }
+        if (paintsBlack) seededCanvas = true;
+      } else {
+        // Steady frames on black: the translucent veil above already fades
+        // previous frames into trails, so only repaint the immediate neck (to
+        // tone down last frame's bright head) plus one shimmering trail cell.
+        for (let i = 0; i < columns.length; i++) {
+          const col = columns[i];
+          const x = i * cell;
+          const neckY = col.y - col.speed;
+          if (neckY >= 0) ctx.fillText(randomGlyph(glyphs), x, neckY * cell);
+          const shimmerD = 2 + Math.floor(Math.random() * Math.max(1, col.trail - 1));
+          const shimmerY = col.y - shimmerD * col.speed;
+          if (shimmerY >= 0) ctx.fillText(randomGlyph(glyphs), x, shimmerY * cell);
         }
       }
       // The same edge fade every other atmosphere gets. It is painted into the
@@ -347,6 +368,7 @@ export const MatrixRain: React.FC<MatrixRainProps> = ({
         // be minutes old. Re-measure, repaint, and reset the accumulator so the
         // first frame is a whole one rather than a leap.
         layout();
+        seededCanvas = false;
         last = 0;
         due = 0;
         drawFrame();
