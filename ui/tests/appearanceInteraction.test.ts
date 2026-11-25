@@ -123,6 +123,22 @@ test("per-row Reset takes one colour back and leaves the others", async () => {
   });
 });
 
+test("deep theme customisation edits surfaces, borders, text, and status tones live", async () => {
+  await withPane(ON_TOXIC_LAB, async (dom) => {
+    await pickColour(dom, "Window background", "#000000");
+    await pickColour(dom, "Borders", "#1f3d2b");
+    await pickColour(dom, "Primary text", "#f0fff4");
+    await pickColour(dom, "Success tone", "#00e676");
+
+    assert.equal(wearing("--codify-bg"), "#000000");
+    assert.equal(wearing("--codify-bg-rgb"), "0 0 0");
+    assert.equal(wearing("--codify-border"), "#1f3d2b");
+    assert.equal(wearing("--codify-primary"), "#f0fff4");
+    assert.equal(wearing("--codify-success"), "#00e676");
+    assert.equal(store()["toxic-lab"]?.["--codify-bg"], "#000000");
+  });
+});
+
 // ─────────────────────────────────────────────────────────────────────────────
 // Undo
 // ─────────────────────────────────────────────────────────────────────────────

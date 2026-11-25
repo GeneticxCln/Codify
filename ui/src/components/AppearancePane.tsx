@@ -22,6 +22,8 @@ import {
   resolveTint,
   resolveTints,
   saveTints,
+  themeWithSurfaceTints,
+  tintGroups,
   tintableVars,
   TINT_ROLES,
   type TintMap,
@@ -465,7 +467,9 @@ const ThemeDetail: React.FC<{
   undoable,
   undoLabel,
 }) => {
-  const varOf = (name: string): string => theme.tokens[name as keyof typeof theme.tokens] ?? "";
+  const resolved = resolveTints(theme, tints);
+  const varOf = (name: string): string =>
+    resolved[name] ?? (theme.tokens[name as keyof typeof theme.tokens] ?? "");
   const rains = Boolean(theme.tokens["--cmatrix-rain"]);
   const Effect = effectFor(theme.id);
   // "No effect" is a property of the *theme*, not of one theme's id. Keyed on
@@ -522,7 +526,7 @@ const ThemeDetail: React.FC<{
           <p className="text-xs text-codify-secondary mt-0.5 leading-relaxed">{theme.description}</p>
           {/* The *resolved* line, not the theme's own — see `swatchLine`. */}
           <p className="font-mono text-2xs text-codify-muted mt-1.5 break-words">
-            {swatchLine(theme, resolveTints(theme, tints))}
+            {swatchLine(theme, resolved)}
           </p>
         </div>
         {isActive ? (
@@ -604,15 +608,17 @@ const ThemeTints: React.FC<{
   undoable: boolean;
   undoLabel: string;
 }> = ({ theme, tints, onPick, onClear, onReset, onUndo, undoable, undoLabel }) => {
+  const groups = tintGroups(theme);
   const vars = tintableVars(theme);
   const changed = vars.filter((name) => isTintable(tints[name] ?? ""));
+  const effectiveTheme = themeWithSurfaceTints(theme, tints);
 
   return (
     <section
       className="mt-3 rounded-lg border border-codify-border bg-codify-raised/60 p-2.5"
       aria-label="Custom colours"
     >
-      <div className="flex items-center justify-between gap-2 mb-1.5">
+      <div className="flex items-center justify-between gap-2 mb-2">
         <h4 className="text-2xs font-semibold uppercase tracking-wide text-codify-muted">
           Custom colours
         </h4>
@@ -646,50 +652,51 @@ const ThemeTints: React.FC<{
         </div>
       </div>
 
-      {/* Every tintable variable gets a well, not only the edited ones. The
-          first version listed the edited ones and described the rest in a
-          sentence — "3 colours you can change: Interface accent, Bubble body,
-          Bubble skin" — which names three things the user has no control over.
-          A control that is described rather than offered is the hard version
-          of a missing feature. */}
-      <ul className="space-y-1.5">
-        {vars.map((name) => (
-          <TintRow
-            key={name}
-            theme={theme}
-            name={name}
-            proposed={isTintable(tints[name] ?? "") ? (tints[name] as string) : null}
-            onPick={onPick}
-            onClear={onClear}
-          />
+      {/* Every colour token the theme publishes — accent, backdrop, surfaces,
+          borders, text, and status tones — grouped into compact two-column rows. */}
+      <div className="space-y-3">
+        {groups.map((group) => (
+          <div key={group.id}>
+            <h5 className="text-2xs font-medium text-codify-muted mb-1.5">
+              {group.title}
+            </h5>
+            <ul className="grid grid-cols-1 sm:grid-cols-2 gap-x-3 gap-y-1.5">
+              {group.vars.map((name) => (
+                <TintRow
+                  key={name}
+                  theme={effectiveTheme}
+                  stockTheme={theme}
+                  name={name}
+                  proposed={isTintable(tints[name] ?? "") ? (tints[name] as string) : null}
+                  onPick={onPick}
+                  onClear={onClear}
+                />
+              ))}
+            </ul>
+          </div>
         ))}
-      </ul>
+      </div>
     </section>
   );
 };
 
 /**
  * One variable: the colour well, what it resolved to, and why.
- *
- * `proposed` is `null` when the user has not touched it, and that is a
- * different row rather than a tinted one: the well shows the theme's own value
- * and there is nothing to undo. Rendering the untinted rows the same way is
- * what makes the group read as *the theme's palette, editable* rather than *a
- * list of overrides*.
  */
 const TintRow: React.FC<{
   theme: AppearanceTheme;
+  stockTheme: AppearanceTheme;
   name: string;
   proposed: string | null;
   onPick: (name: string, hex: string) => void;
   onClear: (name: string) => void;
-}> = ({ theme, name, proposed, onPick, onClear }) => {
-  const own = theme.tokens[name as keyof typeof theme.tokens] as string | undefined;
+}> = ({ theme, stockTheme, name, proposed, onPick, onClear }) => {
+  const own = stockTheme.tokens[name as keyof typeof stockTheme.tokens] as string | undefined;
   const resolved = proposed ? resolveTint(theme, name, proposed) : null;
   const shown = resolved?.hex || own || "#808080";
   const label = TINT_ROLES[name] ?? name.replace(/^--/, "");
   return (
-    <li className="flex items-center gap-2">
+    <li className="flex items-center gap-2 min-w-0">
       <ColorPicker
         label={label}
         value={shown}
@@ -698,13 +705,9 @@ const TintRow: React.FC<{
       <span className="min-w-0 flex-1">
         <span className="block text-2xs text-codify-secondary truncate">{label}</span>
         <span className="block font-mono text-2xs text-codify-muted truncate">
-          {/* Say which way it moved and by how much. "Adjusted" alone tells a
-              user their pick was overridden without telling them whether it is
-              now safe, and "4.6:1" tells them nothing unless the number is the
-              lowest of the surfaces it has to sit on. */}
           {resolved?.adjusted
             ? `${shown} · was ${resolved.proposed} · ${resolved.ratio.toFixed(1)}:1`
-            : resolved
+            : resolved && resolved.ratio > 0
               ? `${shown} · ${resolved.ratio.toFixed(1)}:1`
               : shown}
         </span>

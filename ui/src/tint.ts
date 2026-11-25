@@ -14,31 +14,18 @@ import {
 } from "./appearance";
 
 /**
- * Custom colours, and the guard that makes them safe.
+ * Deep theme customisation, and the contrast guard that keeps foregrounds legible.
  *
- * A tint is a per-theme override of a handful of colour variables: the theme's
- * `accent`, and the two or three weather variables its own painter reads. The
- * physics do not change — the same 30 FPS, the same capped canvas, the same
- * gutters — because nothing here touches a painter's arithmetic. It only
- * rewrites the custom properties the painter resolves every frame.
+ * Every colour token a theme publishes can be customised per theme:
+ * - **Surfaces & borders** (`--codify-bg`, `--codify-surface`, `--codify-raised`, `--codify-border`,
+ *   `--codify-border-strong`, and `--cmatrix-bg`) apply verbatim so a person can reshape the entire
+ *   palette — pure OLED black, tinted darks, or even light surfaces.
+ * - **Text, accent, status tones, and backdrop art** are contrast-checked against the theme's
+ *   *effective* surfaces (including any custom surface colours the user chose), moving lightness
+ *   while preserving hue and saturation so the UI remains readable.
  *
- * **Why a guard, and not a free colour picker.** A free picker is a bug report.
- * Every colour in this app is painted on a surface, and
- * `ui/tests/contrast.test.ts` holds every pair in every theme to WCAG AA at its
- * own size and weight. A user who picks a deep crimson for the accent of a
- * `#12271a` raised surface gets about 1.4:1 and a transcript they cannot read,
- * and no amount of "it was the user's choice" makes that acceptable. So a
- * proposed colour is *clamped* — its hue and saturation are kept and its
- * lightness is moved until the pairs pass — and when even a fully light or
- * fully dark version of it cannot pass, the theme's own value is kept instead.
- * A tint that cannot be made readable does not get applied.
- *
- * **Why `accent` and the weather variables, and not more.** `primary`,
- * `secondary` and `muted` are the surfaces everything else is measured against;
- * letting a user move them turns a contrast guard into a suggestion. And
- * `danger` and `warning` are held by a separate rule that no picker may touch:
- * they stay on the warm arc so that a user who has learned that orange means
- * "needs attention" in one theme recognises it in the next.
+ * `applyTheme` merges resolved overrides before deriving `-rgb` channel triplets and `--codify-*-ink`
+ * badge/button inks, so every utility class, terminal palette, and live canvas repaints together.
  */
 
 /** `var -> #rrggbb`, for one theme. Absent means "the theme's own value". */
@@ -49,9 +36,37 @@ export type TintStore = Readonly<Record<string, TintMap>>;
 
 export const TINT_STORAGE_KEY = "codify.tints";
 
-/** The surface tokens a colour has to stay legible on, worst case first. */
+/** The surface tokens a foreground colour has to stay legible on, worst case first. */
 const TEXT_SURFACES = ["--codify-raised", "--codify-surface", "--codify-bg"] as const;
 const ART_SURFACES = ["--codify-bg", "--codify-raised"] as const;
+
+/** Surface & structural colour variables that apply verbatim without contrast clamping. */
+export const SURFACE_VARS: readonly string[] = [
+  "--codify-bg",
+  "--codify-surface",
+  "--codify-raised",
+  "--codify-border",
+  "--codify-border-strong",
+];
+
+/** Text colour variables. */
+export const TEXT_VARS: readonly string[] = [
+  "--codify-primary",
+  "--codify-secondary",
+  "--codify-muted",
+];
+
+/** Status tone variables. */
+export const STATUS_VARS: readonly string[] = [
+  "--codify-info",
+  "--codify-success",
+  "--codify-warning",
+  "--codify-danger",
+  "--codify-neutral",
+];
+
+/** Background/structural tokens that are never clamped against surfaces. */
+const UNCLAMPED_VARS = new Set<string>([...SURFACE_VARS, "--cmatrix-bg"]);
 
 /**
  * AA for body text. The app is full of `text-xs` captions, and WCAG 1.4.3
@@ -67,9 +82,23 @@ export const TEXT_FLOOR = 4.5;
  */
 export const ART_FLOOR = 3;
 
-/** What each paintable variable means, for the picker's label. */
+/** What each customisable variable means, for the picker's label. */
 export const TINT_ROLES: Readonly<Record<string, string>> = {
   "--codify-accent": "Interface accent",
+  "--codify-bg": "Window background",
+  "--codify-surface": "Panel surface",
+  "--codify-raised": "Elevated surface",
+  "--codify-border": "Borders",
+  "--codify-border-strong": "Strong borders",
+  "--codify-primary": "Primary text",
+  "--codify-secondary": "Secondary text",
+  "--codify-muted": "Muted text",
+  "--codify-info": "Info tone",
+  "--codify-success": "Success tone",
+  "--codify-warning": "Warning tone",
+  "--codify-danger": "Danger tone",
+  "--codify-neutral": "Neutral badge",
+  "--cmatrix-bg": "Rain backdrop",
   "--cmatrix-rain": "Rain",
   "--cmatrix-text": "Rain highlight",
   "--cyber-cyan": "Horizon cyan",
@@ -113,49 +142,55 @@ export function isTintable(hex: string): boolean {
   return /^#[0-9a-f]{6}$/i.test(hex.trim());
 }
 
-/**
- * The variables a theme offers for tinting, in the order the picker shows them.
- *
- * Derived rather than declared, so a new theme gets a picker with no second
- * list to keep in step — but derived from a *narrower* rule than "every managed
- * variable the theme publishes", because that set is the whole palette. Taking
- * it wholesale offered `--codify-border` and `--codify-muted` on the default
- * theme: the first is the hairline the rest of the app is read against, the
- * second is the captions. Both are the kind of colour a user can pick exactly
- * once, by accident, and then live with.
- *
- * So the rule is the weather namespaces, and nothing else: the accent, which
- * every theme has, plus this theme's own painted colours. `MANAGED_VARS` is
- * where the namespaces are declared, which is why the two are named here rather
- * than filtered on a prefix — a new namespace in `appearance.ts` becomes
- * tintable without a second edit, and `--codify-*` can never become tintable
- * by accident.
- */
-const NOT_PAINT: ReadonlyArray<string> = [
-  // The CMatrix canvas's own backdrop. It is a surface, drawn *behind* the
-  // gutter, and a user who could move it would be repainting the window
-  // rather than the weather.
-  "--cmatrix-bg",
-  // The only managed variable that is not a colour: the ASCII rain publishes
-  // the glyphs it draws, so a monochrome theme is a token edit rather than a
-  // forked component. It has no hex and a colour well cannot hold it.
-  "--cmatrix-glyphs",
-];
+/** Non-colour managed tokens that a colour picker cannot hold. */
+const NOT_COLOUR: ReadonlyArray<string> = ["--cmatrix-glyphs"];
 
-export function tintableVars(theme: AppearanceTheme): string[] {
-  const weather = MANAGED_VARS.filter(
+function weatherVars(theme: AppearanceTheme): string[] {
+  return MANAGED_VARS.filter(
     (name) =>
       !name.startsWith("--codify-") &&
       !name.endsWith("-rgb") &&
-      !NOT_PAINT.includes(name) &&
+      !NOT_COLOUR.includes(name) &&
       name in theme.tokens,
   );
-  return ["--codify-accent", ...weather];
+}
+
+/** One titled group of colour tokens for the Appearance customiser. */
+export interface TintGroup {
+  id: "accent" | "surfaces" | "text" | "status";
+  title: string;
+  vars: string[];
+}
+
+/** The customisable variables of `theme`, grouped for clear navigation. */
+export function tintGroups(theme: AppearanceTheme): TintGroup[] {
+  const present = (list: readonly string[]): string[] =>
+    list.filter((name) => name in theme.tokens);
+  const weather = weatherVars(theme);
+  const groups: TintGroup[] = [
+    {
+      id: "accent",
+      title: weather.length > 0 ? "Accent & backdrop" : "Accent",
+      vars: ["--codify-accent", ...weather],
+    },
+    { id: "surfaces", title: "Surfaces & borders", vars: present(SURFACE_VARS) },
+    { id: "text", title: "Text", vars: present(TEXT_VARS) },
+    { id: "status", title: "Status tones", vars: present(STATUS_VARS) },
+  ];
+  return groups.filter((g) => g.vars.length > 0);
+}
+
+/** Every colour variable a theme offers for customisation, in picker order. */
+export function tintableVars(theme: AppearanceTheme): string[] {
+  return tintGroups(theme).flatMap((g) => g.vars);
 }
 
 /** The contrast floor and surfaces one variable is held to. */
 export function ruleFor(name: string, theme: AppearanceTheme): { floor: number; against: string[] } {
-  const isText = name.startsWith("--codify-");
+  if (UNCLAMPED_VARS.has(name)) {
+    return { floor: 0, against: [] };
+  }
+  const isText = name.startsWith("--codify-") && name !== "--codify-neutral";
   const names = isText ? TEXT_SURFACES : ART_SURFACES;
   return {
     floor: isText ? TEXT_FLOOR : ART_FLOOR,
@@ -163,6 +198,24 @@ export function ruleFor(name: string, theme: AppearanceTheme): { floor: number; 
       .filter((s) => typeof theme.tokens[s] === "string")
       .map((s) => theme.tokens[s] as string),
   };
+}
+
+/** Build a view of `theme` whose surface/structural tokens include any valid user overrides. */
+export function themeWithSurfaceTints(
+  theme: AppearanceTheme,
+  tints: TintMap | undefined,
+): AppearanceTheme {
+  if (!tints) return theme;
+  let changed = false;
+  const tokens: Record<string, string> = { ...(theme.tokens as Record<string, string>) };
+  for (const name of UNCLAMPED_VARS) {
+    const proposed = tints[name];
+    if (proposed && name in tokens && isTintable(proposed)) {
+      tokens[name] = proposed.trim().toLowerCase();
+      changed = true;
+    }
+  }
+  return changed ? { ...theme, tokens: tokens as AppearanceTheme["tokens"] } : theme;
 }
 
 /** The outcome of resolving one proposed tint, and why it came out that way. */
@@ -178,14 +231,7 @@ export interface ResolvedTint {
 }
 
 /**
- * Resolve one proposed tint against one theme, or refuse it.
- *
- * The refusal is the interesting branch and it is a real case rather than a
- * guard against the impossible: a user picking a mid-luminance accent for
- * `Liquid Mercury`, whose `--codify-raised` is `#131720` and whose own accent is
- * already near the top of the passing range, has picked a colour that cannot be
- * made legible on that surface at any lightness. Keeping the theme's own value
- * is the only answer that does not ship an unreadable app.
+ * Resolve one proposed tint against one theme (or a theme with user surface overrides applied).
  */
 export function resolveTint(
   theme: AppearanceTheme,
@@ -199,23 +245,34 @@ export function resolveTint(
   if (!isTintable(proposed)) {
     return { hex: own, proposed, adjusted: proposed !== own, ratio: 0 };
   }
+  const clean = proposed.trim().toLowerCase();
   const { floor, against } = ruleFor(name, theme);
-  const clamped = clampForContrast(proposed, against, floor);
+  if (against.length === 0 || floor <= 0) {
+    return { hex: clean, proposed: clean, adjusted: false, ratio: 0 };
+  }
+  const clamped = clampForContrast(clean, against, floor);
   if (clamped === null) {
-    const ratio = against.length ? Math.min(...against.map((bg) => contrastRatio(own, bg))) : floor;
-    return { hex: own, proposed, adjusted: true, ratio };
+    const ratio = Math.min(...against.map((bg) => contrastRatio(own, bg)));
+    return { hex: own, proposed: clean, adjusted: true, ratio };
   }
   const ratio = Math.min(...against.map((bg) => contrastRatio(clamped, bg)));
-  return { hex: clamped, proposed, adjusted: clamped.toLowerCase() !== proposed.toLowerCase(), ratio };
+  return { hex: clamped, proposed: clean, adjusted: clamped.toLowerCase() !== clean, ratio };
 }
 
-/** Every tint for one theme, resolved, in picker order. */
+/**
+ * Every tint for one theme, resolved in two passes:
+ * 1. Surface & border overrides apply directly, updating the effective surfaces.
+ * 2. Foreground, text, status, and backdrop overrides resolve against those effective surfaces.
+ */
 export function resolveTints(theme: AppearanceTheme, tints: TintMap | undefined): Record<string, string> {
+  if (!tints) return {};
+  const allowed = new Set(tintableVars(theme));
+  const effective = themeWithSurfaceTints(theme, tints);
   const out: Record<string, string> = {};
-  for (const name of Object.keys(tints ?? {})) {
-    if (!tintableVars(theme).includes(name)) continue;
-    const proposed = tints![name]!;
-    const { hex } = resolveTint(theme, name, proposed);
+  for (const name of Object.keys(tints)) {
+    if (!allowed.has(name)) continue;
+    const proposed = tints[name]!;
+    const { hex } = resolveTint(effective, name, proposed);
     if (hex) out[name] = hex;
   }
   return out;
@@ -244,9 +301,6 @@ export function loadTints(
     if (typeof map !== "object" || map === null || Array.isArray(map)) continue;
     const tints: Record<string, string> = {};
     for (const [name, value] of Object.entries(map as Record<string, unknown>)) {
-      // A stored value that is not a hex is dropped rather than clamped: it is
-      // corruption, not a choice, and guessing at it is how a bad write becomes
-      // a permanently odd palette.
       if (typeof value === "string" && isTintable(value)) tints[name] = value.toLowerCase();
     }
     out[themeId] = tints;
@@ -282,17 +336,6 @@ function tintStorage(): Pick<Storage, "getItem" | "setItem" | "removeItem"> | un
 
 /**
  * Apply a theme with the user's own colours on top of it.
- *
- * The one call the app makes, and the seam the picker goes through: resolve
- * this theme's stored tints, hand the result to `applyTheme` as overrides, and
- * let that one write every custom property. Nothing here re-implements the
- * apply, so there is no second place a colour can come from.
- *
- * The canvases need no notification. `applyTheme` ends by dispatching the theme
- * change event, and every painter resolves its variables through
- * `useAtmosphereCanvas`'s live `getComputedStyle` read on the frame it draws —
- * so a tint is on screen within one frame, and a running animation is the
- * reason it is free rather than a repaint.
  */
 export function applyTintedTheme(
   id: string,

@@ -44,7 +44,7 @@ test("ColorPicker opens a themed dialog, accepts presets and hex edits, and clos
     };
 
     await dom.render(React.createElement(Host));
-    assert.equal(dom.container.querySelector('[role="dialog"]'), null, "dialog opened before click");
+    assert.ok(dom.container.querySelector('[role="dialog"]') === null, "dialog opened before click");
 
     await dom.click(dom.byLabel("Interface accent colour"));
     const dialog = dom.container.querySelector('[role="dialog"]');
@@ -58,7 +58,7 @@ test("ColorPicker opens a themed dialog, accepts presets and hex edits, and clos
     assert.equal(picked.at(-1), "#ff2e9a");
 
     await dom.press(dialog, "Escape");
-    assert.equal(dom.container.querySelector('[role="dialog"]'), null, "Escape did not close picker");
+    assert.ok(dom.container.querySelector('[role="dialog"]') === null, "Escape did not close picker");
     assert.equal(parentSawEscape, false, "Escape leaked out to the parent modal");
   });
 });

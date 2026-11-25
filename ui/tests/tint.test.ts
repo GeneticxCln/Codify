@@ -235,30 +235,34 @@ test("every real theme surface can rescue every hue, so the sweep always termina
 // What a tint is allowed to touch
 // ─────────────────────────────────────────────────────────────────────────────
 
-test("the picker offers the accent plus that theme's own weather, and nothing else", () => {
+test("the picker offers every colour token a theme publishes, never derived triplets or glyph strings", () => {
   for (const theme of THEMES) {
     const vars = tintableVars(theme);
     assert.equal(vars[0], "--codify-accent", `${theme.id} does not lead with the accent`);
-    assert.ok(vars.length >= 1, `${theme.id} offers nothing at all`);
+    assert.ok(vars.length >= 14, `${theme.id} should expose all core UI tokens`);
+    for (const core of [
+      "--codify-bg",
+      "--codify-surface",
+      "--codify-raised",
+      "--codify-border",
+      "--codify-border-strong",
+      "--codify-primary",
+      "--codify-secondary",
+      "--codify-muted",
+      "--codify-info",
+      "--codify-success",
+      "--codify-warning",
+      "--codify-danger",
+      "--codify-neutral",
+    ]) {
+      assert.ok(vars.includes(core), `${theme.id} is missing deep-customisable token ${core}`);
+    }
     for (const name of vars) {
       assert.ok(!name.endsWith("-rgb"), `${theme.id} offers the derived ${name}`);
+      assert.notEqual(name, "--cmatrix-glyphs", `${theme.id} offers non-colour glyph alphabet`);
       assert.ok(
         theme.tokens[name as ManagedVar] !== undefined,
         `${theme.id} offers ${name}, which it does not publish`,
-      );
-      assert.ok(
-        !["--codify-bg", "--codify-surface", "--codify-raised"].includes(name),
-        `${theme.id} offers the surface ${name}, which would repaint the whole app`,
-      );
-      assert.ok(
-        !["--codify-primary", "--codify-secondary", "--codify-muted"].includes(name),
-        `${theme.id} offers ${name}, which the whole app measures its colours against`,
-      );
-      assert.ok(
-        !["--codify-danger", "--codify-warning", "--codify-success", "--codify-info", "--codify-neutral"].includes(
-          name,
-        ),
-        `${theme.id} offers a status tone, and status colours carry meaning no picker may move`,
       );
       assert.ok(
         TINT_ROLES[name],
@@ -276,29 +280,21 @@ test("every theme is tintable and no two themes offer an unlabelled colour", () 
       assert.ok(TINT_ROLES[name], `no label for ${name}, offered by ${theme.id}`);
     }
   }
-  // The labels are the difference between a picker and a hex editor, so a name
-  // in `TINT_ROLES` that no theme offers is a label for a colour that cannot be
-  // chosen — a rot entry that reads as coverage in the table. Two of them were
-  // here: `--cmatrix-glow` and `--cmatrix-glow-2`, a pair the `MANAGED_VARS`
-  // list anticipated for a future rain theme that never arrived.
   for (const name of Object.keys(TINT_ROLES)) {
     assert.ok(seen.has(name), `TINT_ROLES documents ${name}, which no theme offers`);
   }
-  // And a theme with no atmosphere has nothing to recolour but its accent,
-  // which is the honest answer rather than a picker offering to tint variables
-  // it does not publish. The default theme is one; `toxic-lab` is not.
-  assert.equal(tintableVars(themeById("codify-dark")).length, 1);
-  assert.ok(tintableVars(themeById("toxic-lab")).length >= 3);
+  // A motionless theme exposes all 14 core palette tokens; a weather theme adds its canvas tokens.
+  assert.equal(tintableVars(themeById("codify-dark")).length, 14);
+  assert.ok(tintableVars(themeById("toxic-lab")).length >= 16);
 });
 
-test("the floor is the one WCAG asks for, chosen per kind of colour", () => {
-  // Text and art are not the same question. A weather variable paints a line or
-  // a particle and is held to the 1.4.11 graphic floor; `--codify-accent` ends
-  // up on a label, and labels are text. Holding both to 4.5 would refuse half
-  // the art a user can legitimately want; holding both to 3 would ship
-  // unreadable chrome.
+test("the floor is chosen per kind of colour: surfaces are free, text is 4.5:1, art is 3:1", () => {
   const theme = themeById("toxic-lab");
+  assert.equal(ruleFor("--codify-bg", theme).floor, 0);
+  assert.deepEqual(ruleFor("--codify-bg", theme).against, []);
+  assert.equal(ruleFor("--codify-border", theme).floor, 0);
   assert.equal(ruleFor("--codify-accent", theme).floor, TEXT_FLOOR);
+  assert.equal(ruleFor("--codify-primary", theme).floor, TEXT_FLOOR);
   assert.equal(ruleFor("--reagent", theme).floor, ART_FLOOR);
   assert.equal(ruleFor("--reagent", theme).against.length, 2, "art is judged on two surfaces");
   assert.equal(ruleFor("--codify-accent", theme).against.length, 3, "text is judged on all three");
@@ -350,27 +346,40 @@ test("every resolved tint in every theme clears the floor it is held to", () => 
   }
 });
 
-test("a resolved tint never repaints a surface", () => {
-  // The whole "backgrounds are off-limits" decision, asserted rather than
-  // asserted-in-a-comment: whatever a tint resolves to, the three surfaces are
-  // still the theme's own values. A tint that moved `--codify-bg` would
-  // repaint the transcript and the gutter at once, and the clamp would be
-  // guarding colours on a ground that has already moved.
+test("custom surfaces apply verbatim and foreground tints adapt to them", () => {
   const storage = fakeStorage();
   const style = fakeStyle();
-  const tints: Record<string, string> = {};
-  for (const name of tintableVars(themeById("toxic-lab"))) tints[name] = "#ff00ff";
-  saveTints(storage, { "toxic-lab": tints });
+  saveTints(storage, {
+    "toxic-lab": {
+      "--codify-bg": "#000000",
+      "--codify-surface": "#0a0a0a",
+      "--codify-raised": "#141414",
+      "--codify-border": "#223322",
+      "--reagent": "#ff00ff",
+    },
+  });
   applyTintedTheme("toxic-lab", style, storage);
-  const theme = themeById("toxic-lab");
-  for (const surface of ["--codify-bg", "--codify-surface", "--codify-raised"] as const) {
-    assert.equal(
-      style.props.get(surface),
-      theme.tokens[surface],
-      `a tint repainted ${surface}`,
-    );
-  }
-  assert.equal(style.props.get("--reagent"), "#ff00ff", "the weather variable did not take the tint");
+  assert.equal(style.props.get("--codify-bg"), "#000000");
+  assert.equal(style.props.get("--codify-bg-rgb"), "0 0 0");
+  assert.equal(style.props.get("--codify-surface"), "#0a0a0a");
+  assert.equal(style.props.get("--codify-raised"), "#141414");
+  assert.equal(style.props.get("--codify-border"), "#223322");
+  assert.equal(style.props.get("--reagent"), "#ff00ff");
+
+  // On custom light surfaces, foreground text/accents are clamped dark to stay legible.
+  const light = resolveTints(themeById("codify-dark"), {
+    "--codify-bg": "#ffffff",
+    "--codify-surface": "#f4f6f8",
+    "--codify-raised": "#e8edf2",
+    "--codify-primary": "#111827",
+    "--codify-accent": "#e0f2fe",
+  });
+  assert.equal(light["--codify-bg"], "#ffffff");
+  assert.equal(light["--codify-primary"], "#111827");
+  assert.ok(
+    contrastRatio(light["--codify-accent"]!, "#e8edf2") >= TEXT_FLOOR,
+    `accent ${light["--codify-accent"]} should clamp dark on light custom surfaces`,
+  );
 });
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -743,16 +752,13 @@ test("the detail panel prints the colour you are wearing, the rows print the the
   localStorage.removeItem(STORAGE);
 });
 
-test("a theme with no weather offers its accent alone, and nothing to reset", () => {
-  // The default theme is the one a new user sees first, so a picker that
-  // rendered three empty rows there would be the first impression of the
-  // feature. It has no painter, so it has no weather to recolour.
+test("a theme with no weather still offers all 14 core theme colours, and nothing to reset", () => {
   localStorage.setItem("codify.theme", "codify-dark");
   const out = pane();
   assert.equal(
     (out.match(/data-color-well="true"/g) ?? []).length,
-    1,
-    "codify-dark publishes no weather, so it should offer exactly its accent",
+    14,
+    "codify-dark should offer all 14 core UI colours for deep customisation",
   );
   assert.doesNotMatch(out, /Reset all/, "and nothing is tinted, so there is nothing to reset");
 });

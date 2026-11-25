@@ -219,11 +219,12 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
             />
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 border-codify-primary shadow-sm"
+              className="pointer-events-none absolute w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 shadow-sm"
               style={{
                 left: `${hsv[1]}%`,
                 top: `${100 - hsv[2]}%`,
                 backgroundColor: safeValue,
+                borderColor: "var(--codify-primary)",
               }}
             />
           </div>
@@ -261,8 +262,8 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
           >
             <span
               aria-hidden="true"
-              className="pointer-events-none absolute top-1/2 w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 border-codify-primary bg-codify-surface shadow-sm"
-              style={{ left: `${(hsv[0] / 360) * 100}%` }}
+              className="pointer-events-none absolute top-1/2 w-3.5 h-3.5 -ml-[7px] -mt-[7px] rounded-full border-2 bg-codify-surface shadow-sm"
+              style={{ left: `${(hsv[0] / 360) * 100}%`, borderColor: "var(--codify-primary)" }}
             />
           </div>
 
@@ -277,7 +278,7 @@ export const ColorPicker: React.FC<ColorPickerProps> = ({ value, label, onChange
                 onClick={() => onHexInput(swatch)}
                 className={
                   "h-5 w-full rounded-sm border cursor-pointer transition-transform hover:scale-110 " +
-                  (swatch === safeValue ? "border-codify-primary ring-1 ring-codify-accent" : "border-codify-border")
+                  (swatch === safeValue ? "border-codify-border-strong ring-1 ring-codify-accent" : "border-codify-border")
                 }
                 style={{ backgroundColor: swatch }}
               />
