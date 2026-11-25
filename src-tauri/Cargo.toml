@@ -1,6 +1,6 @@
 [package]
 name = "codify-desktop"
-version = "1.9.3"
+version = "1.9.4"
 description = "Codify Desktop — AI-powered coding assistant"
 authors = ["Codify Team"]
 license = "MIT"
