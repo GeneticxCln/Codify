@@ -9,7 +9,7 @@ import type { ProviderProtocol } from "./types.ts";
  * slug through CSS `capitalize`, which made `openai` read "Openai" and `nvidia` "Nvidia", and printed
  * the protocol as the raw tag `openai_compat`; the provider select printed every slug in capitals.
  *
- * **This is not a catalogue.** The brand spellings below are a table of how eleven names are written,
+ * **This is not a catalogue.** The brand spellings below are a table of how twelve names are written,
  * so that a provider is called what it calls itself. It never decides what a provider is, whether it
  * exists, or what it serves: the providers in Settings, and every model, still come from the engine
  * and from live discovery (`docs/06`), and a slug this table has never heard of is shown as written,
@@ -24,6 +24,7 @@ const BRANDS: Readonly<Record<string, string>> = {
   opencode: "OpenCode",
   kilo: "Kilo Gateway",
   axforge: "AxForge",
+  runcrate: "Runcrate",
   groq: "Groq",
   google: "Google",
   anthropic: "Anthropic",

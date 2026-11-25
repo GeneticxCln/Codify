@@ -185,5 +185,21 @@ class AxForgeProvider(unittest.TestCase):
         self.assertEqual(ENV_KEY_MAP["axforge"], ["AXFORGE_API_KEY"])
 
 
+class RuncrateProvider(unittest.TestCase):
+    """Runcrate OpenAI-compatible inference gateway."""
+
+    def test_runcrate_is_a_builtin_openai_compatible_provider_that_needs_a_key(self) -> None:
+        meta = BUILTIN_PROVIDERS["runcrate"]
+        self.assertEqual(meta["protocol"], "openai_compat")
+        self.assertEqual(meta["base_url"], "https://api.runcrate.ai/v1")
+        self.assertTrue(meta["needs_key"])
+        self.assertFalse(meta["local_only"])
+
+    def test_its_key_can_come_from_runcrate_env_var(self) -> None:
+        from engine.providers import ENV_KEY_MAP
+
+        self.assertEqual(ENV_KEY_MAP["runcrate"], ["RUNCRATE_API_KEY"])
+
+
 if __name__ == "__main__":
     unittest.main()

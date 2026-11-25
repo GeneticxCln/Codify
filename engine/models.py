@@ -241,6 +241,14 @@ BUILTIN_PROVIDERS: dict[str, dict[str, Any]] = {
         "needs_key": True,
         "local_only": False,
     },
+    # Runcrate: OpenAI-compatible inference gateway with `/v1/models`
+    # (reporting `context_length` and `owned_by`) and Bearer auth.
+    "runcrate": {
+        "protocol": "openai_compat",
+        "base_url": "https://api.runcrate.ai/v1",
+        "needs_key": True,
+        "local_only": False,
+    },
 }
 
 

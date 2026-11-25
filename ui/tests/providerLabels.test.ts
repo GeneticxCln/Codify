@@ -12,8 +12,8 @@ import { providerLabel, protocolLabel, PROTOCOL_LABELS } from "../src/providerLa
 
 test("the providers the app ships are written as their brands write them", () => {
   assert.deepEqual(
-    ["openai", "openrouter", "deepseek", "nvidia", "opencode", "kilo", "axforge", "groq", "google", "anthropic", "ollama"].map(providerLabel),
-    ["OpenAI", "OpenRouter", "DeepSeek", "NVIDIA", "OpenCode", "Kilo Gateway", "AxForge", "Groq", "Google", "Anthropic", "Ollama"],
+    ["openai", "openrouter", "deepseek", "nvidia", "opencode", "kilo", "axforge", "runcrate", "groq", "google", "anthropic", "ollama"].map(providerLabel),
+    ["OpenAI", "OpenRouter", "DeepSeek", "NVIDIA", "OpenCode", "Kilo Gateway", "AxForge", "Runcrate", "Groq", "Google", "Anthropic", "Ollama"],
   );
 });
 
