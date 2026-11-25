@@ -135,7 +135,8 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
   onRefreshModels,
   refreshingModels,
 }) => {
-  const [builtins, setBuiltins] = useState<string[] | null>(null);
+  const [allBuiltins, setAllBuiltins] = useState<string[] | null>(null);
+  const [speechBuiltins, setSpeechBuiltins] = useState<string[] | null>(null);
   const [saved, setSaved] = useState<VoiceDraft | null>(null);
   const [draft, setDraft] = useState<VoiceDraft>(EMPTY);
   const [unsupported, setUnsupported] = useState(false);
@@ -170,7 +171,15 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
         setUnsupported(voice === null);
         setSaved(voice);
         setDraft(voice ?? EMPTY);
-        setBuiltins(catalog.builtins.map((b) => b.slug));
+        setAllBuiltins(catalog.builtins.map((b) => b.slug));
+        // Dictation and read-aloud speak the OpenAI audio API (`openai_compat`).
+        // Offering `ollama`, `anthropic` or `google` here invites picking a provider
+        // the engine will always refuse with `speech_protocol_unsupported`.
+        setSpeechBuiltins(
+          catalog.builtins
+            .filter((b) => !b.protocol || b.protocol === "openai_compat")
+            .map((b) => b.slug),
+        );
         setInputs(mics);
         setStatus(audio);
       })
@@ -249,7 +258,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
   };
 
   const modelsFor = (provider: string) => models.filter((m) => m.provider === provider);
-  const isCustom = (provider: string) => provider !== "" && !(builtins ?? []).includes(provider);
+  const isCustom = (provider: string) => provider !== "" && !(allBuiltins ?? []).includes(provider);
   const discoveryFor = (provider: string) => providerStatus.find((s) => s.provider === provider);
 
   if (loadError) {
@@ -260,7 +269,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
       </div>
     );
   }
-  if (builtins === null) {
+  if (speechBuiltins === null) {
     return <p className="text-xs text-codify-muted">Loading the audio settings…</p>;
   }
   if (unsupported) {
@@ -322,7 +331,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
           <Mic className="w-3.5 h-3.5 text-codify-accent" /> Dictation — speech to text in the prompt
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <ProviderSelect value={draft.stt_provider} onChange={(p) => edit({ stt_provider: p })} builtins={builtins} />
+          <ProviderSelect value={draft.stt_provider} onChange={(p) => edit({ stt_provider: p })} builtins={speechBuiltins} />
           <ModelSelect
             provider={draft.stt_provider}
             value={draft.stt_model}
@@ -378,7 +387,7 @@ export const AudioPane: React.FC<AudioPaneProps> = ({
           <Volume2 className="w-3.5 h-3.5 text-codify-accent" /> Read aloud — answers as speech
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <ProviderSelect value={draft.tts_provider} onChange={(p) => edit({ tts_provider: p })} builtins={builtins} />
+          <ProviderSelect value={draft.tts_provider} onChange={(p) => edit({ tts_provider: p })} builtins={speechBuiltins} />
           <ModelSelect
             provider={draft.tts_provider}
             value={draft.tts_model}

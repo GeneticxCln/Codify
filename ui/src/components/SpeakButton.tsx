@@ -33,7 +33,9 @@ export const SpeakButton: React.FC<SpeakButtonProps> = ({ id, text, autoPlay = f
   const play = useCallback(() => {
     setError(null);
     playSpeech(id, clipForSpeech(speakableText(text)), speak).catch((err: unknown) => {
-      setError(readRejection(err, "Could not read this answer aloud."));
+      const raw = readRejection(err, "Could not read this answer aloud.");
+      // Drop internal `snake_case_code: ` prefix when the engine already gave a full sentence.
+      setError(raw.replace(/^[a-z][a-z0-9_]*:\s+/i, ""));
     });
   }, [id, text]);
 
@@ -47,19 +49,19 @@ export const SpeakButton: React.FC<SpeakButtonProps> = ({ id, text, autoPlay = f
   }, [autoPlay, play]);
 
   return (
-    <div className="flex items-center gap-2 pl-2">
+    <div className="flex flex-wrap items-center gap-x-2 gap-y-1 pl-2">
       <button
         type="button"
         onClick={playing ? stopPlayback : play}
         aria-pressed={playing}
-        className="flex items-center gap-1.5 text-2xs text-codify-muted hover:text-codify-info transition-colors"
+        className="flex shrink-0 whitespace-nowrap items-center gap-1.5 text-2xs text-codify-muted hover:text-codify-info transition-colors"
         title={playing ? "Stop reading this answer" : "Read this answer aloud"}
       >
         {playing ? <Square className="w-3 h-3 fill-current" /> : <Volume2 className="w-3 h-3" />}
         {playing ? "Stop reading" : "Read aloud"}
       </button>
       {error && (
-        <span role="alert" className="text-2xs text-codify-danger">
+        <span role="alert" className="text-2xs text-codify-danger leading-snug">
           {error}
         </span>
       )}

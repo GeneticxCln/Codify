@@ -319,3 +319,28 @@ test("an engine without voice settings is told so, and nothing is offered to sav
     },
   );
 });
+
+test("speech provider pickers exclude built-in providers that cannot speak the OpenAI audio API", async () => {
+  await withPane(
+    {
+      "GET /settings/providers": () =>
+        json({
+          builtins: [
+            { slug: "openai", protocol: "openai_compat" },
+            { slug: "groq", protocol: "openai_compat" },
+            { slug: "ollama", protocol: "ollama" },
+            { slug: "anthropic", protocol: "anthropic" },
+            { slug: "google", protocol: "google" },
+          ],
+          custom: [],
+        }),
+    },
+    async (dom) => {
+      const providerButtons = dom.allByLabel("Provider");
+      assert.equal(providerButtons.length, 2, "expected Dictation and Read aloud provider pickers");
+      await dom.click(providerButtons[1]!);
+      const options = Array.from(dom.container.querySelectorAll('[role="option"]')).map((o) => o.textContent);
+      assert.deepEqual(options, ["OpenAI", "Groq", "Custom Provider..."]);
+    },
+  );
+});
