@@ -3,7 +3,6 @@ import { AlertTriangle } from "lucide-react";
 
 import {
   currentDialog,
-  resetDialogs,
   settleDialog,
   subscribeDialog,
   type ActiveDialog,
@@ -25,11 +24,7 @@ export const AppDialogHost: React.FC = () => {
 
   useEffect(() => {
     setDialog(currentDialog());
-    const off = subscribeDialog(setDialog);
-    return () => {
-      off();
-      resetDialogs();
-    };
+    return subscribeDialog(setDialog);
   }, []);
 
   useEffect(() => {

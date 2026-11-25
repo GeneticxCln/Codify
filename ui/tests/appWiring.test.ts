@@ -9,6 +9,7 @@
  */
 import test from "node:test";
 import assert from "node:assert/strict";
+import { act } from "react";
 
 import { registerTsx } from "./tsxLoader.ts";
 registerTsx();
@@ -16,6 +17,7 @@ registerTsx();
 import type { EngineCall } from "./appHarness.ts";
 
 const { withApp, conversation } = await import("./appHarness.ts");
+const { confirmDialog, resetDialogs } = await import("../src/appDialog.ts");
 
 const newTabButton = (root: HTMLElement): HTMLButtonElement => {
   const button = root.querySelector('button[title^="A new, empty tab"]');
@@ -470,4 +472,63 @@ test("the empty transcript's skip link lands on the composer that is on screen",
       "the skip link's target is not the composer",
     );
   });
+});
+
+test("an open AppDialog hides the native browser WebView and blocks global window shortcuts", async () => {
+  resetDialogs();
+  const focusCalls: Array<unknown> = [];
+  await withApp(
+    {
+      onShell: (cmd, args) => {
+        if (cmd === "codify_browser_focus") focusCalls.push(args.tabId ?? args.id ?? args);
+      },
+    },
+    async ({ dom, settle, tabs }) => {
+      // Open a Browser tab so a native child WebView is active.
+      const browser = dom.container.querySelector('button[title^="Browser"]') as HTMLElement | null;
+      assert.ok(browser, "the panel has no Browser control");
+      await dom.click(browser);
+      await settle();
+      const browserTabCount = tabs().length;
+      assert.equal(browserTabCount, 1);
+      const lastFocused = focusCalls[focusCalls.length - 1];
+      assert.ok(lastFocused && lastFocused !== "", "browser tab did not focus its native WebView");
+
+      // Open a modal confirm dialog: native WebView must hide (empty focus id).
+      let pending!: Promise<boolean>;
+      await act(async () => {
+        pending = confirmDialog({ title: "Delete item?", message: "Confirm", confirmLabel: "Delete" });
+      });
+      await settle();
+      const dlg = dom.container.querySelector('[role="alertdialog"]');
+      assert.ok(dlg, "AppDialog did not mount");
+      assert.equal(
+        focusCalls[focusCalls.length - 1],
+        "",
+        "opening AppDialog did not hide the native browser WebView (pageCovered)",
+      );
+
+      // Global shortcuts (Ctrl+T, Ctrl+K) must not fire behind an open modal dialog.
+      await act(async () => {
+        dom.window.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "t", ctrlKey: true, bubbles: true }));
+        dom.window.dispatchEvent(new dom.window.KeyboardEvent("keydown", { key: "k", ctrlKey: true, bubbles: true }));
+      });
+      await settle();
+      assert.equal(tabs().length, browserTabCount, "Ctrl+T opened a tab behind an open modal dialog");
+      assert.ok(
+        dom.container.querySelector('[placeholder*="Search commands"]') === null,
+        "Ctrl+K opened CommandPalette behind an open modal dialog",
+      );
+
+      // Closing the dialog restores the browser WebView focus.
+      await dom.click(dom.byButton("Cancel"));
+      assert.equal(await pending, false);
+      await settle();
+      assert.equal(
+        focusCalls[focusCalls.length - 1],
+        lastFocused,
+        "dismissing AppDialog did not restore native browser WebView focus",
+      );
+    },
+  );
 });

@@ -85,3 +85,17 @@ test("promptDialog pre-fills value, submits edited text, and returns null on can
     assert.equal(await p2, null);
   });
 });
+
+test("first dialog queued before lazy mount survives React.StrictMode double-effect", async () => {
+  await withDom(async (dom) => {
+    resetDialogs();
+    // Queue the dialog BEFORE AppDialogHost mounts (exact lazy-mount flow), then mount under StrictMode.
+    const pending = confirmDialog({ title: "Delete workspace?", message: "Files stay on disk.", confirmLabel: "Delete" });
+    await dom.render(React.createElement(React.StrictMode, null, React.createElement(AppDialogHost)));
+
+    const dlg = dom.container.querySelector('[role="alertdialog"]');
+    assert.ok(dlg, "StrictMode effect cleanup cancelled the first queued dialog");
+    await dom.click(dom.byButton("Delete"));
+    assert.equal(await pending, true);
+  });
+});

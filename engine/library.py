@@ -869,6 +869,26 @@ class LibraryService:
             if truncated:
                 break
 
+        if stopped == "cancelled" or (cancel is not None and cancel.is_set()):
+            cancelled_result: dict[str, Any] = {
+                "query": query,
+                "glob": glob,
+                "matches": [],
+                "files_scanned": files_scanned,
+                "files_skipped": files_skipped,
+                "truncated": True,
+                "stopped": "cancelled",
+                "strategy": "fts5_bm25",
+                "fts5": True,
+            }
+            if odd_names:
+                cancelled_result["non_utf8_names"] = odd_names
+            if pruned:
+                cancelled_result["skipped_dirs"] = sorted(pruned)
+            if byte_capped:
+                cancelled_result["byte_capped"] = byte_capped
+            return cancelled_result
+
         conn: Any = None
         try:
             conn = _sqlite3.connect(":memory:")
@@ -891,7 +911,7 @@ class LibraryService:
             # way a missing module would: the answer is computed the plain way
             # and labelled. The probe proved availability a moment ago; a
             # probe is not a guarantee about this call.
-            result = self._search_substring(query, glob)
+            result = self._search_substring(query, glob, cancel)
             result["strategy"] = "substring_fallback"
             result["fts5"] = True
             return result

@@ -247,6 +247,18 @@ class TestBatch2RuntimeAudit(unittest.IsolatedAsyncioTestCase):
                 expected_versions={"existing.txt": ""},
             )
 
+    def test_h5_keyword_search_respects_cancel_even_for_fts5_syntax_error_queries(self) -> None:
+        (self.ws_dir / "cpp.txt").write_text("C++ code here\n", encoding="utf-8")
+        lib = LibraryService(str(self.ws_dir))
+        cancel = threading.Event()
+        cancel.set()
+        with mock.patch.object(lib, "_search_substring", side_effect=AssertionError("must not fall back when cancelled")):
+            res = lib.search("C++", mode="keyword", cancel=cancel)
+        self.assertTrue(res["truncated"])
+        self.assertEqual(res.get("stopped"), "cancelled")
+        self.assertEqual(res["files_scanned"], 0)
+        self.assertEqual(res["matches"], [])
+
 
 if __name__ == "__main__":
     unittest.main()

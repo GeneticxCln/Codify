@@ -2781,9 +2781,13 @@ export const App: React.FC = () => {
   // it is being dragged (a page under the pointer would swallow the moves the drag is made of). Fires on every change
   // of what is drawn, including to and from no page at all; pages that do not exist yet are absent when their turn comes.
   const [splitDragging, setSplitDragging] = useState(false);
+  const [dialogOpen, setDialogOpen] = useState(() => currentDialog() !== null);
+  useEffect(() => subscribeDialog((d) => setDialogOpen(d !== null)), []);
+  const everDialogRef = useRef(false);
+  if (dialogOpen) everDialogRef.current = true;
   const pageInSplit = drawnSplit ? [drawnSplit.left, drawnSplit.right].find((t) => t.kind === "browser") : undefined;
   const drawnPageId = pageInSplit?.id ?? activeBrowserTab?.id ?? "";
-  const pageCovered = splitDragging || paletteOpen || tabMenu !== null || isSettingsOpen;
+  const pageCovered = splitDragging || paletteOpen || tabMenu !== null || isSettingsOpen || dialogOpen;
   const shownPageId = pageCovered ? "" : drawnPageId;
   useEffect(() => {
     void focusBrowserWebview(shownPageId).catch((err: any) =>
@@ -3017,6 +3021,7 @@ export const App: React.FC = () => {
 
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
+      if (currentDialog() !== null) return;
       const action = resolveShortcut(e);
       if (!action) return;
       switch (action.type) {
@@ -5111,28 +5116,13 @@ export const App: React.FC = () => {
         onClose={() => setPaletteOpen(false)}
         onSelect={handlePaletteSelect}
       />
-      <LazyDialogMount />
+      {everDialogRef.current && (
+        <Suspense fallback={null}>
+          <AppDialogHost />
+        </Suspense>
+      )}
     </div>
     </ClipboardRecorderContext.Provider>
-  );
-};
-const LazyDialogMount: React.FC = () => {
-  const [everOpened, setEverOpened] = useState(() => currentDialog() !== null);
-  useEffect(() => {
-    if (everOpened) return;
-    if (currentDialog() !== null) {
-      setEverOpened(true);
-      return;
-    }
-    return subscribeDialog((d) => {
-      if (d !== null) setEverOpened(true);
-    });
-  }, [everOpened]);
-  if (!everOpened) return null;
-  return (
-    <Suspense fallback={null}>
-      <AppDialogHost />
-    </Suspense>
   );
 };
 
