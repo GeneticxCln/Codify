@@ -863,3 +863,10 @@ html[data-motion="reduced"] .codify-logo-caret-live {
 .text-codify-design\/90 { color: rgb(var(--codify-design-rgb) / 0.90); }
 .text-codify-knowledge\/80 { color: rgb(var(--codify-knowledge-rgb) / 0.80); }
 .text-codify-warning\/70 { color: rgb(var(--codify-warning-rgb) / 0.70); }
+
+/* Keep header drawer controls inside narrow/tiled windows without clipping off the right edge. */
+@media (max-width: 1279px) {
+  .codify-hdr-actions button[aria-pressed] > span:first-of-type {
+    display: none;
+  }
+}

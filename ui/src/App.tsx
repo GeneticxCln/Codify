@@ -4446,7 +4446,7 @@ export const App: React.FC = () => {
     // and needs a positioned ancestor to be the window rather than the viewport's
     // idea of it. See `ui/src/components/ui/RainBackdrop.tsx`.
     <ClipboardRecorderContext.Provider value={recordClip}>
-    <div className="relative flex flex-col h-screen bg-codify-bg text-codify-secondary font-sans">
+    <div className="relative flex flex-col h-screen w-full overflow-x-hidden bg-codify-bg text-codify-secondary font-sans">
       {/* The window's weather, under everything and mounted once. It used to be
           inside the idle hero, which is why it showed down the middle and left
           when the first message arrived; both were the mount point, and a
@@ -4470,8 +4470,8 @@ export const App: React.FC = () => {
           decoration, and the two are not the same thing. */}
       <WeatherBackdrop active={canStop} />
       {/* Top Header Bar */}
-      <header className="relative bg-codify-chrome border-b border-codify-border px-4 py-2.5 flex items-center gap-3 z-10 shrink-0">
-        <div className="flex items-center gap-3 shrink-0">
+      <header className="relative bg-codify-chrome border-b border-codify-border px-3 lg:px-4 py-2.5 flex items-center gap-2 lg:gap-3 z-10 shrink-0 min-w-0 overflow-x-hidden">
+        <div className="flex items-center gap-2 lg:gap-3 shrink-0">
           {/* Hide or show the left panel. At the left edge, above the panel it controls, and in the
               header because the header is the one bar that is always there: a toggle inside the panel
               could not bring the panel back. `aria-pressed` is true while it is *hidden*, the state
@@ -4532,7 +4532,7 @@ export const App: React.FC = () => {
           workspaces={workspaces}
         />
 
-        <div className="flex items-center gap-3 shrink-0">
+        <div className="codify-hdr-actions flex items-center gap-1.5 lg:gap-3 shrink-0">
           {/* The engine connection, as four words: Live, Checking, Auth stale,
               Offline. It used to answer with the port number when healthy, which
               made the number the headline and the state the decoration; the port
