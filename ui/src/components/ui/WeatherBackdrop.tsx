@@ -1,29 +1,41 @@
 import React from "react";
 import {
   ANON_FLUID,
+  AURORA_BOREALIS,
   BIOLUMINESCENT_ABYSS,
   CYBER_ORGANISM,
   CYBERPUNK_NEON,
+  DIABLO,
   ELECTRIC_ARC,
   EVENT_HORIZON,
   FESTIVE_NIGHT,
   HUD_TACTICAL,
   LIQUID_MERCURY,
   NEURAL_CONSTELLATION,
+  OSCILLOSCOPE_CRT,
+  SAKURA_MIDNIGHT,
   SOLAR_FLARE,
   SOLARIZED_FLARE,
+  TOKYO_RAIN,
+  TOPOGRAPHIC_LIDAR,
   TOXIC_LAB,
   VECTOR_WIREFRAME,
+  VOLCANIC_OBSIDIAN,
   WINTER_SNOW,
   type AppearanceTheme,
 } from "../../appearance";
 import { useTheme } from "../../hooks/useTheme";
 import { type AtmosphereCanvasProps } from "../../hooks/useAtmosphereCanvas";
 import { AbyssSpores } from "./AbyssSpores";
+import { AuroraCurtain } from "./AuroraCurtain";
 import { CyberGrid } from "./CyberGrid";
+import { HellfireEmbers } from "./HellfireEmbers";
 import { HudSweep } from "./HudSweep";
+import { MagmaEmbers } from "./MagmaEmbers";
 import { NeuralWeb } from "./NeuralWeb";
 import { NebulaFlow } from "./NebulaFlow";
+import { SakuraDrift } from "./SakuraDrift";
+import { ScopeTrace } from "./ScopeTrace";
 import { SnowFall } from "./SnowFall";
 import { SolarWind } from "./SolarWind";
 import { CyberOrganism } from "./CyberOrganism";
@@ -31,6 +43,8 @@ import { EventHorizon } from "./EventHorizon";
 import { VectorWire } from "./VectorWire";
 import { Nanofluid } from "./Nanofluid";
 import { ElectricArc } from "./ElectricArc";
+import { TokyoRain } from "./TokyoRain";
+import { TopoLidar } from "./TopoLidar";
 import { ToxicLab } from "./ToxicLab";
 import { AnonFluid } from "./AnonFluid";
 
@@ -197,6 +211,48 @@ const ATMOSPHERES: Readonly<Record<string, Atmosphere>> = {
     // black window only makes the gutters harder to see.
     vignette:
       "radial-gradient(ellipse at center, transparent 52%, rgba(0, 10, 5, 0.36) 100%)",
+  },
+  [AURORA_BOREALIS.id]: {
+    trigger: "--aurora-mint",
+    Canvas: AuroraCurtain,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 46%, rgba(4, 10, 22, 0.52) 100%)",
+  },
+  [TOPOGRAPHIC_LIDAR.id]: {
+    trigger: "--lidar-line",
+    Canvas: TopoLidar,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 46%, rgba(6, 12, 10, 0.5) 100%)",
+  },
+  [OSCILLOSCOPE_CRT.id]: {
+    trigger: "--scope-trace",
+    Canvas: ScopeTrace,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 42%, rgba(3, 10, 8, 0.56) 100%)",
+  },
+  [VOLCANIC_OBSIDIAN.id]: {
+    trigger: "--magma-ember",
+    Canvas: MagmaEmbers,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 44%, rgba(14, 7, 4, 0.54) 100%)",
+  },
+  [SAKURA_MIDNIGHT.id]: {
+    trigger: "--sakura-petal",
+    Canvas: SakuraDrift,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 46%, rgba(11, 7, 15, 0.5) 100%)",
+  },
+  [TOKYO_RAIN.id]: {
+    trigger: "--rain-streak",
+    Canvas: TokyoRain,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 44%, rgba(6, 10, 18, 0.54) 100%)",
+  },
+  [DIABLO.id]: {
+    trigger: "--hellfire-ember",
+    Canvas: HellfireEmbers,
+    vignette:
+      "radial-gradient(ellipse at center, transparent 40%, rgba(16, 4, 6, 0.62) 100%)",
   },
 };
 

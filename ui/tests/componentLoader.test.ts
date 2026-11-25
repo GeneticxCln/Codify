@@ -55,6 +55,13 @@ const { Nanofluid } = await import("../src/components/ui/Nanofluid.tsx");
 const { ElectricArc } = await import("../src/components/ui/ElectricArc.tsx");
 const { ToxicLab } = await import("../src/components/ui/ToxicLab.tsx");
 const { AnonFluid } = await import("../src/components/ui/AnonFluid.tsx");
+const { AuroraCurtain } = await import("../src/components/ui/AuroraCurtain.tsx");
+const { TopoLidar } = await import("../src/components/ui/TopoLidar.tsx");
+const { ScopeTrace } = await import("../src/components/ui/ScopeTrace.tsx");
+const { MagmaEmbers } = await import("../src/components/ui/MagmaEmbers.tsx");
+const { SakuraDrift } = await import("../src/components/ui/SakuraDrift.tsx");
+const { TokyoRain } = await import("../src/components/ui/TokyoRain.tsx");
+const { HellfireEmbers } = await import("../src/components/ui/HellfireEmbers.tsx");
 const { Panel } = await import("../src/components/ui/Panel.tsx");
 const { Toggle } = await import("../src/components/ui/Toggle.tsx");
 const { Checkbox } = await import("../src/components/ui/Checkbox.tsx");
@@ -416,6 +423,13 @@ const PRIMITIVES: Record<
     markup: /aria-hidden="true"[^>]*class="[^"]*pointer-events-none/,
   },
   "AbyssSpores.tsx": effectEntry(AbyssSpores),
+  "AuroraCurtain.tsx": effectEntry(AuroraCurtain),
+  "TopoLidar.tsx": effectEntry(TopoLidar),
+  "ScopeTrace.tsx": effectEntry(ScopeTrace),
+  "MagmaEmbers.tsx": effectEntry(MagmaEmbers),
+  "SakuraDrift.tsx": effectEntry(SakuraDrift),
+  "TokyoRain.tsx": effectEntry(TokyoRain),
+  "HellfireEmbers.tsx": effectEntry(HellfireEmbers),
   "HudSweep.tsx": effectEntry(HudSweep),
   "NeuralWeb.tsx": effectEntry(NeuralWeb),
   "NebulaFlow.tsx": effectEntry(NebulaFlow),

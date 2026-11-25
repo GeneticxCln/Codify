@@ -54,6 +54,20 @@ export const TINT_ROLES: Readonly<Record<string, string>> = {
   "--reagent-skin": "Bubble skin",
   "--fluid-bit": "The data",
   "--fluid-cursor": "Boundary cell",
+  "--aurora-mint": "Aurora curtain",
+  "--aurora-violet": "Polar glow",
+  "--lidar-line": "Contour lines",
+  "--lidar-scan": "Lidar sweep",
+  "--scope-trace": "Phosphor trace",
+  "--scope-grid": "Trigger channel",
+  "--magma-ember": "Molten embers",
+  "--magma-glow": "Caldera glow",
+  "--sakura-petal": "Blossom petals",
+  "--sakura-lantern": "Lantern light",
+  "--rain-streak": "Rain streaks",
+  "--rain-ripple": "Glass ripples",
+  "--hellfire-ember": "Hellfire embers",
+  "--hellfire-rune": "Cursed runes",
 };
 
 /** One titled group of colour tokens for the Appearance customiser. */

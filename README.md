@@ -19,12 +19,12 @@ It plans, you approve, and every change is verified and committed on its own.
 <a href="docs/media/demo.mp4">
   <picture>
     <source srcset="docs/media/demo.webp" type="image/webp">
-    <img src="docs/media/demo-poster.png" alt="Codify running in the OLED CMatrix theme: Plan Only mode is chosen, a request to add a function and a test is planned, approved with Start, then written, verified with pytest, reviewed and committed one step at a time" width="920">
+    <img src="docs/media/demo-poster.png" alt="Codify running in the Diablo theme: Plan Only mode is chosen, a request to add farewell(name) and unit tests is planned, approved with Start, then implemented, verified inside a bubblewrap sandbox, reviewed, committed step by step, and previewed in Appearance settings" width="920">
   </picture>
 </a>
 
-<sub><b>The real app in the OLED CMatrix theme</b>, from choosing <b>Plan Only</b> to two verified commits. Parts of the
-animation are sped up and carry a speed badge; <a href="docs/media/demo.mp4">the full-length MP4</a> is real time.
+<sub><b>The real app in the Diablo theme</b>, from choosing <b>Plan Only</b> to two verified commits and a live look at
+<b>Settings → Appearance</b>. Click for <a href="docs/media/demo.mp4">the full MP4 recording</a>.
 <a href="#-see-it-work">What is real in this clip, and what is scripted</a>.</sub>
 
 <br>
@@ -54,7 +54,7 @@ committed on its own with only the files it wrote, and every stage streams live 
   response. Run it on a local model, or point any role at a hosted one.
 - **Your models, discovered live.** Twelve providers are built in (Anthropic, OpenAI, Google, DeepSeek, OpenRouter,
   Groq, NVIDIA, OpenCode, Kilo Gateway, AxForge, Runcrate and Ollama), any OpenAI-compatible or Ollama-style endpoint can be added, and Codify ships no model list.
-- **Nineteen themes**, shown in the [slideshow below](#-appearance) and swapped at runtime with no rebuild.
+- **Twenty-six themes**, shown in the [animated showcase below](#-appearance), swapped at runtime with no rebuild, and deeply customisable down to every surface, text, accent, status tone, and backdrop colour.
 
 Everything below is specified in [`docs/`](docs/00-codify-architecture-overview.md). That set is the source of
 truth; this file is the tour.
@@ -63,24 +63,23 @@ truth; this file is the tour.
 
 ## 🎬 See it work
 
-The clip is one request, start to finish, in the **OLED CMatrix** theme:
+The clip is one request, start to finish, in the **Diablo** theme (plus a quick stop in **Settings → Appearance**):
 
 1. **Choose a mode.** *Plan Only* shows the plan and waits for you.
 2. **Ask** in plain language: *"Add a farewell(name) function to greeter.py, and test it."*
 3. **The gate rules, the librarian reads.** It opens `greeter.py` and `test_greeter.py`, and reports what it
    actually opened.
 4. **A two-step plan**, and nothing has been written yet.
-5. **Start.** For each step the fixer writes, the verifier runs `python -m pytest -q` in the sandbox, the critic
-   reviews, and the scribe commits.
+5. **Start.** For each step the fixer writes, the verifier runs the project tests inside the bubblewrap sandbox, the
+   critic reviews, and the scribe commits.
 6. **Two commits**, `feat(greeter): add farewell()` and `test(greeter): cover farewell()`, each touching only its
-   own file.
+   own file — followed by a quick live theme switch in **Settings → Appearance**.
 
-**What is real, and what is not.** It was recorded from the browser build of the UI (the same React app the
-desktop shell loads), against a real engine on a scratch state directory: the gate, the conductor loop, the
-write gate, the sandbox running pytest, the scoped git commits and every event on screen are the real thing.
-**The model's replies are scripted**, so the clip is reproducible offline and takes no API key; a real model
-decides differently and takes longer. The MP4 is real time and unedited. The animation above is the same recording with
-the waiting cut down, and every sped-up stretch carries a badge.
+**What is real, and what is not.** It was recorded from the production browser build of the UI (the same React app the
+desktop shell embeds), against a real engine on a scratch state directory: the gate, the conductor loop, the
+write gate, the bubblewrap sandbox running the tests, the scoped git commits, the redesigned logo, and the live animated
+backdrops are the real thing. **The model's replies are scripted**, so the clip is reproducible offline and takes no
+API key; a real model decides differently and takes longer.
 
 ---
 
@@ -261,19 +260,19 @@ the provider's live catalog, and ranks cause above symptom.
 
 ## 🎨 Appearance
 
-Nineteen themes ship in the box, and choosing one is a **runtime swap, not a rebuild**: a theme is a map of CSS
+26 themes ship in the box, and choosing one is a **runtime swap, not a rebuild**: a theme is a map of CSS
 custom properties, so the whole app repaints with no component change and no restart.
 
 <p align="center">
-  <img src="docs/media/themes.gif" alt="A slideshow of all nineteen themes, one at a time, each captioned with its name and its place in the order. Seventeen have an animated backdrop of their own; Codify Dark and Still ship none." width="900">
+  <img src="docs/media/themes.gif" alt="An animated showcase of all 26 Codify themes in order, each with a live caption bar. 24 of them carry animated backdrops (including Aurora Borealis, Topographic Lidar, Oscilloscope CRT, Volcanic Obsidian, Sakura Midnight, Tokyo Rain, and Diablo); Codify Dark and Still ship no canvas at all." width="900">
 </p>
 
-<sub>All nineteen, one slide each, in the order of the table below: seventeen of them with an animated backdrop of their own, and two (<b>Codify Dark</b> and <b>Still</b>) that ship no canvas at all. Each slide is one frame of the real app on a finished goal (the browser build, with a scripted model), so a backdrop is caught mid-motion. <b>OLED CMatrix</b> is the pure-black one with the green rain, and the one in the clip above.</sub>
+<sub>All 26 themes in the order of the table below: 24 of them with an animated backdrop of their own that accelerates while a run is in flight, and two (<b>Codify Dark</b> and <b>Still</b>) that ship no canvas at all. Captured live from the real app on a finished two-step verified goal.</sub>
 
 | Theme | What it is |
 |---|---|
 | **Codify Dark** | The default contract: blue-grey surfaces, green reserved for status. No canvas. |
-| **OLED CMatrix** | Pure black, with the rain drawn in `#003300`: the clip at the top of this page. |
+| **OLED CMatrix** | Pure black, with the rain drawn in `#003300`. |
 | **Cyberpunk Neon** | Violet-black, a neon horizon grid and a banded sun in cyan and magenta, under a CRT veil. |
 | **Neural Constellation** | A slow web of nodes that brightens and pulses while the agent is working. |
 | **Cyberpunk HUD** | Amber instrumentation: corner brackets, two slow radar sweeps, a tick ladder. |
@@ -291,15 +290,21 @@ custom properties, so the whole app repaints with no component change and no res
 | **Electric Arc** | Ink-blue and a lightning-white core. Arcs strike down both gutters, fork, and go out as fast as they came. |
 | **Toxic Lab** | A fume hood at 3am. Reagent-green bubbles climb the gutters, wobble, and burst; failure is the amber the hazard tape is. |
 | **Anon Fluid** | Green on black and no name on it. Data runs sideways through the gutters as a liquid column, and a run in flight shears it into blocks. |
+| **Aurora Borealis** | Arctic navy and frosted slate, framed by rippling mint and polar-violet aurora curtains along the edges. |
+| **Topographic Lidar** | Matte dark olive-charcoal with morphing elevation contour curves and a sweeping copper lidar scan bar. |
+| **Oscilloscope CRT** | Deep phosphor-glass dark green with live Tektronix teal harmonic traces and trigger-amber graticules. |
+| **Volcanic Obsidian** | Basalt black and smoky ash warmed by rising molten embers and golden caldera updrafts. |
+| **Sakura Midnight** | Sumi obsidian and muted plum with drifting cherry-blossom petals catching soft warm lantern light. |
+| **Tokyo Rain** | Rainy midnight slate with diagonal neon rain streaks and expanding sodium-streetlight ripples on glass. |
+| **Diablo** | Gothic Sanctuary crypt black and iron-obsidian lit by rising crimson hellfire embers, abyssal fissures, and cursed gold runes — featured in the demo clip above. |
 
 Four constraints hold every one of them:
 
-- **A theme is data.** It publishes CSS variables; a backdrop asks whether the active theme published them. The
-  last theme added was five lines of tokens and no new code.
+- **A theme is data.** It publishes CSS variables; a backdrop asks whether the active theme published them.
 - **One clock, one budget.** Every effect runs through `useAtmosphereCanvas`, which owns the canvas size cap, a
-  30 FPS accumulator, and exactly one static frame under `prefers-reduced-motion`.
-- **Decoration is never under the words being read.** Content surfaces stay opaque, and the canvas fades itself
-  out at its edges — painted into its own pixels, not a CSS mask — before it reaches the chrome.
+  bounded frame governor, and exactly one static frame under `prefers-reduced-motion` (repainted live on colour edits).
+- **Decoration is never under the words being read.** Content surfaces stay opaque, gutter themes keep the middle 50%
+  clear of marks, and the canvas fades itself out at its edges — painted into its own pixels, not a CSS mask.
 - **A theme may restate the status tones; it may not renegotiate them.** All six or none, and `danger` and
   `warning` stay on the warm arc: a user who learned that orange means *needs attention* was owed that much.
 
@@ -307,10 +312,11 @@ The whole window also **scales**: Settings → Appearance → *UI scale* (100 to
 `Ctrl +`, `Ctrl -` and `Ctrl 0` from the keyboard. The type ramp and spacing are rem, so text, icons and padding
 grow together, and the xterm terminal follows too.
 
-Any theme can be **recoloured without being forked**: the Appearance pane offers each theme's accent plus the
-weather variables its own backdrop reads, labelled with what they draw. A proposal is **clamped, not accepted
-blindly**: it keeps its hue and saturation and has its lightness moved until it clears 4.5:1, and a colour that
-cannot be made readable is refused outright. Schemes export and import as one readable JSON file.
+Every theme supports **deep colour customisation without forking**: Settings → Appearance includes a themed in-app HSV
+and hex colour picker for all **14 core UI tokens** (window background, panel/elevated surfaces, borders, primary/secondary/muted
+text, interface accent, and all 5 status tones) plus every backdrop variable the active theme draws. Surfaces and borders
+apply verbatim, while text, accent, status tones, and backdrop art pass through a lightness contrast guard (preserving hue
+and saturation for WCAG AA legibility), with live undo history and JSON scheme export/import.
 
 One surface is not reachable by swapping custom properties, and it is the honest exception to *the whole app*:
 xterm.js paints its own canvas and takes concrete colour strings. The one surface CSS cannot reach is the one that

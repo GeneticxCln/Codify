@@ -299,7 +299,9 @@ import {
 } from "lucide-react";
 import { notableStderrLines } from "./engineLog";
 import { RainBackdrop } from "./components/ui/RainBackdrop";
-import { WeatherBackdrop } from "./components/ui/WeatherBackdrop";
+const WeatherBackdrop = lazy(() =>
+  import("./components/ui/WeatherBackdrop").then((m) => ({ default: m.WeatherBackdrop })),
+);
 import {
   ENGINE_STATE_CLASSES,
   ENGINE_STATE_COPY,
@@ -4468,7 +4470,9 @@ export const App: React.FC = () => {
           with the Stop button. DESIGN.md §7 is what admits this — the motion
           carries the run's state, which is the difference between feedback and
           decoration, and the two are not the same thing. */}
-      <WeatherBackdrop active={canStop} />
+      <Suspense fallback={null}>
+        <WeatherBackdrop active={canStop} />
+      </Suspense>
       {/* Top Header Bar */}
       <header className="relative bg-codify-chrome border-b border-codify-border px-3 lg:px-4 py-2.5 flex items-center gap-2 lg:gap-3 z-10 shrink-0 min-w-0 overflow-x-hidden">
         <div className="flex items-center gap-2 lg:gap-3 shrink-0">

@@ -175,6 +175,22 @@ export const MANAGED_VARS = [
   "--reagent-skin",
   "--fluid-bit",
   "--fluid-cursor",
+  // Seven more namespaces: Aurora Borealis, Topographic Lidar, Oscilloscope
+  // CRT, Volcanic Obsidian, Sakura Midnight, Tokyo Rain, and Diablo.
+  "--aurora-mint",
+  "--aurora-violet",
+  "--lidar-line",
+  "--lidar-scan",
+  "--scope-trace",
+  "--scope-grid",
+  "--magma-ember",
+  "--magma-glow",
+  "--sakura-petal",
+  "--sakura-lantern",
+  "--rain-streak",
+  "--rain-ripple",
+  "--hellfire-ember",
+  "--hellfire-rune",
   "--sun-core-rgb",
   "--sun-edge-rgb",
   "--organ-node-rgb",
@@ -192,6 +208,20 @@ export const MANAGED_VARS = [
   "--reagent-skin-rgb",
   "--fluid-bit-rgb",
   "--fluid-cursor-rgb",
+  "--aurora-mint-rgb",
+  "--aurora-violet-rgb",
+  "--lidar-line-rgb",
+  "--lidar-scan-rgb",
+  "--scope-trace-rgb",
+  "--scope-grid-rgb",
+  "--magma-ember-rgb",
+  "--magma-glow-rgb",
+  "--sakura-petal-rgb",
+  "--sakura-lantern-rgb",
+  "--rain-streak-rgb",
+  "--rain-ripple-rgb",
+  "--hellfire-ember-rgb",
+  "--hellfire-rune-rgb",
 ] as const;
 
 export type ManagedVar = (typeof MANAGED_VARS)[number];
@@ -897,6 +927,202 @@ export const ANON_FLUID: AppearanceTheme = {
 };
 
 /**
+ * Aurora Borealis: arctic night sky with frosted slate panels and undulating
+ * polar light curtains along the gutters.
+ */
+export const AURORA_BOREALIS: AppearanceTheme = {
+  id: "aurora-borealis",
+  label: "Aurora Borealis",
+  description:
+    "Arctic navy and frosted slate, framed by rippling mint and polar-violet aurora curtains along the edges.",
+  tokens: {
+    "--codify-bg": "#050a12",
+    "--codify-surface": "#0a1322",
+    "--codify-raised": "#111f35",
+    "--codify-border": "#1b304d",
+    "--codify-border-strong": "#4a78ad",
+    "--codify-primary": "#e8f8f5",
+    "--codify-secondary": "#c2e3e8",
+    "--codify-muted": "#7fa6b8",
+    "--aurora-mint": "#4ef2c2",
+    "--aurora-violet": "#a78bfa",
+  },
+  swatch: [
+    { v: "--codify-bg" },
+    { v: "--aurora-mint" },
+    { v: "--aurora-violet" },
+  ],
+};
+
+/**
+ * Topographic Lidar: dark olive-charcoal survey console with shifting
+ * elevation contours and a sweeping copper lidar scan line in the margins.
+ */
+export const TOPOGRAPHIC_LIDAR: AppearanceTheme = {
+  id: "topographic-lidar",
+  label: "Topographic Lidar",
+  description:
+    "Matte dark olive-charcoal with morphing elevation contour bands and a sweeping copper lidar scan.",
+  tokens: {
+    "--codify-bg": "#070c0a",
+    "--codify-surface": "#0d1713",
+    "--codify-raised": "#14231d",
+    "--codify-border": "#21382f",
+    "--codify-border-strong": "#4d806b",
+    "--codify-primary": "#eaf5ef",
+    "--codify-secondary": "#c5dfd2",
+    "--codify-muted": "#82a898",
+    "--lidar-line": "#7ee8a8",
+    "--lidar-scan": "#f4a261",
+  },
+  swatch: [
+    { v: "--codify-bg" },
+    { v: "--lidar-line" },
+    { v: "--lidar-scan" },
+  ],
+};
+
+/**
+ * Oscilloscope CRT: vintage Tektronix phosphor glass with dual harmonic
+ * sine traces and amber trigger graticules in the gutters.
+ */
+export const OSCILLOSCOPE_CRT: AppearanceTheme = {
+  id: "oscilloscope-crt",
+  label: "Oscilloscope CRT",
+  description:
+    "Deep phosphor-glass dark green with live Tektronix teal waveform traces and trigger-amber graticules.",
+  tokens: {
+    "--codify-bg": "#050a08",
+    "--codify-surface": "#091410",
+    "--codify-raised": "#10211b",
+    "--codify-border": "#1a382e",
+    "--codify-border-strong": "#3e856d",
+    "--codify-primary": "#e4fff6",
+    "--codify-secondary": "#a8ebd4",
+    "--codify-muted": "#72ad99",
+    "--scope-trace": "#2ef2c4",
+    "--scope-grid": "#ffbe55",
+  },
+  swatch: [
+    { v: "--codify-bg" },
+    { v: "--scope-trace" },
+    { v: "--scope-grid" },
+  ],
+};
+
+/**
+ * Volcanic Obsidian: dark basalt and smoky ash panels with glowing molten
+ * embers and golden updrafts rising from the bottom corners.
+ */
+export const VOLCANIC_OBSIDIAN: AppearanceTheme = {
+  id: "volcanic-obsidian",
+  label: "Volcanic Obsidian",
+  description:
+    "Basalt black and smoky ash warmed by rising molten embers and golden caldera drafts.",
+  tokens: {
+    "--codify-bg": "#0a0706",
+    "--codify-surface": "#140e0c",
+    "--codify-raised": "#1f1613",
+    "--codify-border": "#36241e",
+    "--codify-border-strong": "#9c634f",
+    "--codify-primary": "#fff1e8",
+    "--codify-secondary": "#e8c9ba",
+    "--codify-muted": "#b89382",
+    "--magma-ember": "#ff7a3d",
+    "--magma-glow": "#ffc14d",
+  },
+  swatch: [
+    { v: "--codify-bg" },
+    { v: "--magma-ember" },
+    { v: "--magma-glow" },
+  ],
+};
+
+/**
+ * Sakura Midnight: sumi-ink obsidian and muted plum surfaces framed by sparse
+ * cherry-blossom petals drifting in warm lantern light.
+ */
+export const SAKURA_MIDNIGHT: AppearanceTheme = {
+  id: "sakura-midnight",
+  label: "Sakura Midnight",
+  description:
+    "Sumi obsidian and muted plum with drifting cherry-blossom petals catching soft lantern light.",
+  tokens: {
+    "--codify-bg": "#0a070d",
+    "--codify-surface": "#130e19",
+    "--codify-raised": "#1e1626",
+    "--codify-border": "#32243f",
+    "--codify-border-strong": "#8866a8",
+    "--codify-primary": "#fcf0f6",
+    "--codify-secondary": "#e3cce0",
+    "--codify-muted": "#ad91b3",
+    "--sakura-petal": "#ff9ec7",
+    "--sakura-lantern": "#ffd27d",
+  },
+  swatch: [
+    { v: "--codify-bg" },
+    { v: "--sakura-petal" },
+    { v: "--sakura-lantern" },
+  ],
+};
+
+/**
+ * Tokyo Rain: rainy midnight asphalt with diagonal neon-cyan rain streaks and
+ * expanding sodium-streetlight ripples along the edges.
+ */
+export const TOKYO_RAIN: AppearanceTheme = {
+  id: "tokyo-rain",
+  label: "Tokyo Rain",
+  description:
+    "Rainy midnight slate with diagonal neon rain streaks and warm sodium-streetlight ripples on glass.",
+  tokens: {
+    "--codify-bg": "#070a10",
+    "--codify-surface": "#0e141f",
+    "--codify-raised": "#161f2e",
+    "--codify-border": "#243248",
+    "--codify-border-strong": "#54729e",
+    "--codify-primary": "#eef4ff",
+    "--codify-secondary": "#c8d6eb",
+    "--codify-muted": "#8b9eb8",
+    "--rain-streak": "#5ce1ff",
+    "--rain-ripple": "#ffba52",
+  },
+  swatch: [
+    { v: "--codify-bg" },
+    { v: "--rain-streak" },
+    { v: "--rain-ripple" },
+  ],
+};
+
+/**
+ * Diablo: gothic Sanctuary crypt black and iron-obsidian panels lit by rising
+ * crimson hellfire embers and cursed cathedral-gold rune sparks.
+ */
+export const DIABLO: AppearanceTheme = {
+  id: "diablo",
+  label: "Diablo",
+  description:
+    "Gothic Sanctuary crypt black and iron-obsidian lit by crimson hellfire embers and cursed gold runes.",
+  tokens: {
+    "--codify-bg": "#090405",
+    "--codify-surface": "#13080a",
+    "--codify-raised": "#1e0d10",
+    "--codify-border": "#38171c",
+    "--codify-border-strong": "#a84a56",
+    "--codify-primary": "#faf0ea",
+    "--codify-secondary": "#e6c8c3",
+    "--codify-muted": "#b88a86",
+    "--hellfire-ember": "#ff595e",
+    "--hellfire-rune": "#f2b84b",
+  },
+  swatch: [
+    { v: "--codify-bg" },
+    { v: "--hellfire-ember" },
+    { v: "--hellfire-rune" },
+  ],
+};
+
+/**
  * The six tone variables a theme may repaint: the one interactive hue, and the
  * five status tones. Named rather than derived because the shape of the answer
  * is a decision, and `Object.keys(tones)[0]` would not be one.
@@ -1145,6 +1371,62 @@ export const THEME_TONES: Readonly<
     "--codify-danger": "#ff3b30",
     "--codify-neutral": "#5f8a72",
   },
+  [AURORA_BOREALIS.id]: {
+    "--codify-accent": "#4ef2c2",
+    "--codify-info": "#68c8ff",
+    "--codify-success": "#5ef29e",
+    "--codify-warning": "#ffd166",
+    "--codify-danger": "#ff6b7a",
+    "--codify-neutral": "#8aa3b8",
+  },
+  [TOPOGRAPHIC_LIDAR.id]: {
+    "--codify-accent": "#7ee8a8",
+    "--codify-info": "#7dd3fc",
+    "--codify-success": "#6ee7b7",
+    "--codify-warning": "#f4b860",
+    "--codify-danger": "#ff6b57",
+    "--codify-neutral": "#88a89c",
+  },
+  [OSCILLOSCOPE_CRT.id]: {
+    "--codify-accent": "#2ef2c4",
+    "--codify-info": "#66e0ff",
+    "--codify-success": "#52f290",
+    "--codify-warning": "#ffbe55",
+    "--codify-danger": "#ff5e5e",
+    "--codify-neutral": "#7da89a",
+  },
+  [VOLCANIC_OBSIDIAN.id]: {
+    "--codify-accent": "#ff8447",
+    "--codify-info": "#7cc6ff",
+    "--codify-success": "#6ee7a8",
+    "--codify-warning": "#ffc14d",
+    "--codify-danger": "#ff5c5c",
+    "--codify-neutral": "#a89085",
+  },
+  [SAKURA_MIDNIGHT.id]: {
+    "--codify-accent": "#ff9ec7",
+    "--codify-info": "#8cc8ff",
+    "--codify-success": "#74e8b4",
+    "--codify-warning": "#ffd27d",
+    "--codify-danger": "#ff6675",
+    "--codify-neutral": "#a48eab",
+  },
+  [TOKYO_RAIN.id]: {
+    "--codify-accent": "#5ce1ff",
+    "--codify-info": "#7ab8ff",
+    "--codify-success": "#5ce6a6",
+    "--codify-warning": "#ffba52",
+    "--codify-danger": "#ff636e",
+    "--codify-neutral": "#8c9db5",
+  },
+  [DIABLO.id]: {
+    "--codify-accent": "#ff6368",
+    "--codify-info": "#8ab8ff",
+    "--codify-success": "#6ee39e",
+    "--codify-warning": "#f2b84b",
+    "--codify-danger": "#ff4d4d",
+    "--codify-neutral": "#ad8c8a",
+  },
 };
 
 
@@ -1181,6 +1463,13 @@ export const THEMES: ReadonlyArray<AppearanceTheme> = [
   ELECTRIC_ARC,
   TOXIC_LAB,
   ANON_FLUID,
+  AURORA_BOREALIS,
+  TOPOGRAPHIC_LIDAR,
+  OSCILLOSCOPE_CRT,
+  VOLCANIC_OBSIDIAN,
+  SAKURA_MIDNIGHT,
+  TOKYO_RAIN,
+  DIABLO,
 ].map(withTones);
 
 export const DEFAULT_THEME_ID = CODIFY_DARK.id;
@@ -1244,6 +1533,13 @@ export const ATMOSPHERE_TRIGGERS: ReadonlyArray<{
   { trigger: "--arc-core", themes: [ELECTRIC_ARC.id] },
   { trigger: "--reagent", themes: [TOXIC_LAB.id] },
   { trigger: "--fluid-bit", themes: [ANON_FLUID.id] },
+  { trigger: "--aurora-mint", themes: [AURORA_BOREALIS.id] },
+  { trigger: "--lidar-line", themes: [TOPOGRAPHIC_LIDAR.id] },
+  { trigger: "--scope-trace", themes: [OSCILLOSCOPE_CRT.id] },
+  { trigger: "--magma-ember", themes: [VOLCANIC_OBSIDIAN.id] },
+  { trigger: "--sakura-petal", themes: [SAKURA_MIDNIGHT.id] },
+  { trigger: "--rain-streak", themes: [TOKYO_RAIN.id] },
+  { trigger: "--hellfire-ember", themes: [DIABLO.id] },
 ];
 
 export function themeById(id: string): AppearanceTheme {

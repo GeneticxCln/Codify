@@ -329,6 +329,40 @@ theme — the fifth table above sets the rule and this one follows it:
 | Anon Fluid | `--fluid-bit` | `#00ff9c` | the dashes, and the trigger |
 | | `--fluid-cursor` | `#a8ffd8` | the one dash in eleven that marks a boundary |
 
+**Seven more atmospheric themes, all gutter-framed.** Each publishes its own
+two-colour namespace, stays strictly in the left and right margins so the
+transcript stays clear, and responds to an active run:
+
+| Token | Aurora Borealis | Topographic Lidar | Oscilloscope CRT | Volcanic Obsidian | Sakura Midnight | Tokyo Rain | Diablo |
+|---|---|---|---|---|---|---|---|
+| `bg` | `#050a12` | `#070c0a` | `#050a08` | `#0a0706` | `#0a070d` | `#070a10` | `#090405` |
+| `surface` | `#0a1322` | `#0d1713` | `#091410` | `#140e0c` | `#130e19` | `#0e141f` | `#13080a` |
+| `raised` | `#111f35` | `#14231d` | `#10211b` | `#1f1613` | `#1e1626` | `#161f2e` | `#1e0d10` |
+| `border` | `#1b304d` | `#21382f` | `#1a382e` | `#36241e` | `#32243f` | `#243248` | `#38171c` |
+| `border-strong` | `#4a78ad` | `#4d806b` | `#3e856d` | `#9c634f` | `#8866a8` | `#54729e` | `#a84a56` |
+| `primary` | `#e8f8f5` | `#eaf5ef` | `#e4fff6` | `#fff1e8` | `#fcf0f6` | `#eef4ff` | `#faf0ea` |
+| `secondary` | `#c2e3e8` | `#c5dfd2` | `#a8ebd4` | `#e8c9ba` | `#e3cce0` | `#c8d6eb` | `#e6c8c3` |
+| `muted` | `#7fa6b8` | `#82a898` | `#72ad99` | `#b89382` | `#ad91b3` | `#8b9eb8` | `#b88a86` |
+
+Their weather variables:
+
+| Theme | Variable | Value | Used for |
+|---|---|---|---|
+| Aurora Borealis | `--aurora-mint` | `#4ef2c2` | primary undulating aurora ribbons, and the trigger |
+| | `--aurora-violet` | `#a78bfa` | secondary polar-violet upper shimmer |
+| Topographic Lidar | `--lidar-line` | `#7ee8a8` | morphing elevation contour curves, and the trigger |
+| | `--lidar-scan` | `#f4a261` | sweeping copper lidar scan bar and elevation ticks |
+| Oscilloscope CRT | `--scope-trace` | `#2ef2c4` | primary Tektronix phosphor sine trace, and the trigger |
+| | `--scope-grid` | `#ffbe55` | secondary harmonic trace and graticule ticks |
+| Volcanic Obsidian | `--magma-ember` | `#ff7a3d` | rising molten embers, and the trigger |
+| | `--magma-glow` | `#ffc14d` | incandescent ember cores and thermal sparks |
+| Sakura Midnight | `--sakura-petal` | `#ff9ec7` | drifting cherry-blossom petals, and the trigger |
+| | `--sakura-lantern` | `#ffd27d` | warm distant lantern motes |
+| Tokyo Rain | `--rain-streak` | `#5ce1ff` | diagonal neon rain streaks, and the trigger |
+| | `--rain-ripple` | `#ffba52` | expanding concentric streetlight ripples on glass |
+| Diablo | `--hellfire-ember` | `#ff595e` | rising crimson hellfire embers and ash, and the trigger |
+| | `--hellfire-rune` | `#f2b84b` | pulsing gothic ember fissures and cursed gold rune sparks |
+
 **Each one is a different axis, because a second column of falling glyphs is
 not a new theme.** The OLED rain falls, so `Anon Fluid` runs *sideways* along
 the gutters and leaves the vertical axis to the transcript — which is also the

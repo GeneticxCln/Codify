@@ -280,6 +280,34 @@ const WEATHER_ROLES: Readonly<Record<string, Readonly<Record<string, { role: Rol
     "--fluid-bit": { role: "stroke", why: "the data stream" },
     "--fluid-cursor": { role: "stroke", why: "the one dash in eleven that marks a boundary" },
   },
+  "aurora-borealis": {
+    "--aurora-mint": { role: "stroke", why: "the primary undulating aurora curtains" },
+    "--aurora-violet": { role: "stroke", why: "the secondary polar-violet shimmer curtains" },
+  },
+  "topographic-lidar": {
+    "--lidar-line": { role: "stroke", why: "the elevation contour curves" },
+    "--lidar-scan": { role: "stroke", why: "the sweeping lidar scan bar and intersection pings" },
+  },
+  "oscilloscope-crt": {
+    "--scope-trace": { role: "stroke", why: "the primary phosphor harmonic waveform trace" },
+    "--scope-grid": { role: "stroke", why: "the secondary trigger trace and graticule ticks" },
+  },
+  "volcanic-obsidian": {
+    "--magma-ember": { role: "stroke", why: "the rising molten embers" },
+    "--magma-glow": { role: "stroke", why: "the incandescent ember cores" },
+  },
+  "sakura-midnight": {
+    "--sakura-petal": { role: "stroke", why: "the drifting cherry-blossom petals" },
+    "--sakura-lantern": { role: "stroke", why: "the warm distant lantern motes" },
+  },
+  "tokyo-rain": {
+    "--rain-streak": { role: "stroke", why: "the diagonal neon rain streaks" },
+    "--rain-ripple": { role: "stroke", why: "the expanding sodium-streetlight ripples" },
+  },
+  diablo: {
+    "--hellfire-ember": { role: "stroke", why: "the rising crimson hellfire embers and fissures" },
+    "--hellfire-rune": { role: "stroke", why: "the cursed gold diamond rune sparks" },
+  },
 };
 
 /** The weather variables a theme publishes, with the ones that are not colours dropped. */

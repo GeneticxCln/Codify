@@ -40,7 +40,7 @@ function hsl(hex: string): { h: number; c: number } {
 }
 
 test("there is an ink for every tone, in every theme", () => {
-  assert.equal(THEMES.length, 19);
+  assert.equal(THEMES.length, 26);
   for (const theme of THEMES) {
     const inks = deriveToneInks(tokensOf(theme));
     for (const tone of INK_TONES) {
